@@ -230,7 +230,8 @@ impl Daemon {
                 reason: format!("failed to reload config: {e}"),
             }
         })?;
-        self.replication = config.replication;
+        let runtime = crate::daemon_runtime_config_from_config(&config);
+        self.replication = runtime.replication;
         Ok(())
     }
 }

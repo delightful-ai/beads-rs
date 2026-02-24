@@ -143,9 +143,10 @@ impl Daemon {
                 reason: format!("failed to reload config: {e}"),
             }
         })?;
+        let runtime = crate::daemon_runtime_config_from_config(&config);
 
         let old_count = self.checkpoint_groups.len();
-        self.checkpoint_groups = config.checkpoint_groups;
+        self.checkpoint_groups = runtime.checkpoint_groups;
         let new_count = self.checkpoint_groups.len();
 
         tracing::info!(

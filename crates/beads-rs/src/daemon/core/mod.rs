@@ -57,16 +57,19 @@ use super::wal::{
     WalAppend, WalIndex, WalIndexError, WalIndexTxnProvider, WalReplayError, open_segment_reader,
 };
 use beads_daemon::broadcast::BroadcastEvent;
+use beads_daemon::config::{
+    CheckpointGroupConfig as RuntimeCheckpointGroupConfig, CheckpointPolicy, DaemonRuntimeConfig,
+    GitSyncPolicy, ReplicationConfig as RuntimeReplicationConfig,
+};
 use beads_daemon::git_lane::{
     ClockSkewRecord, DivergenceRecord, FetchErrorRecord, ForcePushRecord, GitLaneState,
 };
+use beads_daemon::layout::DaemonLayout;
 use beads_daemon::remote::RemoteUrl;
 use beads_daemon::scheduler::SyncScheduler;
 
 use crate::compat::ExportContext;
-use crate::config::CheckpointGroupConfig as ConfigCheckpointGroup;
 use crate::core::error::details as error_details;
-use crate::paths;
 
 #[derive(Debug, Error)]
 enum CheckpointTreeError {
@@ -98,56 +101,6 @@ use crate::git::checkpoint::{
 const LOAD_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_REPL_MAX_CONNECTIONS: usize = 32;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum GitSyncPolicy {
-    Enabled,
-    Disabled,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum CheckpointPolicy {
-    Enabled,
-    Disabled,
-}
-
-impl GitSyncPolicy {
-    fn from_env() -> Self {
-        if env_flag_truthy("BD_TEST_DISABLE_GIT_SYNC") {
-            Self::Disabled
-        } else {
-            Self::Enabled
-        }
-    }
-
-    pub(crate) fn allows_sync(self) -> bool {
-        matches!(self, Self::Enabled)
-    }
-}
-
-impl CheckpointPolicy {
-    fn from_env() -> Self {
-        if env_flag_truthy("BD_TEST_DISABLE_CHECKPOINTS") {
-            Self::Disabled
-        } else {
-            Self::Enabled
-        }
-    }
-
-    pub(crate) fn allows_checkpoints(self) -> bool {
-        matches!(self, Self::Enabled)
-    }
-}
-
-fn env_flag_truthy(name: &str) -> bool {
-    let Ok(raw) = std::env::var(name) else {
-        return false;
-    };
-    !matches!(
-        raw.trim().to_ascii_lowercase().as_str(),
-        "0" | "false" | "no" | "n" | "off"
-    )
-}
-
 #[derive(Clone, Debug)]
 pub(crate) struct ParsedMutationMeta {
     pub(crate) namespace: NamespaceId,
@@ -173,6 +126,9 @@ impl From<Response> for HandleOutcome {
 ///
 /// Owns all state and coordinates between IPC, state mutations, and git sync.
 pub struct Daemon {
+    /// Filesystem layout injected by the host crate.
+    layout: DaemonLayout,
+
     /// Per-store runtime, keyed by StoreId.
     stores: BTreeMap<StoreId, StoreRuntime>,
     /// Per-store git/checkpoint lane state, keyed by StoreId.
@@ -205,9 +161,9 @@ pub struct Daemon {
     /// Checkpoint scheduling policy (test-only overrides).
     checkpoint_policy: CheckpointPolicy,
     /// Replication settings loaded from config (env overrides applied during load).
-    replication: crate::config::ReplicationConfig,
+    replication: RuntimeReplicationConfig,
     /// Default checkpoint group specs from config.
-    checkpoint_groups: BTreeMap<String, ConfigCheckpointGroup>,
+    checkpoint_groups: BTreeMap<String, RuntimeCheckpointGroupConfig>,
     /// Default namespace policies when namespaces.toml is missing.
     namespace_defaults: BTreeMap<NamespaceId, NamespacePolicy>,
 
@@ -238,25 +194,29 @@ impl ReplicationHandles {
 }
 
 impl Daemon {
-    /// Create a new daemon.
+    /// Create a daemon with default runtime config and current layout wiring.
     pub fn new(actor: ActorId) -> Self {
         Self::new_with_limits(actor, Limits::default())
     }
 
-    /// Create a new daemon with custom limits.
+    /// Create a daemon with custom limits and current layout wiring.
     pub fn new_with_limits(actor: ActorId, limits: Limits) -> Self {
-        let config = crate::config::Config {
+        let runtime = DaemonRuntimeConfig {
             limits,
-            ..Default::default()
+            git_sync_policy: GitSyncPolicy::from_env(),
+            checkpoint_policy: CheckpointPolicy::from_env(),
+            ..DaemonRuntimeConfig::default()
         };
-        Self::new_with_config(actor, config)
+        Self::new_with_runtime_config(actor, crate::daemon_layout_from_paths(), runtime)
     }
 
-    /// Create a new daemon with config settings.
-    pub fn new_with_config(actor: ActorId, config: crate::config::Config) -> Self {
+    /// Create a new daemon with explicit runtime wiring.
+    pub fn new_with_runtime_config(
+        actor: ActorId,
+        layout: DaemonLayout,
+        config: DaemonRuntimeConfig,
+    ) -> Self {
         let limits = config.limits.clone();
-        let git_sync_policy = GitSyncPolicy::from_env();
-        let checkpoint_policy = CheckpointPolicy::from_env();
         // Initialize Go-compat export worker (best effort - don't fail daemon startup)
         let export_worker = match ExportContext::new() {
             Ok(ctx) => Some(ExportWorkerHandle::start(ctx)),
@@ -267,6 +227,7 @@ impl Daemon {
         };
 
         Daemon {
+            layout,
             stores: BTreeMap::new(),
             git_lanes: BTreeMap::new(),
             store_caches: StoreCaches::new(),
@@ -280,11 +241,11 @@ impl Daemon {
             export_worker,
             export_pending: BTreeMap::new(),
             limits,
-            git_sync_policy,
-            checkpoint_policy,
-            replication: config.replication.clone(),
-            checkpoint_groups: config.checkpoint_groups.clone(),
-            namespace_defaults: config.namespace_defaults.namespaces.clone(),
+            git_sync_policy: config.git_sync_policy,
+            checkpoint_policy: config.checkpoint_policy,
+            replication: config.replication,
+            checkpoint_groups: config.checkpoint_groups,
+            namespace_defaults: config.namespace_defaults,
             repl_ingest_tx: None,
             repl_handles: BTreeMap::new(),
             shutting_down: false,
@@ -421,6 +382,7 @@ mod tests {
     };
     use crate::daemon::store::discovery::store_id_from_remote;
     use crate::git::sync::SyncOutcome;
+    use crate::paths;
     use beads_api::QueryResult;
     use std::collections::BTreeMap;
     use std::io::Write;
@@ -530,6 +492,7 @@ mod tests {
     fn insert_store(daemon: &mut Daemon, remote: &RemoteUrl) -> StoreId {
         let store_id = store_id_from_remote(remote);
         let runtime = StoreRuntime::open(
+            &daemon.layout,
             store_id,
             remote.clone(),
             WallClock::now().0,

@@ -11,7 +11,6 @@ use crate::core::error::details as error_details;
 use crate::core::{
     ErrorCode, ErrorPayload, IntoErrorPayload, ProtocolErrorCode, ReplicaId, StoreId, Transience,
 };
-use crate::paths;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreLockMeta {
@@ -82,11 +81,12 @@ impl StoreLock {
     where
         F: FnOnce(u32) -> LockPidState,
     {
-        ensure_dir(&paths::stores_dir())?;
-        let store_dir = paths::store_dir(store_id);
+        let layout = crate::daemon_layout_from_paths();
+        ensure_dir(&layout.stores_dir)?;
+        let store_dir = layout.store_dir(&store_id);
         ensure_dir(&store_dir)?;
 
-        let path = paths::store_lock_path(store_id);
+        let path = layout.store_lock_path(&store_id);
         reject_symlink(&path)?;
 
         let meta = StoreLockMeta::new(store_id, replica_id, started_at_ms, daemon_version);
@@ -220,7 +220,7 @@ impl Drop for StoreLock {
 }
 
 pub fn read_lock_meta(store_id: StoreId) -> Result<Option<StoreLockMeta>, StoreLockError> {
-    let path = paths::store_lock_path(store_id);
+    let path = crate::daemon_layout_from_paths().store_lock_path(&store_id);
     match fs::symlink_metadata(&path) {
         Ok(meta) if meta.file_type().is_symlink() => Err(StoreLockError::Symlink { path }),
         Ok(_) => Ok(Some(read_metadata(&path)?)),
@@ -234,7 +234,7 @@ pub fn read_lock_meta(store_id: StoreId) -> Result<Option<StoreLockMeta>, StoreL
 }
 
 pub fn remove_lock_file(store_id: StoreId) -> Result<bool, StoreLockError> {
-    let path = paths::store_lock_path(store_id);
+    let path = crate::daemon_layout_from_paths().store_lock_path(&store_id);
     match fs::symlink_metadata(&path) {
         Ok(meta) if meta.file_type().is_symlink() => Err(StoreLockError::Symlink { path }),
         Ok(_) => {
@@ -541,6 +541,7 @@ fn set_file_permissions(path: &Path, mode: u32) -> Result<(), StoreLockError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::paths;
     use tempfile::TempDir;
     use uuid::Uuid;
 

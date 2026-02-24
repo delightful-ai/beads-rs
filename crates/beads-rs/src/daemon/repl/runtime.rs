@@ -24,7 +24,6 @@ use crate::daemon::wal::{
     VerifiedRecord, WalIndex, WalIndexError, WalIndexTxnProvider, WalReadRange,
     open_segment_reader,
 };
-use crate::paths;
 use beads_daemon_core::repl::proto::WatermarkState;
 
 const DEFAULT_RETRY_AFTER_MS: u64 = 100;
@@ -181,7 +180,7 @@ pub struct WalRangeReader {
 impl WalRangeReader {
     pub fn new(store_id: StoreId, wal_index: Arc<dyn WalIndex>, limits: Limits) -> Self {
         Self {
-            store_dir: paths::store_dir(store_id),
+            store_dir: crate::daemon_layout_from_paths().store_dir(&store_id),
             wal_index,
             limits,
         }

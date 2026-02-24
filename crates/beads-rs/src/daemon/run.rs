@@ -7,11 +7,13 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use beads_daemon::config::DaemonRuntimeConfig;
+use beads_daemon::layout::DaemonLayout;
+
 use crate::Result;
 use crate::core::ActorId;
 use crate::daemon::IpcError;
 use crate::daemon::Request;
-use crate::daemon::ipc::ensure_socket_dir;
 use crate::daemon::server::{RequestMessage, handle_client, run_state_loop};
 use crate::daemon::{Daemon, GitResult, GitWorker, run_git_loop};
 
@@ -24,15 +26,34 @@ fn wake_listener(socket: &Path) {
 /// Run the daemon in the current process.
 ///
 /// This never returns on success until shutdown is requested by signal or IPC.
-pub fn run_daemon() -> Result<()> {
-    // Load config first so path overrides are available for socket directory.
-    let config = crate::config::load_or_init();
-    crate::paths::init_from_config(&config.paths);
+pub fn run_daemon(
+    actor: ActorId,
+    layout: DaemonLayout,
+    runtime_config: DaemonRuntimeConfig,
+) -> Result<()> {
+    let socket = layout.socket_path.clone();
+    let meta_path = socket.with_file_name("daemon.meta.json");
 
-    // Ensure socket directory exists with safe permissions.
-    let dir = ensure_socket_dir()?;
-    let socket = dir.join("daemon.sock");
-    let meta_path = dir.join("daemon.meta.json");
+    let socket_dir = socket.parent().ok_or_else(|| {
+        IpcError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "daemon socket path must have a parent directory",
+        ))
+    })?;
+    std::fs::create_dir_all(socket_dir).map_err(IpcError::from)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(socket_dir)
+            .map_err(IpcError::from)?
+            .permissions()
+            .mode()
+            & 0o777;
+        if mode != 0o700 {
+            std::fs::set_permissions(socket_dir, std::fs::Permissions::from_mode(0o700))
+                .map_err(IpcError::from)?;
+        }
+    }
 
     // If another daemon is already listening, exit quietly.
     if UnixStream::connect(&socket).is_ok() {
@@ -80,20 +101,10 @@ pub fn run_daemon() -> Result<()> {
     let (git_tx, git_rx) = crossbeam::channel::unbounded();
     let (git_result_tx, git_result_rx) = crossbeam::channel::unbounded::<GitResult>();
 
-    // Resolve actor ID (config/env override, fallback to username@hostname).
-    let actor = match config.defaults.actor.clone() {
-        Some(actor) => actor,
-        None => {
-            let username = whoami::username();
-            let hostname = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".into());
-            let default_actor = format!("{}@{}", username, hostname);
-            ActorId::new(default_actor)?
-        }
-    };
-    let limits = Arc::new(config.limits.clone());
+    let limits = Arc::new(runtime_config.limits.clone());
 
     // Create daemon core and git worker.
-    let daemon = Daemon::new_with_config(actor, config.clone());
+    let daemon = Daemon::new_with_runtime_config(actor, layout, runtime_config);
     let git_worker = GitWorker::new(git_result_tx, (*limits).clone());
 
     // Spawn state thread.

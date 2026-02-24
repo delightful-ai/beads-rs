@@ -18,6 +18,7 @@ impl Daemon {
 
         if !self.stores.contains_key(&store_id) {
             let open = StoreRuntime::open(
+                &self.layout,
                 store_id,
                 remote.clone(),
                 WallClock::now().0,
@@ -116,6 +117,7 @@ impl Daemon {
 
         if !self.stores.contains_key(&store_id) {
             let open = StoreRuntime::open(
+                &self.layout,
                 store_id,
                 remote.clone(),
                 WallClock::now().0,

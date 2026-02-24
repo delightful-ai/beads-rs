@@ -35,7 +35,7 @@ impl Daemon {
     }
 
     pub fn admin_store_unlock(&self, store_id: StoreId, force: bool) -> Response {
-        let lock_path = crate::paths::store_lock_path(store_id);
+        let lock_path = crate::daemon_layout_from_paths().store_lock_path(&store_id);
         let meta = match crate::daemon::store::lock::read_lock_meta(store_id) {
             Ok(meta) => meta,
             Err(err) => {
@@ -111,7 +111,7 @@ pub(crate) fn offline_store_fsck_output(
 pub(crate) fn offline_store_lock_info_output(
     store_id: StoreId,
 ) -> Result<AdminStoreLockInfoOutput, OpError> {
-    let lock_path = crate::paths::store_lock_path(store_id);
+    let lock_path = crate::daemon_layout_from_paths().store_lock_path(&store_id);
     let meta = crate::daemon::store::lock::read_lock_meta(store_id).map_err(store_lock_op_error)?;
     Ok(AdminStoreLockInfoOutput {
         store_id,
@@ -201,7 +201,7 @@ pub(super) fn offline_store_unlock_with_pid_check<F>(
 where
     F: FnOnce(u32) -> OfflinePidState,
 {
-    let lock_path = crate::paths::store_lock_path(store_id);
+    let lock_path = crate::daemon_layout_from_paths().store_lock_path(&store_id);
     let meta = crate::daemon::store::lock::read_lock_meta(store_id).map_err(store_lock_op_error)?;
     let Some(meta) = meta else {
         return Ok(AdminStoreUnlockOutput {

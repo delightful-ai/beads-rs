@@ -5,8 +5,10 @@
 pub mod admission;
 pub mod broadcast;
 pub mod clock;
+pub mod config;
 pub mod git_lane;
 pub mod io_budget;
+pub mod layout;
 pub mod metrics;
 pub mod remote;
 pub mod scheduler;

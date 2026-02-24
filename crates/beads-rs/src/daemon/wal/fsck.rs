@@ -18,7 +18,6 @@ use crate::daemon::wal::{
     EventWalError, SegmentHeader, SqliteWalIndex, WalIndex, WalIndexError, WalReplayError,
     rebuild_index,
 };
-use crate::paths;
 
 const QUARANTINE_DIR_NAME: &str = "quarantine";
 
@@ -219,8 +218,9 @@ pub struct FsckReport {
 }
 
 pub fn fsck_store(store_id: StoreId, options: FsckOptions) -> Result<FsckReport, FsckError> {
-    let store_dir = paths::store_dir(store_id);
-    let meta_path = paths::store_meta_path(store_id);
+    let layout = crate::daemon_layout_from_paths();
+    let store_dir = layout.store_dir(&store_id);
+    let meta_path = layout.store_meta_path(&store_id);
     let meta = read_store_meta(&meta_path)?;
     if meta.store_id() != store_id {
         return Err(FsckError::StoreIdMismatch {
@@ -279,7 +279,7 @@ pub fn fsck_store_dir(
                 FsckEvidence {
                     code: FsckEvidenceCode::IndexOpenFailed,
                     message: format!("failed to rebuild wal index: {err}"),
-                    path: Some(paths::wal_index_path(meta.store_id())),
+                    path: Some(crate::daemon_layout_from_paths().wal_index_path(&meta.store_id())),
                     namespace: None,
                     origin: None,
                     seq: None,
@@ -290,7 +290,7 @@ pub fn fsck_store_dir(
         } else {
             builder.repairs.push(FsckRepair {
                 kind: FsckRepairKind::RebuildIndex,
-                path: Some(paths::wal_index_path(meta.store_id())),
+                path: Some(crate::daemon_layout_from_paths().wal_index_path(&meta.store_id())),
                 detail: "rebuilt wal.sqlite from WAL segments".to_string(),
             });
         }
@@ -1324,7 +1324,7 @@ fn rebuild_index_after_repair(
 }
 
 fn remove_wal_index_files(store_id: StoreId) -> Result<(), FsckError> {
-    let db_path = paths::wal_index_path(store_id);
+    let db_path = crate::daemon_layout_from_paths().wal_index_path(&store_id);
     for suffix in ["", "-wal", "-shm"] {
         let path = if suffix.is_empty() {
             db_path.clone()

@@ -21,7 +21,6 @@ use crate::daemon::scrubber::{ScrubOptions, scrub_store};
 use crate::daemon::store::runtime::{StoreRuntimeError, load_replica_roster};
 use crate::daemon::wal::{ReplayStats, rebuild_index};
 use crate::git::checkpoint::layout::SHARD_COUNT;
-use crate::paths;
 use beads_api::{
     AdminCheckpointGroup, AdminClockAnomaly, AdminClockAnomalyKind, AdminDoctorOutput,
     AdminFingerprintMode, AdminFingerprintOutput, AdminFingerprintSample, AdminFlushOutput,

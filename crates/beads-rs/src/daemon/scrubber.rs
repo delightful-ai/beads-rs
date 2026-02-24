@@ -18,7 +18,6 @@ use crate::daemon::wal::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
 use crate::daemon::wal::record::{RecordVerifyError, UnverifiedRecord};
 use crate::daemon::wal::segment::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 use crate::git::checkpoint::CheckpointCache;
-use crate::paths;
 
 const DEFAULT_MAX_RECORDS: usize = 200;
 const INDEX_BATCH_RECORDS: usize = 16;
@@ -70,8 +69,8 @@ pub fn scrub_store(
 ) -> AdminHealthReport {
     let checked_at_ms = crate::WallClock::now().0;
     let store_id = store.meta.store_id();
-    let store_dir = paths::store_dir(store_id);
-    let wal_dir = store_dir.join("wal");
+    let layout = crate::daemon_layout_from_paths();
+    let wal_dir = layout.wal_dir(&store_id);
     let mut io_budget = TokenBucket::new(limits.max_background_io_bytes_per_sec as u64);
 
     let mut builder = ScrubReportBuilder::new(checked_at_ms);
