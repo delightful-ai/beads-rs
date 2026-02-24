@@ -4,6 +4,7 @@
 //! orchestration can depend on behavior rather than concrete git helper functions.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use git2::{ErrorCode, Oid, Repository};
 
@@ -13,7 +14,12 @@ use crate::git::checkpoint::{
     publish_checkpoint as publish_checkpoint_git,
 };
 use crate::git::error::SyncError;
-use crate::git::sync::{DivergenceInfo, ForcePushInfo, SyncOutcome, SyncProcess, sync_with_retry};
+use crate::git::{
+    NoopSyncObserver, SyncObserver,
+    sync::{
+        DivergenceInfo, ForcePushInfo, SyncOutcome, SyncProcess, sync_with_retry_with_observer,
+    },
+};
 
 /// Result of best-effort remote fetch + decode for load/merge flow.
 #[derive(Clone)]
@@ -80,12 +86,29 @@ pub(crate) trait PublishCheckpointRef {
     ) -> Result<CheckpointPublishOutcome, CheckpointPublishError>;
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct DefaultGitBackend;
+#[derive(Clone)]
+pub(crate) struct DefaultGitBackend {
+    observer: Arc<dyn SyncObserver>,
+}
+
+impl Default for DefaultGitBackend {
+    fn default() -> Self {
+        Self {
+            observer: Arc::new(NoopSyncObserver),
+        }
+    }
+}
+
+impl DefaultGitBackend {
+    pub(crate) fn with_observer(observer: Arc<dyn SyncObserver>) -> Self {
+        Self { observer }
+    }
+}
 
 impl FetchRemote for DefaultGitBackend {
     fn fetch_remote(&self, repo_path: &Path, repo: &Repository) -> Result<RemoteFetch, SyncError> {
-        let fetched = SyncProcess::new(repo_path.to_owned()).fetch_best_effort(repo)?;
+        let fetched = SyncProcess::new_with_observer(repo_path.to_owned(), self.observer.clone())
+            .fetch_best_effort(repo)?;
         Ok(RemoteFetch {
             remote_state: fetched.phase.remote_state,
             root_slug: fetched.phase.root_slug,
@@ -104,7 +127,7 @@ impl PushRemote for DefaultGitBackend {
         repo_path: &Path,
         state: &CanonicalState,
     ) -> Result<SyncOutcome, SyncError> {
-        sync_with_retry(repo, repo_path, state, 5)
+        sync_with_retry_with_observer(repo, repo_path, state, 5, self.observer.clone())
     }
 }
 

@@ -5,6 +5,7 @@
 
 use std::collections::{BTreeMap, HashMap, hash_map::Entry};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use crossbeam::channel::{Receiver, Sender};
@@ -22,12 +23,34 @@ use crate::git::checkpoint::{
     CheckpointStoreMeta, export_checkpoint,
 };
 use crate::git::error::SyncError;
+use crate::git::observe::SyncObserver;
 use crate::git::sync::{DivergenceInfo, SyncOutcome, init_beads_ref};
 use beads_daemon::remote::RemoteUrl;
 
 /// Result of a sync operation.
 pub type SyncResult = Result<SyncOutcome, SyncError>;
 pub type CheckpointResult = Result<CheckpointPublishOutcome, CheckpointPublishError>;
+
+#[derive(Default)]
+struct GitSyncMetricsObserver;
+
+impl SyncObserver for GitSyncMetricsObserver {
+    fn on_backup_ref_scan(&self, count: usize) {
+        metrics::backup_ref_scan(count);
+    }
+
+    fn on_backup_ref_pruned(&self, count: usize) {
+        metrics::backup_ref_pruned(count);
+    }
+
+    fn on_backup_ref_lock_contention(&self, operation: &'static str) {
+        metrics::backup_ref_lock_contention(operation);
+    }
+
+    fn on_backup_ref_lock_cleanup(&self, operation: &'static str, outcome: &'static str) {
+        metrics::backup_ref_lock_cleanup(operation, outcome);
+    }
+}
 
 /// Result of a load operation (includes metadata).
 #[derive(Clone)]
@@ -121,13 +144,14 @@ pub struct GitWorker {
 impl GitWorker {
     /// Create a new GitWorker.
     pub fn new(result_tx: Sender<GitResult>, limits: crate::core::Limits) -> Self {
+        let observer: Arc<dyn SyncObserver> = Arc::new(GitSyncMetricsObserver);
         GitWorker {
             repos: HashMap::new(),
             result_tx,
             limits,
             background_io: HashMap::new(),
             checkpoint_exports: HashMap::new(),
-            backend: DefaultGitBackend,
+            backend: DefaultGitBackend::with_observer(observer),
         }
     }
 
@@ -163,7 +187,7 @@ impl GitWorker {
         use crate::core::CanonicalState;
         use crate::git::sync::read_state_at_oid;
 
-        let backend = self.backend;
+        let backend = self.backend.clone();
         let repo = self.open(path)?;
 
         // Step 1: Read local state if exists
@@ -265,7 +289,7 @@ impl GitWorker {
 
     /// Sync local state to remote.
     pub fn sync(&mut self, path: &Path, state: &CanonicalState) -> SyncResult {
-        let backend = self.backend;
+        let backend = self.backend.clone();
         let repo = self.open(path)?;
 
         backend.push_remote(repo, path, state)
@@ -278,7 +302,7 @@ impl GitWorker {
         git_ref: &str,
         checkpoint_groups: BTreeMap<String, String>,
     ) -> CheckpointResult {
-        let backend = self.backend;
+        let backend = self.backend.clone();
         let key = (snapshot.store_id, snapshot.checkpoint_group.clone());
         let mut drop_in_memory_previous = false;
         let export = {

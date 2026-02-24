@@ -7,10 +7,12 @@
 
 pub mod checkpoint;
 pub mod error;
+pub mod observe;
 pub mod sync;
 pub mod wire;
 
 pub use error::{SyncError, WireError};
+pub use observe::{NoopSyncObserver, SyncObserver};
 pub use sync::{
     DivergenceInfo, LoadedStore, SyncDiff, SyncOutcome, SyncProcess, init_beads_ref,
     read_state_at_oid, sync_with_retry,
