@@ -28,7 +28,7 @@ Only the directed edges below are allowed:
 - `beads-daemon -> beads-surface`
 - `beads-daemon -> beads-api`
 - `beads-daemon -> beads-core`
-- beads-daemon -> beads-daemon-core
+- `beads-daemon -> beads-daemon-core`
 - `beads-daemon-core -> beads-core`
 - `beads-rs -> beads-core`
 - `beads-rs -> beads-api`
@@ -45,7 +45,7 @@ Only the directed edges below are allowed:
 - `beads-surface` must not depend on `beads-cli`, `beads-daemon`, `beads-daemon-core`, or `beads-rs`.
 - `beads-cli` must not depend on `beads-daemon`, `beads-daemon-core`, or `beads-rs`.
 - `beads-daemon-core` must not depend on `beads-api`, `beads-surface`, `beads-cli`, `beads-daemon`, or `beads-rs`.
-- `beads-daemon` must not depend on `beads-cli`, `beads-daemon-core`, or `beads-rs`.
+- `beads-daemon` must not depend on `beads-cli` or `beads-rs`.
 - `beads-rs` must not be used as a dependency by `beads-core`, `beads-api`, `beads-surface`, `beads-cli`, `beads-daemon-core`, or `beads-daemon`.
 
 ## CLI Boundary Invariant
@@ -55,7 +55,7 @@ The CLI tree must not import daemon modules directly.
 Invariant command:
 
 ```bash
-rg -n "crate::daemon::|daemon::" crates/beads-rs/src/cli crates/beads-cli/src
+rg -n "crate::daemon::|beads_daemon::|beads_daemon_core::" crates/beads-rs/src/cli crates/beads-cli/src
 ```
 
 Expected result: no matches.
