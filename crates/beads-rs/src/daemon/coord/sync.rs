@@ -271,27 +271,14 @@ impl Daemon {
                     let local_state = store.state.core().clone();
                     let merged = CanonicalState::join(&synced_state, &local_state);
 
-                    match merged {
-                        Ok(merged) => {
-                            let mut next_state = store.state.clone();
-                            next_state.set_core_state(merged);
-                            store.state = next_state;
-                            repo_state.complete_sync(wall_ms);
-                            // Still dirty from mutations during sync - reschedule
-                            repo_state.dirty = true;
-                            reschedule_sync = true;
-                            sync_succeeded = true;
-                        }
-                        Err(errs) => {
-                            tracing::error!(
-                                "merge after sync failed for {:?}: {:?}; preserving local state",
-                                remote,
-                                errs
-                            );
-                            repo_state.fail_sync();
-                            backoff_ms = Some(repo_state.backoff_ms());
-                        }
-                    }
+                    let mut next_state = store.state.clone();
+                    next_state.set_core_state(merged);
+                    store.state = next_state;
+                    repo_state.complete_sync(wall_ms);
+                    // Still dirty from mutations during sync - reschedule
+                    repo_state.dirty = true;
+                    reschedule_sync = true;
+                    sync_succeeded = true;
                 } else {
                     // No mutations during sync - just take synced state
                     let mut next_state = store.state.clone();

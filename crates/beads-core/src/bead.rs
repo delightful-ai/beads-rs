@@ -7,6 +7,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::crdt::Crdt;
 use super::collections::Labels;
 use super::composite::{Claim, Note, Workflow};
 use super::crdt::Lww;
@@ -105,12 +106,18 @@ macro_rules! define_bead_fields {
             $(pub $name: Lww<$type>),*
         }
 
+        impl Crdt for BeadFields {
+            fn join(&self, other: &Self) -> Self {
+                Self {
+                    $($name: Lww::join(&self.$name, &other.$name)),*
+                }
+            }
+        }
+
         impl BeadFields {
             /// Per-field LWW merge.
             pub fn join(a: &Self, b: &Self) -> Self {
-                Self {
-                    $($name: Lww::join(&a.$name, &b.$name)),*
-                }
+                <Self as Crdt>::join(a, b)
             }
 
             /// Collect all stamps for computing updated_stamp.

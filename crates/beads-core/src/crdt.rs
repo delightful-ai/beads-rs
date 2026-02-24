@@ -6,6 +6,17 @@ use serde::{Deserialize, Serialize};
 
 use super::time::Stamp;
 
+/// A Conflict-free Replicated Data Type (CRDT) that supports infallible merge.
+pub trait Crdt {
+    /// Infallible merge.
+    ///
+    /// Properties:
+    /// - Associative: join(join(a, b), c) == join(a, join(b, c))
+    /// - Commutative: join(a, b) == join(b, a)
+    /// - Idempotent: join(a, a) == a
+    fn join(&self, other: &Self) -> Self;
+}
+
 /// Last-Writer-Wins register.
 ///
 /// This is your CRDT join for scalar/atomic fields.
@@ -22,6 +33,16 @@ impl<T> Lww<T> {
     }
 }
 
+impl<T: Clone> Crdt for Lww<T> {
+    fn join(&self, other: &Self) -> Self {
+        if self.stamp >= other.stamp {
+            self.clone()
+        } else {
+            other.clone()
+        }
+    }
+}
+
 impl<T: Clone> Lww<T> {
     /// Deterministic merge - higher stamp wins.
     ///
@@ -30,11 +51,7 @@ impl<T: Clone> Lww<T> {
     /// - Associative: join(join(a, b), c) == join(a, join(b, c))
     /// - Idempotent: join(a, a) == a
     pub fn join(a: &Self, b: &Self) -> Self {
-        if a.stamp >= b.stamp {
-            a.clone()
-        } else {
-            b.clone()
-        }
+        <Self as Crdt>::join(a, b)
     }
 }
 

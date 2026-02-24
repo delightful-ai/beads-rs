@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::crdt::Crdt;
 use super::tombstone::{Tombstone, TombstoneKey};
 
 /// Canonical tombstone store.
@@ -17,6 +18,16 @@ use super::tombstone::{Tombstone, TombstoneKey};
 #[serde(transparent)]
 pub struct TombstoneStore {
     by_key: BTreeMap<TombstoneKey, Tombstone>,
+}
+
+impl Crdt for TombstoneStore {
+    fn join(&self, other: &Self) -> Self {
+        let mut result = self.clone();
+        for t in other.by_key.values() {
+            result.upsert(t.clone());
+        }
+        result
+    }
 }
 
 impl TombstoneStore {
@@ -59,11 +70,7 @@ impl TombstoneStore {
 
     /// Merge two tombstone stores.
     pub fn join(a: &Self, b: &Self) -> Self {
-        let mut result = a.clone();
-        for t in b.by_key.values() {
-            result.upsert(t.clone());
-        }
-        result
+        <Self as Crdt>::join(a, b)
     }
 }
 
