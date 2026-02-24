@@ -6,6 +6,7 @@
 //! Bead: core + fields
 
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
 use super::collections::Labels;
 use super::composite::{Claim, Note, Workflow};
@@ -15,6 +16,94 @@ use super::error::{CollisionError, CoreError};
 use super::identity::{ActorId, BeadId, BranchName, ContentHash};
 use super::time::{Stamp, WallClock, WriteStamp};
 use super::wire_bead::WorkflowStatus;
+
+/// Trait for types that contribute to the bead content hash.
+///
+/// Implementations should encapsulate the serialization logic (e.g. decimal formatting,
+/// flattening) to keep `compute_content_hash` high-level and clean.
+pub trait ContentHashable {
+    fn hash_content<H: Digest>(&self, h: &mut H);
+}
+
+impl ContentHashable for String {
+    fn hash_content<H: Digest>(&self, h: &mut H) {
+        h.update(self.as_bytes());
+    }
+}
+
+impl<T: ContentHashable> ContentHashable for Option<T> {
+    fn hash_content<H: Digest>(&self, h: &mut H) {
+        if let Some(value) = self {
+            value.hash_content(h);
+        }
+    }
+}
+
+impl ContentHashable for u32 {
+    fn hash_content<H: Digest>(&self, h: &mut H) {
+        h.update(self.to_string().as_bytes());
+    }
+}
+
+impl ContentHashable for BeadType {
+    fn hash_content<H: Digest>(&self, h: &mut H) {
+        h.update(self.as_str().as_bytes());
+    }
+}
+
+impl ContentHashable for Priority {
+    fn hash_content<H: Digest>(&self, h: &mut H) {
+        h.update(self.value().to_string().as_bytes());
+    }
+}
+
+impl ContentHashable for Workflow {
+    fn hash_content<H: Digest>(&self, h: &mut H) {
+        h.update(self.status().as_bytes());
+        // Closure info is hashed later manually to preserve legacy order
+    }
+}
+
+impl ContentHashable for Claim {
+    fn hash_content<H: Digest>(&self, h: &mut H) {
+        if let Some(assignee) = self.assignee() {
+            h.update(assignee.as_str().as_bytes());
+        }
+        h.update([0]); // Separator between assignee and expires
+
+        if let Some(expires) = self.expires() {
+            h.update(expires.0.to_string().as_bytes());
+        }
+    }
+}
+
+/// Default implementation for Lww wraps the value.
+/// Specialized implementations (like for Workflow) can override this if specialization were supported,
+/// but since it's not, we will implement for specific Lww types or rely on the inner type handling it.
+/// Actually, since we need to support `Lww<Workflow>` using the stamp, we cannot use a blanket implementation
+/// for `Lww<T>` if we also want a specific one for `Lww<Workflow>`.
+/// Rust does not support specialization yet.
+///
+/// However, `Workflow` itself doesn't have the stamp. `Lww<Workflow>` has it.
+/// So we must implement `ContentHashable` for `Lww<String>`, `Lww<Priority>`, etc. individually?
+/// OR we implement `ContentHashable` for `Lww<T>` where `T: ContentHashable`, and for `Workflow` we
+/// define a wrapper or we accept that `Workflow`'s `ContentHashable` implementation cannot see the stamp.
+///
+/// But `compute_content_hash` accesses `bead.fields.workflow.stamp`.
+/// So `ContentHashable` on `Workflow` is insufficient if it needs the stamp.
+///
+/// BUT! `Workflow` status part (hashed early) does NOT use the stamp.
+/// `Workflow` closure part (hashed late) DOES use the stamp.
+///
+/// Since we are only encapsulating the *status* part of `Workflow` in the first pass (to preserve order),
+/// and the status part only depends on `value`, we can use the blanket implementation!
+///
+/// The closure part is handled manually in `compute_content_hash` anyway (for now).
+impl<T: ContentHashable> ContentHashable for Lww<T> {
+    fn hash_content<H: Digest>(&self, h: &mut H) {
+        self.value.hash_content(h);
+    }
+}
 
 /// Immutable creation provenance.
 ///
@@ -701,23 +790,23 @@ fn compute_content_hash(bead: &Bead, labels: &Labels, notes: &[Note]) -> Content
     h.update([0]);
 
     // title
-    h.update(bead.fields.title.value.as_bytes());
+    bead.fields.title.hash_content(&mut h);
     h.update([0]);
 
     // description
-    h.update(bead.fields.description.value.as_bytes());
+    bead.fields.description.hash_content(&mut h);
     h.update([0]);
 
     // status
-    h.update(bead.fields.workflow.value.status().as_bytes());
+    bead.fields.workflow.hash_content(&mut h);
     h.update([0]);
 
-    // priority (as decimal)
-    h.update(bead.fields.priority.value.value().to_string().as_bytes());
+    // priority
+    bead.fields.priority.hash_content(&mut h);
     h.update([0]);
 
     // bead_type
-    h.update(bead.fields.bead_type.value.as_str().as_bytes());
+    bead.fields.bead_type.hash_content(&mut h);
     h.update([0]);
 
     // labels (sorted for determinism)
@@ -727,28 +816,16 @@ fn compute_content_hash(bead: &Bead, labels: &Labels, notes: &[Note]) -> Content
     }
     h.update([0]);
 
-    // assignee (from claim if present)
-    if let Some(assignee) = bead.fields.claim.value.assignee() {
-        h.update(assignee.as_str().as_bytes());
-    }
-    h.update([0]);
-
-    // assignee_expires (wall clock ms if present)
-    if let Some(expires) = bead.fields.claim.value.expires() {
-        h.update(expires.0.to_string().as_bytes());
-    }
+    // claim (assignee + expires)
+    bead.fields.claim.hash_content(&mut h);
     h.update([0]);
 
     // design
-    if let Some(ref design) = bead.fields.design.value {
-        h.update(design.as_bytes());
-    }
+    bead.fields.design.hash_content(&mut h);
     h.update([0]);
 
     // acceptance_criteria
-    if let Some(ref ac) = bead.fields.acceptance_criteria.value {
-        h.update(ac.as_bytes());
-    }
+    bead.fields.acceptance_criteria.hash_content(&mut h);
     h.update([0]);
 
     // notes (sorted by (at, id) for determinism)
@@ -810,21 +887,15 @@ fn compute_content_hash(bead: &Bead, labels: &Labels, notes: &[Note]) -> Content
     }
 
     // external_ref
-    if let Some(ext) = bead.fields.external_ref.value.as_ref() {
-        h.update(ext.as_bytes());
-    }
+    bead.fields.external_ref.hash_content(&mut h);
     h.update([0]);
 
     // source_repo
-    if let Some(repo) = bead.fields.source_repo.value.as_ref() {
-        h.update(repo.as_bytes());
-    }
+    bead.fields.source_repo.hash_content(&mut h);
     h.update([0]);
 
     // estimated_minutes
-    if let Some(est) = bead.fields.estimated_minutes.value {
-        h.update(est.to_string().as_bytes());
-    }
+    bead.fields.estimated_minutes.hash_content(&mut h);
     h.update([0]);
 
     ContentHash::from_bytes(h.finalize().into())
