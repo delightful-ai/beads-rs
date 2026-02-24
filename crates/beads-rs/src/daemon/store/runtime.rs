@@ -32,9 +32,9 @@ use crate::git::checkpoint::{
     CheckpointSnapshotInput, build_snapshot, policy_hash, roster_hash, shard_for_bead,
     shard_for_dep, shard_for_tombstone,
 };
-use crate::paths;
 use beads_daemon::admission::AdmissionController;
 use beads_daemon::broadcast::{BroadcasterLimits, EventBroadcaster};
+use beads_daemon::layout::DaemonLayout;
 use beads_daemon::remote::RemoteUrl;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,6 +60,7 @@ pub(crate) struct WalTailTruncatedRecord {
 }
 
 pub struct StoreRuntime {
+    layout: DaemonLayout,
     pub(crate) primary_remote: RemoteUrl,
     pub(crate) meta: StoreMeta,
     pub(crate) policies: BTreeMap<NamespaceId, NamespacePolicy>,
@@ -88,6 +89,7 @@ pub struct StoreRuntimeOpen {
 
 impl StoreRuntime {
     pub fn open(
+        layout: &DaemonLayout,
         store_id: StoreId,
         primary_remote: RemoteUrl,
         now_ms: u64,
@@ -95,7 +97,7 @@ impl StoreRuntime {
         limits: &Limits,
         namespace_defaults: &BTreeMap<NamespaceId, NamespacePolicy>,
     ) -> Result<StoreRuntimeOpen, StoreRuntimeError> {
-        let meta_path = paths::store_meta_path(store_id);
+        let meta_path = layout.store_meta_path(&store_id);
         let existing = read_store_meta_optional(&meta_path)?;
 
         let expected_versions = StoreMetaVersions::current();
@@ -128,9 +130,10 @@ impl StoreRuntime {
             write_store_meta(&meta_path, &meta)?;
         }
 
-        let store_dir = paths::store_dir(store_id);
-        let store_config = load_store_config(store_id, true)?;
-        let (mut wal_index, needs_rebuild) = open_wal_index(
+        let store_dir = layout.store_dir(&store_id);
+        let store_config = load_store_config_with_layout(layout, store_id, true)?;
+        let (mut wal_index, needs_rebuild) = open_wal_index_with_layout(
+            layout,
             store_id,
             &store_dir,
             &meta,
@@ -142,7 +145,7 @@ impl StoreRuntime {
             match catch_up_index(&store_dir, &meta, &wal_index, limits) {
                 Ok(stats) => stats,
                 Err(WalReplayError::IndexOffsetInvalid { .. }) => {
-                    remove_wal_index_files(store_id)?;
+                    remove_wal_index_files_with_layout(layout, store_id)?;
                     wal_index = SqliteWalIndex::open(
                         &store_dir,
                         &meta,
@@ -183,9 +186,10 @@ impl StoreRuntime {
         let event_wal = EventWal::new(store_dir.clone(), meta.clone(), limits);
         let now = Instant::now();
         let runtime = Self {
+            layout: layout.clone(),
             primary_remote,
             meta,
-            policies: load_namespace_policies(store_id, namespace_defaults)?,
+            policies: load_namespace_policies_with_layout(layout, store_id, namespace_defaults)?,
             state: StoreState::new(),
             last_wal_tail_truncated,
             watermarks_applied,
@@ -497,7 +501,7 @@ impl StoreRuntime {
         let old = self.meta.replica_id;
         let new = new_replica_id();
         self.meta.replica_id = new;
-        let path = paths::store_meta_path(self.meta.store_id());
+        let path = self.layout.store_meta_path(&self.meta.store_id());
         write_store_meta(&path, &self.meta)?;
         Ok((old, new))
     }
@@ -509,7 +513,7 @@ impl StoreRuntime {
             .checked_add(1)
             .expect("orset counter overflow");
         self.meta.orset_counter = next;
-        let path = paths::store_meta_path(self.meta.store_id());
+        let path = self.layout.store_meta_path(&self.meta.store_id());
         write_store_meta(&path, &self.meta)?;
         Ok(next)
     }
@@ -911,20 +915,21 @@ impl IntoErrorPayload for StoreRuntimeError {
     }
 }
 
-fn open_wal_index(
+fn open_wal_index_with_layout(
+    layout: &DaemonLayout,
     store_id: StoreId,
     store_dir: &Path,
     meta: &StoreMeta,
     mode: IndexDurabilityMode,
 ) -> Result<(SqliteWalIndex, bool), StoreRuntimeError> {
-    let db_path = paths::wal_index_path(store_id);
+    let db_path = layout.wal_index_path(&store_id);
     let mut needs_rebuild = !db_path.exists();
 
     match SqliteWalIndex::open(store_dir, meta, mode) {
         Ok(index) => Ok((index, needs_rebuild)),
         Err(WalIndexError::SchemaVersionMismatch { .. }) => {
             needs_rebuild = true;
-            remove_wal_index_files(store_id)?;
+            remove_wal_index_files_with_layout(layout, store_id)?;
             let index = SqliteWalIndex::open(store_dir, meta, mode)?;
             Ok((index, needs_rebuild))
         }
@@ -932,11 +937,43 @@ fn open_wal_index(
     }
 }
 
+fn load_store_config_with_layout(
+    layout: &DaemonLayout,
+    store_id: StoreId,
+    write_default: bool,
+) -> Result<StoreConfig, StoreRuntimeError> {
+    let path = layout.store_config_path(&store_id);
+    match read_secure_store_file(&path) {
+        Ok(Some(raw)) => {
+            toml::from_str(&raw).map_err(|source| StoreRuntimeError::StoreConfigParse {
+                path: Box::new(path),
+                source,
+            })
+        }
+        Ok(None) => {
+            let config = StoreConfig::default();
+            if write_default {
+                write_store_config(&path, &config)?;
+            }
+            Ok(config)
+        }
+        Err(StoreConfigFileError::Symlink { path }) => Err(StoreRuntimeError::StoreConfigSymlink {
+            path: Box::new(path),
+        }),
+        Err(StoreConfigFileError::Read { path, source }) => {
+            Err(StoreRuntimeError::StoreConfigRead {
+                path: Box::new(path),
+                source,
+            })
+        }
+    }
+}
+
 fn load_store_config(
     store_id: StoreId,
     write_default: bool,
 ) -> Result<StoreConfig, StoreRuntimeError> {
-    let path = paths::store_config_path(store_id);
+    let path = crate::daemon_layout_from_paths().store_config_path(&store_id);
     match read_secure_store_file(&path) {
         Ok(Some(raw)) => {
             toml::from_str(&raw).map_err(|source| StoreRuntimeError::StoreConfigParse {
@@ -993,8 +1030,11 @@ fn write_store_config(path: &Path, config: &StoreConfig) -> Result<(), StoreRunt
     Ok(())
 }
 
-fn remove_wal_index_files(store_id: StoreId) -> Result<(), StoreRuntimeError> {
-    let db_path = paths::wal_index_path(store_id);
+fn remove_wal_index_files_with_layout(
+    layout: &DaemonLayout,
+    store_id: StoreId,
+) -> Result<(), StoreRuntimeError> {
+    let db_path = layout.wal_index_path(&store_id);
     for suffix in ["", "-wal", "-shm"] {
         let path = if suffix.is_empty() {
             db_path.clone()
@@ -1013,11 +1053,44 @@ fn remove_wal_index_files(store_id: StoreId) -> Result<(), StoreRuntimeError> {
     Ok(())
 }
 
+fn load_namespace_policies_with_layout(
+    layout: &DaemonLayout,
+    store_id: StoreId,
+    defaults: &BTreeMap<NamespaceId, NamespacePolicy>,
+) -> Result<BTreeMap<NamespaceId, NamespacePolicy>, StoreRuntimeError> {
+    let path = layout.namespaces_path(&store_id);
+    let raw = match read_secure_store_file(&path) {
+        Ok(Some(raw)) => raw,
+        Ok(None) => return Ok(defaults.clone()),
+        Err(StoreConfigFileError::Symlink { path }) => {
+            return Err(StoreRuntimeError::NamespacePoliciesSymlink {
+                path: Box::new(path),
+            });
+        }
+        Err(StoreConfigFileError::Read { path, source }) => {
+            return Err(StoreRuntimeError::NamespacePoliciesRead {
+                path: Box::new(path),
+                source,
+            });
+        }
+    };
+
+    let policies = NamespacePolicies::from_toml_str(&raw).map_err(|source| {
+        StoreRuntimeError::NamespacePoliciesParse {
+            path: Box::new(path),
+            source,
+        }
+    })?;
+
+    Ok(policies.namespaces)
+}
+
+#[cfg(test)]
 pub(crate) fn load_namespace_policies(
     store_id: StoreId,
     defaults: &BTreeMap<NamespaceId, NamespacePolicy>,
 ) -> Result<BTreeMap<NamespaceId, NamespacePolicy>, StoreRuntimeError> {
-    let path = paths::namespaces_path(store_id);
+    let path = crate::daemon_layout_from_paths().namespaces_path(&store_id);
     let raw = match read_secure_store_file(&path) {
         Ok(Some(raw)) => raw,
         Ok(None) => return Ok(defaults.clone()),
@@ -1047,7 +1120,7 @@ pub(crate) fn load_namespace_policies(
 pub(crate) fn load_replica_roster(
     store_id: StoreId,
 ) -> Result<Option<ReplicaRoster>, StoreRuntimeError> {
-    let path = paths::replicas_path(store_id);
+    let path = crate::daemon_layout_from_paths().replicas_path(&store_id);
     let raw = match read_secure_store_file(&path) {
         Ok(Some(raw)) => raw,
         Ok(None) => return Ok(None),
@@ -1323,6 +1396,7 @@ mod tests {
             .namespace_defaults
             .namespaces;
         let runtime = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
             store_id,
             RemoteUrl::new("example.com/test/repo"),
             now_ms + 1,
@@ -1390,6 +1464,7 @@ mod tests {
             .namespace_defaults
             .namespaces;
         let result = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
             store_id,
             RemoteUrl::new("example.com/test/repo"),
             now_ms + 1,
@@ -1427,6 +1502,7 @@ mod tests {
             .namespace_defaults
             .namespaces;
         let err = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
             store_id,
             RemoteUrl::new("example.com/test/repo"),
             now_ms + 1,
@@ -1455,6 +1531,7 @@ mod tests {
             .namespace_defaults
             .namespaces;
         let mut runtime = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
             store_id,
             RemoteUrl::new("example.com/test/repo"),
             1_700_000_000_000,
@@ -1487,6 +1564,7 @@ mod tests {
             .namespace_defaults
             .namespaces;
         let runtime = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
             store_id,
             RemoteUrl::new("example.com/test/repo"),
             1_700_000_000_000,
@@ -1525,6 +1603,7 @@ mod tests {
             .namespace_defaults
             .namespaces;
         let runtime = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
             store_id,
             RemoteUrl::new("example.com/test/repo"),
             1_700_000_000_000,
@@ -1551,6 +1630,7 @@ mod tests {
             .namespace_defaults
             .namespaces;
         let mut runtime = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
             store_id,
             RemoteUrl::new("example.com/test/repo"),
             1_700_000_000_000,
@@ -1661,6 +1741,7 @@ durability_eligible = true
             .namespace_defaults
             .namespaces;
         let runtime = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
             store_id,
             RemoteUrl::new("example.com/test/repo"),
             1_700_000_000_000,

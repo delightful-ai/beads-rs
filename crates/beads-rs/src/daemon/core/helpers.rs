@@ -247,7 +247,7 @@ pub(crate) fn replay_event_wal(
     state: &mut StoreState,
     limits: &Limits,
 ) -> Result<bool, StoreRuntimeError> {
-    let store_dir = crate::paths::store_dir(store_id);
+    let store_dir = crate::daemon_layout_from_paths().store_dir(&store_id);
     let rows = wal_index.reader().load_watermarks()?;
     if rows.is_empty() {
         return Ok(false);
@@ -391,7 +391,7 @@ pub(super) fn load_event_body_at(
     Ok(event_body)
 }
 
-pub(super) fn replication_listen_addr(config: &crate::config::ReplicationConfig) -> String {
+pub(super) fn replication_listen_addr(config: &beads_daemon::config::ReplicationConfig) -> String {
     let trimmed = config.listen_addr.trim();
     if trimmed.is_empty() {
         "127.0.0.1:0".to_string()
@@ -401,7 +401,7 @@ pub(super) fn replication_listen_addr(config: &crate::config::ReplicationConfig)
 }
 
 pub(super) fn replication_max_connections(
-    config: &crate::config::ReplicationConfig,
+    config: &beads_daemon::config::ReplicationConfig,
 ) -> Option<NonZeroUsize> {
     match config.max_connections {
         Some(0) => None,
@@ -410,7 +410,9 @@ pub(super) fn replication_max_connections(
     }
 }
 
-pub(super) fn replication_backoff(config: &crate::config::ReplicationConfig) -> BackoffPolicy {
+pub(super) fn replication_backoff(
+    config: &beads_daemon::config::ReplicationConfig,
+) -> BackoffPolicy {
     let base = Duration::from_millis(config.backoff_base_ms);
     let mut max = Duration::from_millis(config.backoff_max_ms);
     if max < base {
@@ -554,6 +556,7 @@ pub(crate) fn insert_store_for_tests(
     repo_path: &Path,
 ) -> Result<(), OpError> {
     let open = StoreRuntime::open(
+        &daemon.layout,
         store_id,
         remote.clone(),
         WallClock::now().0,

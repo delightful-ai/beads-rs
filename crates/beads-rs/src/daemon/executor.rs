@@ -43,7 +43,6 @@ use crate::core::{
 };
 use crate::daemon::metrics;
 use crate::daemon::wal::frame::FRAME_HEADER_LEN;
-use crate::paths;
 use beads_daemon::broadcast::BroadcastEvent;
 use beads_surface::ops::OpResult;
 
@@ -135,7 +134,7 @@ impl Daemon {
             trace_id,
             actor_id,
         } = meta;
-        let store_dir = paths::store_dir(store_id);
+        let store_dir = crate::daemon_layout_from_paths().store_dir(&store_id);
         let engine = MutationEngine::new(limits.clone());
         let ctx = MutationContext {
             namespace: namespace.clone(),

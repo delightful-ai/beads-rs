@@ -85,7 +85,81 @@ fn init_cli_tracing(verbose: u8, is_daemon: bool) -> telemetry::TelemetryGuard {
 
 /// Stable wrapper for daemon-run entrypoint so CLI code doesn't import daemon internals directly.
 pub fn run_daemon_command() -> Result<()> {
-    daemon::run_daemon()
+    let config = config::load_or_init();
+    paths::init_from_config(&config.paths);
+    let _socket_dir = daemon::ipc::ensure_socket_dir()?;
+
+    let actor = daemon_actor_from_config(&config)?;
+    let layout = daemon_layout_from_paths();
+    let runtime = daemon_runtime_config_from_config(&config);
+    daemon::run_daemon(actor, layout, runtime)
+}
+
+pub(crate) fn daemon_layout_from_paths() -> beads_daemon::layout::DaemonLayout {
+    beads_daemon::layout::DaemonLayout::new(
+        paths::data_dir(),
+        daemon::ipc::socket_path(),
+        paths::log_dir(),
+    )
+}
+
+pub(crate) fn daemon_runtime_config_from_config(
+    config: &config::Config,
+) -> beads_daemon::config::DaemonRuntimeConfig {
+    beads_daemon::config::DaemonRuntimeConfig {
+        limits: config.limits.clone(),
+        namespace_defaults: config.namespace_defaults.namespaces.clone(),
+        checkpoint_groups: config
+            .checkpoint_groups
+            .iter()
+            .map(|(name, group)| {
+                (
+                    name.clone(),
+                    beads_daemon::config::CheckpointGroupConfig {
+                        namespaces: group.namespaces.clone(),
+                        git_ref: group.git_ref.clone(),
+                        checkpoint_writers: group.checkpoint_writers.clone(),
+                        primary_writer: group.primary_writer,
+                        debounce_ms: group.debounce_ms,
+                        max_interval_ms: group.max_interval_ms,
+                        max_events: group.max_events,
+                        durable_copy_via_git: group.durable_copy_via_git,
+                    },
+                )
+            })
+            .collect(),
+        replication: beads_daemon::config::ReplicationConfig {
+            listen_addr: config.replication.listen_addr.clone(),
+            max_connections: config.replication.max_connections,
+            peers: config
+                .replication
+                .peers
+                .iter()
+                .map(|peer| beads_daemon::config::ReplicationPeerConfig {
+                    replica_id: peer.replica_id,
+                    addr: peer.addr.clone(),
+                    role: peer.role,
+                    allowed_namespaces: peer.allowed_namespaces.clone(),
+                })
+                .collect(),
+            backoff_base_ms: config.replication.backoff_base_ms,
+            backoff_max_ms: config.replication.backoff_max_ms,
+        },
+        git_sync_policy: beads_daemon::config::GitSyncPolicy::from_env(),
+        checkpoint_policy: beads_daemon::config::CheckpointPolicy::from_env(),
+    }
+}
+
+fn daemon_actor_from_config(config: &config::Config) -> Result<ActorId> {
+    match config.defaults.actor.clone() {
+        Some(actor) => Ok(actor),
+        None => {
+            let username = whoami::username();
+            let hostname = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".into());
+            let default_actor = format!("{username}@{hostname}");
+            Ok(ActorId::new(default_actor)?)
+        }
+    }
 }
 
 // Re-export core types at crate root for convenience

@@ -251,7 +251,9 @@ struct StorePathMap {
 }
 
 fn store_path_map_path() -> PathBuf {
-    crate::paths::data_dir().join("store_paths.json")
+    crate::daemon_layout_from_paths()
+        .data_dir
+        .join("store_paths.json")
 }
 
 fn load_store_id_for_path(repo_path: &Path) -> Option<StoreId> {

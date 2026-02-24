@@ -43,7 +43,7 @@ impl Daemon {
         );
         let _guard = span.enter();
 
-        let store_dir = paths::store_dir(store_id);
+        let store_dir = self.layout.store_dir(&store_id);
 
         let wal_index = Arc::clone(&store.wal_index);
         let mut txn = wal_index

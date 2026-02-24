@@ -378,7 +378,7 @@ impl Daemon {
         let store_id = proof.store_id();
         let store = proof.runtime_mut();
 
-        let path = crate::paths::namespaces_path(store_id);
+        let path = crate::daemon_layout_from_paths().namespaces_path(&store_id);
         let raw = match fs::read_to_string(&path) {
             Ok(raw) => raw,
             Err(err) => {
@@ -537,7 +537,7 @@ impl Daemon {
             Err(err) => return Response::err_from(err),
         };
         let store_id = proof.store_id();
-        let store_dir = crate::paths::store_dir(store_id);
+        let store_dir = crate::daemon_layout_from_paths().store_dir(&store_id);
         let store = proof.runtime_mut();
         if !store.maintenance_mode {
             return Response::err_from(OpError::MaintenanceMode {

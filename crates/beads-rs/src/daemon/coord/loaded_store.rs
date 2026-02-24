@@ -75,7 +75,7 @@ impl LoadedStore<'_> {
 
     pub(crate) fn maybe_start_sync(
         &mut self,
-        git_sync_policy: crate::daemon::core::GitSyncPolicy,
+        git_sync_policy: beads_daemon::config::GitSyncPolicy,
         actor: ActorId,
         git_tx: &Sender<GitOp>,
     ) {

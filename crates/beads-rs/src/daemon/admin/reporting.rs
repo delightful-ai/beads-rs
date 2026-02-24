@@ -30,7 +30,7 @@ pub(super) fn build_wal_status(
     let reader = store.wal_index.reader();
     let mut out = Vec::new();
     let mut warnings = Vec::new();
-    let store_dir = paths::store_dir(store.meta.store_id());
+    let store_dir = crate::daemon_layout_from_paths().store_dir(&store.meta.store_id());
     for namespace in namespaces {
         let mut segments = reader
             .list_segments(namespace)
