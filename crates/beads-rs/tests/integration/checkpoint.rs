@@ -283,7 +283,7 @@ fn store_state_stats(state: &StoreState) -> BTreeMap<NamespaceId, (usize, usize,
     let mut stats = BTreeMap::new();
     for (namespace, state) in state.namespaces() {
         stats.insert(
-            namespace,
+            namespace.clone(),
             (
                 state.live_count(),
                 state.tombstone_count(),

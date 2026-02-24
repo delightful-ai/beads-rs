@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 
+use crate::crdt::Crdt;
 use crate::dep::DepKey;
 use crate::domain::DepKind;
 use crate::identity::BeadId;
@@ -15,6 +16,15 @@ use super::max_stamp;
 pub struct DepStore {
     pub(crate) set: OrSet<DepKey>,
     pub(crate) stamp: Option<Stamp>,
+}
+
+impl Crdt for DepStore {
+    fn join(&self, other: &Self) -> Self {
+        Self {
+            set: self.set.join(&other.set),
+            stamp: max_stamp(self.stamp.as_ref(), other.stamp.as_ref()),
+        }
+    }
 }
 
 impl DepStore {
@@ -56,11 +66,9 @@ impl DepStore {
         self.set.dots_for(key)
     }
 
+    /// Deprecated: Use Crdt::join instead.
     pub fn join(a: &Self, b: &Self) -> Self {
-        Self {
-            set: OrSet::join(&a.set, &b.set),
-            stamp: max_stamp(a.stamp.as_ref(), b.stamp.as_ref()),
-        }
+        <Self as Crdt>::join(a, b)
     }
 }
 

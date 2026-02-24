@@ -91,8 +91,8 @@ use crate::core::{
 };
 use crate::git::SyncError;
 use crate::git::checkpoint::{
-    CheckpointCache, CheckpointImport, CheckpointImportError, IncludedHeads, import_checkpoint,
-    merge_store_states, policy_hash, roster_hash, store_state_from_legacy,
+    CheckpointCache, CheckpointImport, IncludedHeads, import_checkpoint, merge_store_states,
+    policy_hash, roster_hash, store_state_from_legacy,
 };
 
 const LOAD_TIMEOUT_SECS: u64 = 30;
