@@ -508,12 +508,6 @@ impl ContentHashable for u32 {
     }
 }
 
-impl ContentHashable for u64 {
-    fn hash_content(&self, hasher: &mut impl Digest) {
-        hasher.update(self.to_string().as_bytes());
-    }
-}
-
 /// Bead identifier - "{slug}-{suffix}" format.
 ///
 /// Slug is a per-repo prefix (beads-go used the repo name; beads-rs historically used `bd`).
