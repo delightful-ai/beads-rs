@@ -14,15 +14,16 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use git2::{ErrorCode, ObjectType, Oid, Repository, Signature};
 
 use super::error::SyncError;
+use super::observe::{NoopSyncObserver, SyncObserver};
 use super::wire;
 use crate::core::crdt::Crdt;
 use crate::core::{BeadId, BeadSlug, CanonicalState, WallClock, WriteStamp};
-use crate::daemon::metrics;
 
 const BACKUP_REF_PREFIX: &str = "refs/beads/backup/";
 const BACKUP_REFS_GLOB: &str = "refs/beads/backup/*";
@@ -284,19 +285,37 @@ impl SyncConfig {
 pub struct SyncProcess<Phase> {
     pub repo_path: PathBuf,
     pub config: SyncConfig,
+    pub observer: Arc<dyn SyncObserver>,
     pub phase: Phase,
 }
 
 impl SyncProcess<Idle> {
     /// Create a new sync process in Idle phase.
     pub fn new(repo_path: PathBuf) -> Self {
-        Self::new_with_config(repo_path, SyncConfig::from_env())
+        Self::new_with_config_and_observer(
+            repo_path,
+            SyncConfig::from_env(),
+            Arc::new(NoopSyncObserver),
+        )
+    }
+
+    pub fn new_with_observer(repo_path: PathBuf, observer: Arc<dyn SyncObserver>) -> Self {
+        Self::new_with_config_and_observer(repo_path, SyncConfig::from_env(), observer)
     }
 
     pub fn new_with_config(repo_path: PathBuf, config: SyncConfig) -> Self {
+        Self::new_with_config_and_observer(repo_path, config, Arc::new(NoopSyncObserver))
+    }
+
+    pub fn new_with_config_and_observer(
+        repo_path: PathBuf,
+        config: SyncConfig,
+        observer: Arc<dyn SyncObserver>,
+    ) -> Self {
         SyncProcess {
             repo_path,
             config,
+            observer,
             phase: Idle,
         }
     }
@@ -321,10 +340,13 @@ impl SyncProcess<Idle> {
         let SyncProcess {
             repo_path,
             config,
+            observer,
             phase: _,
         } = self;
+        let fetch_started = Instant::now();
+        observer.on_fetch_start();
         // Keep backup refs bounded even when this fetch path does not create a new backup.
-        prune_backup_refs(repo, MAX_BACKUP_REFS, Oid::zero())?;
+        prune_backup_refs_with_observer(repo, MAX_BACKUP_REFS, Oid::zero(), observer.as_ref())?;
         let mut fetch_error = None;
         let prev_remote_oid_opt = refname_to_id_optional(repo, "refs/remotes/origin/beads/store")?;
         // Fetch from origin
@@ -427,7 +449,7 @@ impl SyncProcess<Idle> {
                                     remote_oid,
                                 });
                             }
-                            ensure_backup_ref(repo, local_oid)?;
+                            ensure_backup_ref_with_observer(repo, local_oid, observer.as_ref())?;
                         }
                     }
                 }
@@ -444,10 +466,13 @@ impl SyncProcess<Idle> {
 
         let local_oid =
             refname_to_id_optional(repo, "refs/heads/beads/store")?.unwrap_or(Oid::zero());
+        let fetch_elapsed_ms = fetch_started.elapsed().as_millis();
+        observer.on_fetch_end(u64::try_from(fetch_elapsed_ms).unwrap_or(u64::MAX));
 
         Ok(SyncProcess {
             repo_path,
             config,
+            observer,
             phase: Fetched {
                 local_oid,
                 remote_oid,
@@ -472,6 +497,7 @@ impl SyncProcess<Fetched> {
         let SyncProcess {
             repo_path,
             config,
+            observer,
             phase:
                 Fetched {
                     local_oid,
@@ -482,6 +508,7 @@ impl SyncProcess<Fetched> {
                     ..
                 },
         } = self;
+        observer.on_merge_start();
 
         let parent_oid = if remote_oid.is_zero() {
             local_oid
@@ -492,9 +519,12 @@ impl SyncProcess<Fetched> {
         // Fast path: if remote is empty/uninitialized, just use local
         if remote_oid.is_zero() {
             let diff = compute_diff(&CanonicalState::new(), local_state);
+            let merged_count = diff.created + diff.updated + diff.deleted;
+            observer.on_merge_end(merged_count);
             return Ok(SyncProcess {
                 repo_path,
                 config,
+                observer,
                 phase: Merged {
                     state: local_state.clone(),
                     parent_oid,
@@ -518,10 +548,13 @@ impl SyncProcess<Fetched> {
 
         // Compute diff for commit message
         let diff = compute_diff(&remote_state, &merged);
+        let merged_count = diff.created + diff.updated + diff.deleted;
+        observer.on_merge_end(merged_count);
 
         Ok(SyncProcess {
             repo_path,
             config,
+            observer,
             phase: Merged {
                 state: merged,
                 parent_oid,
@@ -543,6 +576,7 @@ impl SyncProcess<Merged> {
         let SyncProcess {
             repo_path,
             config,
+            observer,
             phase:
                 Merged {
                     state,
@@ -622,6 +656,7 @@ impl SyncProcess<Merged> {
         Ok(SyncProcess {
             repo_path,
             config,
+            observer,
             phase: Committed { commit_oid, state },
         })
     }
@@ -634,6 +669,14 @@ impl SyncProcess<Committed> {
     /// Returns NonFastForward error if remote moved - caller should retry.
     /// If no remote is configured, returns success (local-only repo).
     pub fn push(self, repo: &Repository) -> Result<CanonicalState, SyncError> {
+        let SyncProcess {
+            observer, phase, ..
+        } = self;
+        let Committed {
+            commit_oid: _,
+            state,
+        } = phase;
+
         let is_retryable = |message: &str| {
             let msg = message.to_lowercase();
             msg.contains("non-fast-forward")
@@ -642,6 +685,8 @@ impl SyncProcess<Committed> {
                 || msg.contains("failed to update ref")
                 || msg.contains("failed to lock file")
         };
+        let push_started = Instant::now();
+        observer.on_push_start();
 
         // Try to find remote - if no remote, just return success (local-only)
         let mut remote = match repo.find_remote("origin") {
@@ -649,7 +694,9 @@ impl SyncProcess<Committed> {
             Err(_) => {
                 // No remote configured - this is a local-only repo
                 // Commit was already made, so just return success
-                return Ok(self.phase.state);
+                let push_elapsed_ms = push_started.elapsed().as_millis();
+                observer.on_push_end(u64::try_from(push_elapsed_ms).unwrap_or(u64::MAX));
+                return Ok(state);
             }
         };
 
@@ -703,7 +750,9 @@ impl SyncProcess<Committed> {
             return Err(crate::git::error::PushRejected { message: err }.into());
         }
 
-        Ok(self.phase.state)
+        let push_elapsed_ms = push_started.elapsed().as_millis();
+        observer.on_push_end(u64::try_from(push_elapsed_ms).unwrap_or(u64::MAX));
+        Ok(state)
     }
 
     /// Get the commit oid.
@@ -941,6 +990,22 @@ pub fn sync_with_retry(
     local_state: &CanonicalState,
     max_retries: usize,
 ) -> Result<SyncOutcome, SyncError> {
+    sync_with_retry_with_observer(
+        repo,
+        repo_path,
+        local_state,
+        max_retries,
+        Arc::new(NoopSyncObserver),
+    )
+}
+
+pub fn sync_with_retry_with_observer(
+    repo: &Repository,
+    repo_path: &Path,
+    local_state: &CanonicalState,
+    max_retries: usize,
+    observer: Arc<dyn SyncObserver>,
+) -> Result<SyncOutcome, SyncError> {
     let mut retries = 0;
     let mut force_push = None;
     let started = Instant::now();
@@ -948,7 +1013,8 @@ pub fn sync_with_retry(
     loop {
         let attempt = retries + 1;
         tracing::debug!(attempt, "sync attempt");
-        let fetched = SyncProcess::new(repo_path.to_owned()).fetch(repo)?;
+        let fetched =
+            SyncProcess::new_with_observer(repo_path.to_owned(), observer.clone()).fetch(repo)?;
         let divergence = fetched.phase.divergence.clone();
         if force_push.is_none() {
             force_push = fetched.phase.force_push.clone();
@@ -1094,29 +1160,40 @@ fn update_ref(repo: &Repository, name: &str, oid: Oid, message: &str) -> Result<
     }
 }
 
-fn ensure_backup_ref(repo: &Repository, oid: Oid) -> Result<(), SyncError> {
+fn ensure_backup_ref_with_observer(
+    repo: &Repository,
+    oid: Oid,
+    observer: &dyn SyncObserver,
+) -> Result<(), SyncError> {
     let name = format!("{BACKUP_REF_PREFIX}{oid}");
     let created = match repo.refname_to_id(&name) {
         Ok(_) => false,
-        Err(err) if err.code() == ErrorCode::NotFound => create_backup_reference(repo, &name, oid)?,
+        Err(err) if err.code() == ErrorCode::NotFound => {
+            create_backup_reference_with_observer(repo, &name, oid, observer)?
+        }
         Err(err) => return Err(SyncError::Git(err)),
     };
     if created {
-        prune_backup_refs(repo, MAX_BACKUP_REFS, oid)?;
+        prune_backup_refs_with_observer(repo, MAX_BACKUP_REFS, oid, observer)?;
     }
     Ok(())
 }
 
-fn prune_backup_refs(repo: &Repository, keep: usize, protected_oid: Oid) -> Result<(), SyncError> {
+fn prune_backup_refs_with_observer(
+    repo: &Repository,
+    keep: usize,
+    protected_oid: Oid,
+    observer: &dyn SyncObserver,
+) -> Result<(), SyncError> {
     let refs = match repo.references_glob(BACKUP_REFS_GLOB) {
         Ok(refs) => refs,
         Err(err) if err.code() == ErrorCode::Locked => {
-            metrics::backup_ref_lock_contention("scan");
+            observer.on_backup_ref_lock_contention("scan");
             tracing::warn!(
                 error = %err,
                 "backup ref scan skipped due lock contention"
             );
-            metrics::backup_ref_scan(0);
+            observer.on_backup_ref_scan(0);
             return Ok(());
         }
         Err(err) => return Err(SyncError::Git(err)),
@@ -1129,7 +1206,7 @@ fn prune_backup_refs(repo: &Repository, keep: usize, protected_oid: Oid) -> Resu
         let reference = match reference {
             Ok(reference) => reference,
             Err(err) if err.code() == ErrorCode::Locked => {
-                metrics::backup_ref_lock_contention("scan");
+                observer.on_backup_ref_lock_contention("scan");
                 tracing::warn!(
                     error = %err,
                     "backup ref scan entry skipped due lock contention"
@@ -1155,7 +1232,7 @@ fn prune_backup_refs(repo: &Repository, keep: usize, protected_oid: Oid) -> Resu
             .unwrap_or(i64::MIN);
         candidates.push((name, commit_time));
     }
-    metrics::backup_ref_scan(scan_count);
+    observer.on_backup_ref_scan(scan_count);
 
     let total_refs = candidates.len() + usize::from(protected);
     if total_refs <= keep {
@@ -1171,24 +1248,29 @@ fn prune_backup_refs(repo: &Repository, keep: usize, protected_oid: Oid) -> Resu
 
     let mut pruned = 0usize;
     for (name, _) in candidates.into_iter().skip(keep_candidates) {
-        if delete_backup_reference(repo, &name)? {
+        if delete_backup_reference_with_observer(repo, &name, observer)? {
             pruned = pruned.saturating_add(1);
         }
     }
-    metrics::backup_ref_pruned(pruned);
+    observer.on_backup_ref_pruned(pruned);
     Ok(())
 }
 
-fn create_backup_reference(repo: &Repository, name: &str, oid: Oid) -> Result<bool, SyncError> {
+fn create_backup_reference_with_observer(
+    repo: &Repository,
+    name: &str,
+    oid: Oid,
+    observer: &dyn SyncObserver,
+) -> Result<bool, SyncError> {
     match repo.reference(name, oid, false, "beads sync: backup local ref") {
         Ok(_) => Ok(true),
         Err(err) if err.code() == ErrorCode::Locked => {
-            metrics::backup_ref_lock_contention("create");
-            if recover_backup_ref_lock(repo, name, &err, "create") {
+            observer.on_backup_ref_lock_contention("create");
+            if recover_backup_ref_lock(repo, name, &err, "create", observer) {
                 match repo.reference(name, oid, false, "beads sync: backup local ref") {
                     Ok(_) => Ok(true),
                     Err(retry_err) if retry_err.code() == ErrorCode::Locked => {
-                        metrics::backup_ref_lock_contention("create");
+                        observer.on_backup_ref_lock_contention("create");
                         tracing::warn!(
                             reference = %name,
                             error = %retry_err,
@@ -1211,18 +1293,22 @@ fn create_backup_reference(repo: &Repository, name: &str, oid: Oid) -> Result<bo
     }
 }
 
-fn delete_backup_reference(repo: &Repository, name: &str) -> Result<bool, SyncError> {
+fn delete_backup_reference_with_observer(
+    repo: &Repository,
+    name: &str,
+    observer: &dyn SyncObserver,
+) -> Result<bool, SyncError> {
     match repo.find_reference(name) {
         Ok(mut reference) => match reference.delete() {
             Ok(()) => Ok(true),
             Err(err) if err.code() == ErrorCode::Locked => {
-                metrics::backup_ref_lock_contention("delete");
-                if recover_backup_ref_lock(repo, name, &err, "delete") {
+                observer.on_backup_ref_lock_contention("delete");
+                if recover_backup_ref_lock(repo, name, &err, "delete", observer) {
                     match repo.find_reference(name) {
                         Ok(mut retry_reference) => match retry_reference.delete() {
                             Ok(()) => Ok(true),
                             Err(retry_err) if retry_err.code() == ErrorCode::Locked => {
-                                metrics::backup_ref_lock_contention("delete");
+                                observer.on_backup_ref_lock_contention("delete");
                                 tracing::warn!(
                                     reference = %name,
                                     error = %retry_err,
@@ -1256,6 +1342,7 @@ fn recover_backup_ref_lock(
     reference_name: &str,
     err: &git2::Error,
     operation: &'static str,
+    observer: &dyn SyncObserver,
 ) -> bool {
     if err.code() != ErrorCode::Locked {
         return false;
@@ -1270,7 +1357,7 @@ fn recover_backup_ref_lock(
                 expected_lock = %expected_lock.display(),
                 "skipping backup lock cleanup: lock path mismatch"
             );
-            metrics::backup_ref_lock_cleanup(operation, "path_mismatch");
+            observer.on_backup_ref_lock_cleanup(operation, "path_mismatch");
             return false;
         }
         None => expected_lock,
@@ -1282,7 +1369,7 @@ fn recover_backup_ref_lock(
     let (should_remove, skip_reason) =
         should_cleanup_backup_ref_lock(lock_age, pid_state, BACKUP_REF_LOCK_STALE_AFTER);
     if !should_remove {
-        metrics::backup_ref_lock_cleanup(operation, skip_reason);
+        observer.on_backup_ref_lock_cleanup(operation, skip_reason);
         tracing::debug!(
             reference = %reference_name,
             lock_path = %lock_path.display(),
@@ -1301,11 +1388,11 @@ fn recover_backup_ref_lock(
                 lock_path = %lock_path.display(),
                 "removed stale backup ref lock"
             );
-            metrics::backup_ref_lock_cleanup(operation, "removed");
+            observer.on_backup_ref_lock_cleanup(operation, "removed");
             true
         }
         Err(io_err) if io_err.kind() == std::io::ErrorKind::NotFound => {
-            metrics::backup_ref_lock_cleanup(operation, "missing");
+            observer.on_backup_ref_lock_cleanup(operation, "missing");
             true
         }
         Err(io_err) => {
@@ -1315,7 +1402,7 @@ fn recover_backup_ref_lock(
                 error = %io_err,
                 "failed to remove stale backup ref lock"
             );
-            metrics::backup_ref_lock_cleanup(operation, "remove_failed");
+            observer.on_backup_ref_lock_cleanup(operation, "remove_failed");
             false
         }
     }
@@ -1604,10 +1691,11 @@ mod tests {
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Lww,
         Priority, ReplicaId, Stamp, StateJsonlSha256, Tombstone, Workflow,
     };
-    use crate::daemon::metrics::MetricsSnapshot;
     use crate::git::WireError;
     #[cfg(feature = "slow-tests")]
     use proptest::prelude::*;
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
     use uuid::Uuid;
 
@@ -1642,44 +1730,76 @@ mod tests {
         (state_bytes, tombs_bytes, deps_bytes, notes_bytes)
     }
 
-    fn counter_value(
-        snapshot: &MetricsSnapshot,
-        name: &str,
-        labels: &[(&str, &str)],
-    ) -> Option<u64> {
-        snapshot
-            .counters
-            .iter()
-            .find(|sample| {
-                sample.name == name
-                    && labels.iter().all(|(key, value)| {
-                        sample
-                            .labels
-                            .iter()
-                            .any(|label| label.key == *key && label.value == *value)
-                    })
-            })
-            .map(|sample| sample.value)
+    #[derive(Default)]
+    struct RecordingSyncObserver {
+        lock_contention: Mutex<BTreeMap<&'static str, u64>>,
+        lock_cleanup: Mutex<BTreeMap<(&'static str, &'static str), u64>>,
+        backup_ref_scan_samples: Mutex<Vec<usize>>,
+        backup_ref_pruned_total: Mutex<u64>,
     }
 
-    fn histogram_count(
-        snapshot: &MetricsSnapshot,
-        name: &str,
-        labels: &[(&str, &str)],
-    ) -> Option<u64> {
-        snapshot
-            .histograms
-            .iter()
-            .find(|sample| {
-                sample.name == name
-                    && labels.iter().all(|(key, value)| {
-                        sample
-                            .labels
-                            .iter()
-                            .any(|label| label.key == *key && label.value == *value)
-                    })
-            })
-            .map(|sample| sample.count)
+    impl RecordingSyncObserver {
+        fn lock_contention_count(&self, operation: &'static str) -> u64 {
+            *self
+                .lock_contention
+                .lock()
+                .expect("lock_contention poisoned")
+                .get(operation)
+                .unwrap_or(&0)
+        }
+
+        fn lock_cleanup_count(&self, operation: &'static str, outcome: &'static str) -> u64 {
+            *self
+                .lock_cleanup
+                .lock()
+                .expect("lock_cleanup poisoned")
+                .get(&(operation, outcome))
+                .unwrap_or(&0)
+        }
+
+        fn backup_ref_scan_samples(&self) -> usize {
+            self.backup_ref_scan_samples
+                .lock()
+                .expect("backup_ref_scan_samples poisoned")
+                .len()
+        }
+
+        fn backup_ref_pruned_total(&self) -> u64 {
+            *self
+                .backup_ref_pruned_total
+                .lock()
+                .expect("backup_ref_pruned_total poisoned")
+        }
+    }
+
+    impl SyncObserver for RecordingSyncObserver {
+        fn on_backup_ref_scan(&self, count: usize) {
+            self.backup_ref_scan_samples
+                .lock()
+                .expect("backup_ref_scan_samples poisoned")
+                .push(count);
+        }
+
+        fn on_backup_ref_pruned(&self, count: usize) {
+            let mut total = self
+                .backup_ref_pruned_total
+                .lock()
+                .expect("backup_ref_pruned_total poisoned");
+            *total = total.saturating_add(u64::try_from(count).unwrap_or(u64::MAX));
+        }
+
+        fn on_backup_ref_lock_contention(&self, operation: &'static str) {
+            let mut counts = self
+                .lock_contention
+                .lock()
+                .expect("lock_contention poisoned");
+            *counts.entry(operation).or_insert(0) += 1;
+        }
+
+        fn on_backup_ref_lock_cleanup(&self, operation: &'static str, outcome: &'static str) {
+            let mut counts = self.lock_cleanup.lock().expect("lock_cleanup poisoned");
+            *counts.entry((operation, outcome)).or_insert(0) += 1;
+        }
     }
 
     fn write_store_commit(repo: &Repository, parent: Option<Oid>, message: &str) -> Oid {
@@ -1827,6 +1947,7 @@ mod tests {
         let fetched = SyncProcess {
             repo_path: PathBuf::new(),
             config: SyncConfig::default(),
+            observer: Arc::new(NoopSyncObserver),
             phase: Fetched {
                 local_oid: Oid::from_bytes(&[1; 20]).unwrap(),
                 remote_oid: Oid::from_bytes(&[2; 20]).unwrap(),
@@ -2008,7 +2129,7 @@ mod tests {
         for i in 0..(MAX_BACKUP_REFS + 10) {
             let oid = write_store_commit(&repo, parent, &format!("commit-{i}"));
             parent = Some(oid);
-            ensure_backup_ref(&repo, oid).unwrap();
+            ensure_backup_ref_with_observer(&repo, oid, &NoopSyncObserver).unwrap();
             latest = oid;
         }
 
@@ -2036,7 +2157,7 @@ mod tests {
         }
         std::fs::write(&lock_path, format!("pid={}\n", i32::MAX)).unwrap();
 
-        ensure_backup_ref(&repo, oid).unwrap();
+        ensure_backup_ref_with_observer(&repo, oid, &NoopSyncObserver).unwrap();
 
         assert_eq!(repo.refname_to_id(&backup_ref).unwrap(), oid);
         assert!(!lock_path.exists());
@@ -2056,7 +2177,7 @@ mod tests {
         }
         std::fs::write(&lock_path, format!("pid={}\n", std::process::id())).unwrap();
 
-        prune_backup_refs(&repo, 0, Oid::zero()).unwrap();
+        prune_backup_refs_with_observer(&repo, 0, Oid::zero(), &NoopSyncObserver).unwrap();
 
         assert_eq!(repo.refname_to_id(&backup_ref).unwrap(), oid);
         assert!(lock_path.exists());
@@ -2066,6 +2187,7 @@ mod tests {
     fn backup_ref_lock_contention_metrics_for_create_and_delete() {
         let tmp = TempDir::new().unwrap();
         let repo = Repository::init(tmp.path()).unwrap();
+        let observer = RecordingSyncObserver::default();
         let create_oid = write_store_commit(&repo, None, "create-target");
         let create_ref = format!("{BACKUP_REF_PREFIX}{create_oid}");
         let create_lock_path = backup_ref_lock_path(&repo, &create_ref);
@@ -2074,40 +2196,23 @@ mod tests {
         }
         std::fs::write(&create_lock_path, format!("pid={}\n", std::process::id())).unwrap();
 
-        let before_create = metrics::snapshot();
-        let before_create_lock = counter_value(
-            &before_create,
-            "backup_ref_lock_contention_total",
-            &[("operation", "create")],
-        )
-        .unwrap_or(0);
-        let before_create_cleanup = counter_value(
-            &before_create,
-            "backup_ref_lock_cleanup_total",
-            &[("operation", "create"), ("outcome", "pid_alive")],
-        )
-        .unwrap_or(0);
+        let before_create_lock = observer.lock_contention_count("create");
+        let before_create_cleanup = observer.lock_cleanup_count("create", "pid_alive");
 
-        assert!(!create_backup_reference(&repo, &create_ref, create_oid).unwrap());
-
-        let after_create = metrics::snapshot();
         assert!(
-            counter_value(
-                &after_create,
-                "backup_ref_lock_contention_total",
-                &[("operation", "create")]
-            )
-            .unwrap_or(0)
-                >= before_create_lock + 1
+            !create_backup_reference_with_observer(&repo, &create_ref, create_oid, &observer)
+                .unwrap()
+        );
+
+        let after_create_lock = observer.lock_contention_count("create");
+        let after_create_cleanup = observer.lock_cleanup_count("create", "pid_alive");
+        assert!(
+            after_create_lock >= before_create_lock + 1,
+            "expected create lock contention callback to increment"
         );
         assert!(
-            counter_value(
-                &after_create,
-                "backup_ref_lock_cleanup_total",
-                &[("operation", "create"), ("outcome", "pid_alive")]
-            )
-            .unwrap_or(0)
-                >= before_create_cleanup + 1
+            after_create_cleanup >= before_create_cleanup + 1,
+            "expected create lock cleanup callback to increment"
         );
 
         let delete_oid = write_store_commit(&repo, Some(create_oid), "delete-target");
@@ -2120,41 +2225,21 @@ mod tests {
         }
         std::fs::write(&delete_lock_path, format!("pid={}\n", std::process::id())).unwrap();
 
-        let before_delete = metrics::snapshot();
-        let before_delete_lock = counter_value(
-            &before_delete,
-            "backup_ref_lock_contention_total",
-            &[("operation", "delete")],
-        )
-        .unwrap_or(0);
-        let before_delete_cleanup = counter_value(
-            &before_delete,
-            "backup_ref_lock_cleanup_total",
-            &[("operation", "delete"), ("outcome", "pid_alive")],
-        )
-        .unwrap_or(0);
+        let before_delete_lock = observer.lock_contention_count("delete");
+        let before_delete_cleanup = observer.lock_cleanup_count("delete", "pid_alive");
 
-        assert!(!delete_backup_reference(&repo, &delete_ref).unwrap());
+        assert!(!delete_backup_reference_with_observer(&repo, &delete_ref, &observer).unwrap());
         assert_eq!(repo.refname_to_id(&delete_ref).unwrap(), delete_oid);
 
-        let after_delete = metrics::snapshot();
+        let after_delete_lock = observer.lock_contention_count("delete");
+        let after_delete_cleanup = observer.lock_cleanup_count("delete", "pid_alive");
         assert!(
-            counter_value(
-                &after_delete,
-                "backup_ref_lock_contention_total",
-                &[("operation", "delete")]
-            )
-            .unwrap_or(0)
-                >= before_delete_lock + 1
+            after_delete_lock >= before_delete_lock + 1,
+            "expected delete lock contention callback to increment"
         );
         assert!(
-            counter_value(
-                &after_delete,
-                "backup_ref_lock_cleanup_total",
-                &[("operation", "delete"), ("outcome", "pid_alive")]
-            )
-            .unwrap_or(0)
-                >= before_delete_cleanup + 1
+            after_delete_cleanup >= before_delete_cleanup + 1,
+            "expected delete lock cleanup callback to increment"
         );
     }
 
@@ -2208,7 +2293,7 @@ mod tests {
         }
         std::fs::write(&lock_path, format!("pid={}\n", i32::MAX)).unwrap();
 
-        prune_backup_refs(&repo, 0, Oid::zero()).unwrap();
+        prune_backup_refs_with_observer(&repo, 0, Oid::zero(), &NoopSyncObserver).unwrap();
 
         let err = repo
             .refname_to_id(&backup_ref)
@@ -2259,6 +2344,7 @@ mod tests {
     fn prune_backup_refs_reports_scan_and_pruned_metrics() {
         let tmp = TempDir::new().unwrap();
         let repo = Repository::init(tmp.path()).unwrap();
+        let observer = RecordingSyncObserver::default();
         let mut parent = None;
         for i in 0..6 {
             let oid = write_store_commit(&repo, parent, &format!("commit-{i}"));
@@ -2268,24 +2354,20 @@ mod tests {
                 .unwrap();
         }
 
-        let before = metrics::snapshot();
-        let before_scan_samples =
-            histogram_count(&before, "backup_ref_scan_count", &[]).unwrap_or(0);
-        let before_pruned_total =
-            counter_value(&before, "backup_ref_pruned_total", &[]).unwrap_or(0);
+        let before_scan_samples = observer.backup_ref_scan_samples();
+        let before_pruned_total = observer.backup_ref_pruned_total();
 
-        prune_backup_refs(&repo, 2, Oid::zero()).unwrap();
+        prune_backup_refs_with_observer(&repo, 2, Oid::zero(), &observer).unwrap();
 
-        let after = metrics::snapshot();
+        let after_scan_samples = observer.backup_ref_scan_samples();
+        let after_pruned_total = observer.backup_ref_pruned_total();
         assert!(
-            histogram_count(&after, "backup_ref_scan_count", &[]).unwrap_or(0)
-                >= before_scan_samples + 1,
-            "expected at least one new backup_ref_scan_count sample"
+            after_scan_samples >= before_scan_samples + 1,
+            "expected at least one backup ref scan callback"
         );
         assert!(
-            counter_value(&after, "backup_ref_pruned_total", &[]).unwrap_or(0)
-                >= before_pruned_total + 4,
-            "expected at least four pruned refs in metrics"
+            after_pruned_total >= before_pruned_total + 4,
+            "expected at least four pruned refs in callbacks"
         );
     }
 
