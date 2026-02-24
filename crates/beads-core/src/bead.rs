@@ -15,6 +15,7 @@ use super::error::{CollisionError, CoreError};
 use super::identity::{ActorId, BeadId, BranchName, ContentHash};
 use super::time::{Stamp, WallClock, WriteStamp};
 use super::wire_bead::WorkflowStatus;
+use crate::crdt::Crdt;
 
 /// Immutable creation provenance.
 ///
@@ -105,12 +106,18 @@ macro_rules! define_bead_fields {
             $(pub $name: Lww<$type>),*
         }
 
+        impl Crdt for BeadFields {
+            fn join(&self, other: &Self) -> Self {
+                Self {
+                    $($name: Lww::join(&self.$name, &other.$name)),*
+                }
+            }
+        }
+
         impl BeadFields {
             /// Per-field LWW merge.
             pub fn join(a: &Self, b: &Self) -> Self {
-                Self {
-                    $($name: Lww::join(&a.$name, &b.$name)),*
-                }
+                <Self as Crdt>::join(a, b)
             }
 
             /// Collect all stamps for computing updated_stamp.

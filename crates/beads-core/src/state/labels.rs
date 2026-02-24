@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::collections::{Label, Labels};
+use crate::crdt::Crdt;
 use crate::identity::BeadId;
 use crate::orset::{Dot, Dvv, OrSet};
 use crate::time::Stamp;
@@ -15,6 +16,15 @@ use super::max_stamp;
 pub struct LabelState {
     pub(crate) set: OrSet<Label>,
     pub(crate) stamp: Option<Stamp>,
+}
+
+impl Crdt for LabelState {
+    fn join(&self, other: &Self) -> Self {
+        Self {
+            set: OrSet::join(&self.set, &other.set),
+            stamp: max_stamp(self.stamp.as_ref(), other.stamp.as_ref()),
+        }
+    }
 }
 
 impl LabelState {
@@ -50,10 +60,7 @@ impl LabelState {
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
-        Self {
-            set: OrSet::join(&a.set, &b.set),
-            stamp: max_stamp(a.stamp.as_ref(), b.stamp.as_ref()),
-        }
+        <Self as Crdt>::join(a, b)
     }
 }
 
@@ -67,6 +74,43 @@ impl Default for LabelState {
 #[derive(Clone, Debug, Default)]
 pub struct LabelStore {
     by_bead: BTreeMap<BeadId, BTreeMap<Stamp, LabelState>>,
+}
+
+impl Crdt for LabelStore {
+    fn join(&self, other: &Self) -> Self {
+        let mut merged = LabelStore::new();
+        let ids: BTreeSet<_> = self
+            .by_bead
+            .keys()
+            .chain(other.by_bead.keys())
+            .cloned()
+            .collect();
+        for id in ids {
+            let mut merged_lineages: BTreeMap<Stamp, LabelState> = BTreeMap::new();
+            if let Some(states) = self.by_bead.get(&id) {
+                for (lineage, state) in states {
+                    merged_lineages.insert(lineage.clone(), state.clone());
+                }
+            }
+            if let Some(states) = other.by_bead.get(&id) {
+                for (lineage, state) in states {
+                    match merged_lineages.get(lineage) {
+                        Some(existing) => {
+                            merged_lineages
+                                .insert(lineage.clone(), LabelState::join(existing, state));
+                        }
+                        None => {
+                            merged_lineages.insert(lineage.clone(), state.clone());
+                        }
+                    }
+                }
+            }
+            if !merged_lineages.is_empty() {
+                merged.by_bead.insert(id.clone(), merged_lineages);
+            }
+        }
+        merged
+    }
 }
 
 impl LabelStore {
@@ -100,33 +144,7 @@ impl LabelStore {
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
-        let mut merged = LabelStore::new();
-        let ids: BTreeSet<_> = a.by_bead.keys().chain(b.by_bead.keys()).cloned().collect();
-        for id in ids {
-            let mut merged_lineages: BTreeMap<Stamp, LabelState> = BTreeMap::new();
-            if let Some(states) = a.by_bead.get(&id) {
-                for (lineage, state) in states {
-                    merged_lineages.insert(lineage.clone(), state.clone());
-                }
-            }
-            if let Some(states) = b.by_bead.get(&id) {
-                for (lineage, state) in states {
-                    match merged_lineages.get(lineage) {
-                        Some(existing) => {
-                            merged_lineages
-                                .insert(lineage.clone(), LabelState::join(existing, state));
-                        }
-                        None => {
-                            merged_lineages.insert(lineage.clone(), state.clone());
-                        }
-                    }
-                }
-            }
-            if !merged_lineages.is_empty() {
-                merged.by_bead.insert(id.clone(), merged_lineages);
-            }
-        }
-        merged
+        <Self as Crdt>::join(a, b)
     }
 }
 

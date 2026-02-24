@@ -23,6 +23,7 @@ use sha2::{Digest, Sha256 as Sha256Hasher};
 use thiserror::Error;
 
 use super::identity::ReplicaId;
+use crate::crdt::Crdt;
 
 pub(crate) mod sealed {
     pub trait Sealed {}
@@ -61,6 +62,14 @@ pub struct Dvv {
     pub dots: BTreeSet<Dot>,
 }
 
+impl Crdt for Dvv {
+    fn join(&self, other: &Self) -> Self {
+        let mut merged = self.clone();
+        merged.merge(other);
+        merged
+    }
+}
+
 impl Dvv {
     pub fn dominates(&self, dot: &Dot) -> bool {
         self.max
@@ -83,9 +92,7 @@ impl Dvv {
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
-        let mut merged = a.clone();
-        merged.merge(b);
-        merged
+        <Self as Crdt>::join(a, b)
     }
 
     pub fn merge(&mut self, other: &Self) {
@@ -231,6 +238,27 @@ pub struct OrSet<V: OrSetValue> {
     cc: Dvv,
 }
 
+impl<V: OrSetValue> Crdt for OrSet<V> {
+    fn join(&self, other: &Self) -> Self {
+        let mut entries = self.entries.clone();
+        for (value, dots) in &other.entries {
+            entries
+                .entry(value.clone())
+                .or_default()
+                .extend(dots.iter().copied());
+        }
+
+        let mut merged = Self {
+            entries,
+            cc: Dvv::join(&self.cc, &other.cc),
+        };
+
+        merged.prune_dominated();
+        merged.resolve_all_collisions();
+        merged
+    }
+}
+
 impl<V: OrSetValue> OrSet<V> {
     pub fn new() -> Self {
         Self {
@@ -332,22 +360,7 @@ impl<V: OrSetValue> OrSet<V> {
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
-        let mut entries = a.entries.clone();
-        for (value, dots) in &b.entries {
-            entries
-                .entry(value.clone())
-                .or_default()
-                .extend(dots.iter().copied());
-        }
-
-        let mut merged = Self {
-            entries,
-            cc: Dvv::join(&a.cc, &b.cc),
-        };
-
-        merged.prune_dominated();
-        merged.resolve_all_collisions();
-        merged
+        <Self as Crdt>::join(a, b)
     }
 
     pub fn merge(&mut self, other: &Self) -> OrSetChange<V> {

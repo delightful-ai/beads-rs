@@ -505,8 +505,7 @@ impl SyncProcess<Fetched> {
         }
 
         // Pairwise CRDT merge
-        let mut merged = CanonicalState::join(local_state, &remote_state)
-            .map_err(|errs| SyncError::MergeConflict { errors: errs })?;
+        let mut merged = CanonicalState::join(local_state, &remote_state);
 
         // Garbage collect tombstones if configured.
         if let Some(ttl_ms) = config.tombstone_ttl_ms {

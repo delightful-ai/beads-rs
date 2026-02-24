@@ -4,6 +4,7 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::composite::Note;
+use crate::crdt::Crdt;
 use crate::event::sha256_bytes;
 use crate::identity::{BeadId, NoteId};
 use crate::time::Stamp;
@@ -13,6 +14,32 @@ use crate::wire_bead::WireLineageStamp;
 #[derive(Clone, Debug, Default)]
 pub struct NoteStore {
     pub(crate) by_bead: BTreeMap<BeadId, BTreeMap<Stamp, BTreeMap<NoteId, Note>>>,
+}
+
+impl Crdt for NoteStore {
+    fn join(&self, other: &Self) -> Self {
+        let mut merged = NoteStore::new();
+        for (id, lineages) in self.by_bead.iter().chain(other.by_bead.iter()) {
+            let entry = merged.by_bead.entry(id.clone()).or_default();
+            for (lineage, notes) in lineages {
+                let lineage_entry = entry.entry(lineage.clone()).or_default();
+                for (note_id, note) in notes {
+                    match lineage_entry.get(note_id) {
+                        None => {
+                            lineage_entry.insert(note_id.clone(), note.clone());
+                        }
+                        Some(existing) => {
+                            if note_collision_cmp(existing, note) == Ordering::Less {
+                                lineage_entry.insert(note_id.clone(), note.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        merged
+    }
 }
 
 impl NoteStore {
@@ -95,27 +122,7 @@ impl NoteStore {
     }
 
     pub fn join(a: &Self, b: &Self) -> Self {
-        let mut merged = NoteStore::new();
-        for (id, lineages) in a.by_bead.iter().chain(b.by_bead.iter()) {
-            let entry = merged.by_bead.entry(id.clone()).or_default();
-            for (lineage, notes) in lineages {
-                let lineage_entry = entry.entry(lineage.clone()).or_default();
-                for (note_id, note) in notes {
-                    match lineage_entry.get(note_id) {
-                        None => {
-                            lineage_entry.insert(note_id.clone(), note.clone());
-                        }
-                        Some(existing) => {
-                            if note_collision_cmp(existing, note) == Ordering::Less {
-                                lineage_entry.insert(note_id.clone(), note.clone());
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        merged
+        <Self as Crdt>::join(a, b)
     }
 }
 
