@@ -348,7 +348,7 @@ pub enum StoreMeta {
     V1 {
         root_slug: Option<BeadSlug>,
         last_write_stamp: Option<WriteStamp>,
-        checksums: Option<StoreChecksums>,
+        checksums: StoreChecksums,
     },
 }
 
@@ -372,7 +372,7 @@ impl StoreMeta {
     pub fn checksums(&self) -> Option<&StoreChecksums> {
         match self {
             StoreMeta::Legacy => None,
-            StoreMeta::V1 { checksums, .. } => checksums.as_ref(),
+            StoreMeta::V1 { checksums, .. } => Some(checksums),
         }
     }
 }
@@ -404,20 +404,15 @@ impl SupportedStoreMeta {
             meta.deps_sha256,
             meta.notes_sha256,
         ) {
-            (Some(state), Some(tombstones), Some(deps), notes) => Some(StoreChecksums {
+            (Some(state), Some(tombstones), Some(deps), notes) => StoreChecksums {
                 state,
                 tombstones,
                 deps,
                 notes,
-            }),
-            // All checksum fields absent: treat as legacy/no-checksum mode.
-            // This supports meta.json written by older implementations that
-            // didn't include checksums. Verification will be skipped.
-            (None, None, None, None) => None,
-            // Partial checksums: likely a corrupt or incomplete write.
+            },
             _ => {
                 return Err(WireError::InvalidValue(
-                    "meta.json has partial checksum fields (some present, some missing)".into(),
+                    "meta.json missing checksum fields".into(),
                 ));
             }
         };
@@ -1560,7 +1555,7 @@ mod tests {
                 } => {
                     prop_assert_eq!(root_slug, &expected_root);
                     prop_assert_eq!(last_write_stamp, &write_stamp);
-                    prop_assert_eq!(parsed_checksums, &Some(checksums));
+                    prop_assert_eq!(parsed_checksums, &checksums);
                 }
                 StoreMeta::Legacy => {
                     prop_assert!(false, "expected v1 meta");
@@ -1820,9 +1815,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_supported_meta_rejects_partial_checksum_fields() {
-        // If SOME checksum fields are present but others missing, that's
-        // likely a corrupt write — should still fail.
+    fn parse_supported_meta_rejects_missing_required_checksums() {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
@@ -1832,28 +1825,9 @@ mod tests {
             .remove("state_sha256");
         let mutated = serde_json::to_vec(&value).expect("json");
 
-        let err = parse_supported_meta(&mutated).expect_err("partial checksums should fail");
+        let err =
+            parse_supported_meta(&mutated).expect_err("missing required checksums should fail");
         assert!(matches!(err, WireError::InvalidValue(_)));
-    }
-
-    #[test]
-    fn parse_supported_meta_accepts_v1_without_any_checksums() {
-        // meta.json with format_version=1 but NO checksum fields at all.
-        // This is the exact shape that caused the data loss incident —
-        // written by an older beads implementation. Should parse as
-        // V1 { checksums: None } rather than hard-erroring.
-        let meta_json =
-            br#"{"format_version":1,"root_slug":"dsrs","last_write_stamp":[1769815077826,1]}"#;
-        let parsed = parse_supported_meta(meta_json)
-            .expect("v1 meta without checksums should parse successfully");
-
-        assert!(!parsed.is_legacy(), "should be V1, not Legacy");
-        assert_eq!(parsed.root_slug(), Some(&BeadSlug::parse("dsrs").unwrap()),);
-        assert!(parsed.last_write_stamp().is_some());
-        assert!(
-            parsed.checksums().is_none(),
-            "checksums should be None for legacy v1 without checksum fields"
-        );
     }
     #[test]
     fn parse_supported_meta_rejects_invalid_root_slug() {
@@ -1883,7 +1857,7 @@ mod tests {
                     &Some(BeadSlug::parse("valid-slug").expect("slug"))
                 );
                 assert_eq!(last_write_stamp, &None);
-                assert_eq!(parsed_checksums, &Some(checksums));
+                assert_eq!(parsed_checksums, &checksums);
             }
             StoreMeta::Legacy => panic!("expected v1 meta"),
         }

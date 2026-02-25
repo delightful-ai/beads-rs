@@ -207,6 +207,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "beads-git"
+version = "0.2.0-alpha"
+dependencies = [
+ "beads-core",
+ "bytes",
+ "dirs",
+ "flate2",
+ "git2",
+ "hex",
+ "nix",
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "beads-macros"
 version = "0.2.0-alpha"
 
@@ -220,6 +242,7 @@ dependencies = [
  "beads-core",
  "beads-daemon",
  "beads-daemon-core",
+ "beads-git",
  "beads-macros",
  "beads-surface",
  "bytes",

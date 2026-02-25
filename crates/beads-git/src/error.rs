@@ -6,9 +6,9 @@ use thiserror::Error;
 
 use crate::core::error::details as error_details;
 use crate::core::{
-    CliErrorCode, ErrorCode, ErrorPayload, IntoErrorPayload, ProtocolErrorCode, StateJsonlSha256,
+    CliErrorCode, Effect, ErrorCode, ErrorPayload, IntoErrorPayload, ProtocolErrorCode,
+    StateJsonlSha256, Transience,
 };
-use crate::error::{Effect, Transience};
 
 /// Errors that can occur during git sync operations.
 #[derive(Error, Debug)]

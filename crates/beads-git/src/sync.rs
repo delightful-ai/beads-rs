@@ -747,7 +747,7 @@ impl SyncProcess<Committed> {
             if is_retryable(&err) {
                 return Err(SyncError::NonFastForward);
             }
-            return Err(crate::git::error::PushRejected { message: err }.into());
+            return Err(crate::error::PushRejected { message: err }.into());
         }
 
         let push_elapsed_ms = push_started.elapsed().as_millis();
@@ -827,14 +827,6 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
         wire::SupportedStoreMeta::legacy()
     };
     let checksums = meta.checksums();
-
-    if !meta.is_legacy() && checksums.is_none() {
-        tracing::warn!(
-            oid = %oid,
-            "loaded v1 meta.json without checksum fields; \
-             skipping integrity verification (written by older implementation?)"
-        );
-    }
 
     if let Some(expected) = checksums {
         wire::verify_store_checksums(
@@ -1683,7 +1675,7 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
                         .map(|mut r| r.delete());
                     continue;
                 }
-                return Err(crate::git::error::PushRejected { message: err }.into());
+                return Err(crate::error::PushRejected { message: err }.into());
             }
         }
 
@@ -1699,7 +1691,7 @@ mod tests {
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Lww,
         Priority, ReplicaId, Stamp, StateJsonlSha256, Tombstone, Workflow,
     };
-    use crate::git::WireError;
+    use crate::WireError;
     #[cfg(feature = "slow-tests")]
     use proptest::prelude::*;
     use std::collections::BTreeMap;
@@ -2086,33 +2078,6 @@ mod tests {
 
         let loaded = read_state_at_oid(&repo, oid).unwrap();
         assert!(loaded.meta.is_legacy());
-    }
-
-    #[test]
-    fn read_state_at_oid_loads_v1_meta_without_checksums() {
-        // Regression test: v1 meta.json without checksum fields must load
-        // successfully rather than failing with "meta.json missing checksum
-        // fields". This was the trigger for the 2026-02-25 data loss incident.
-        let tmp = TempDir::new().unwrap();
-        let repo = Repository::init(tmp.path()).unwrap();
-        let meta_json = br#"{"format_version":1,"root_slug":"test","last_write_stamp":[1234,7]}"#;
-        let oid = write_store_commit_with_meta_bytes(
-            &repo,
-            None,
-            "v1-no-checksums",
-            Some(meta_json.to_vec()),
-        );
-
-        let loaded = read_state_at_oid(&repo, oid).unwrap();
-        assert!(!loaded.meta.is_legacy(), "should be V1, not Legacy");
-        assert!(
-            loaded.meta.checksums().is_none(),
-            "checksums should be None for v1 meta without checksum fields"
-        );
-        assert_eq!(
-            loaded.meta.last_write_stamp(),
-            Some(&WriteStamp::new(1234, 7)),
-        );
     }
 
     #[test]

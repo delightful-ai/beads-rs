@@ -21,6 +21,7 @@ beads-api = { path = "../beads-api" }
 beads-surface = { path = "../beads-surface" }
 beads-macros = { path = "../beads-macros" }
 beads-cli = { path = "../beads-cli" }
+beads-git = { path = "../beads-git" }
 beads-daemon = { path = "../beads-daemon" }
 beads-daemon-core = { path = "../beads-daemon-core" }
 clap = { version = "4", features = ["derive"], optional = true }

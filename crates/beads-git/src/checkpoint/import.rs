@@ -1013,10 +1013,10 @@ mod tests {
         ActorId, BeadId, BeadType, CanonicalState, CheckpointContentSha256, Dvv, NamespaceId,
         Priority, ReplicaId, StoreEpoch, StoreId,
     };
-    use crate::git::checkpoint::{
+    use crate::checkpoint::{
         CheckpointFileKind, CheckpointShardPath, ManifestFile, shard_name,
     };
-    use crate::git::wire::{serialize_deps, serialize_state, serialize_tombstones};
+    use crate::wire::{serialize_deps, serialize_state, serialize_tombstones};
 
     fn write_file(path: &Path, bytes: &[u8]) {
         std::fs::create_dir_all(path.parent().expect("parent")).unwrap();
