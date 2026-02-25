@@ -242,8 +242,7 @@ impl BeadView {
             .iter()
             .map(|note| Stamp::new(note.at.clone(), note.author.clone()))
             .max();
-        let updated_stamp =
-            compute_updated_stamp(&bead, label_stamp.as_ref(), note_stamp.as_ref());
+        let updated_stamp = compute_updated_stamp(&bead, label_stamp.as_ref(), note_stamp.as_ref());
         let content_hash = compute_content_hash(&bead, &labels, &notes);
         Self {
             bead,
