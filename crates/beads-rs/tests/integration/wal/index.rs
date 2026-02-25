@@ -4,7 +4,7 @@ use std::fs::{self, OpenOptions};
 
 use uuid::Uuid;
 
-use beads_rs::daemon::wal::{
+use beads_daemon::testkit::wal::{
     FrameWriter, SegmentRow, VerifiedRecord, WalIndex, WalReplayError, catch_up_index,
     rebuild_index,
 };

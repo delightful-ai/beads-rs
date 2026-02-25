@@ -1687,11 +1687,11 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::WireError;
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Lww,
         Priority, ReplicaId, Stamp, StateJsonlSha256, Tombstone, Workflow,
     };
-    use crate::WireError;
     #[cfg(feature = "slow-tests")]
     use proptest::prelude::*;
     use std::collections::BTreeMap;

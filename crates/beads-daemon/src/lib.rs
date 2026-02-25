@@ -20,6 +20,8 @@ pub mod runtime;
 pub mod scheduler;
 pub mod telemetry;
 pub mod test_utils;
+#[cfg(any(test, feature = "test-harness"))]
+pub mod testkit;
 
 pub mod error {
     pub use beads_core::{Effect, Transience};

@@ -1008,13 +1008,11 @@ mod tests {
     use tempfile::TempDir;
     use uuid::Uuid;
 
+    use crate::checkpoint::{CheckpointFileKind, CheckpointShardPath, ManifestFile, shard_name};
     use crate::core::wire_bead::{WireClaimSnapshot, WireWorkflowSnapshot};
     use crate::core::{
         ActorId, BeadId, BeadType, CanonicalState, CheckpointContentSha256, Dvv, NamespaceId,
         Priority, ReplicaId, StoreEpoch, StoreId,
-    };
-    use crate::checkpoint::{
-        CheckpointFileKind, CheckpointShardPath, ManifestFile, shard_name,
     };
     use crate::wire::{serialize_deps, serialize_state, serialize_tombstones};
 

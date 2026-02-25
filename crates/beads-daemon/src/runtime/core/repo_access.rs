@@ -31,10 +31,7 @@ impl Daemon {
 
     #[cfg(feature = "test-harness")]
     #[allow(dead_code)]
-    pub fn store_runtime_by_id_mut(
-        &mut self,
-        store_id: StoreId,
-    ) -> Option<&mut StoreRuntime> {
+    pub fn store_runtime_by_id_mut(&mut self, store_id: StoreId) -> Option<&mut StoreRuntime> {
         self.stores.get_mut(&store_id)
     }
 
