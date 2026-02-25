@@ -2,7 +2,7 @@
 
 use std::num::NonZeroU32;
 
-use crate::core::{DurabilityClass, DurabilityReceipt, NamespaceId, ReplicaId, Seq1};
+use beads_core::{DurabilityClass, DurabilityReceipt, NamespaceId, ReplicaId, Seq1};
 use beads_daemon_core::durability::{DurabilityCoordinator, DurabilityError, ReplicatedPoll};
 
 pub type OpError = DurabilityError;

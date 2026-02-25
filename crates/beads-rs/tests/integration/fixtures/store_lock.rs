@@ -4,7 +4,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
-use beads_rs::core::StoreId;
+use beads_core::StoreId;
 use beads_rs::paths::{override_data_dir_for_tests, store_lock_path};
 use thiserror::Error;
 

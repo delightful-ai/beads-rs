@@ -341,6 +341,7 @@ dependencies = [
 name = "beads_stateright_models"
 version = "0.2.0-alpha"
 dependencies = [
+ "beads-core",
  "beads-daemon-core",
  "beads-rs",
  "bytes",

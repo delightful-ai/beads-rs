@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use crate::config::PathsConfig;
-use crate::core::{NamespaceId, StoreId};
 use beads_cli::paths as moved;
+use beads_core::{NamespaceId, StoreId};
 
 // =============================================================================
 // Config-based path overrides (from beads.toml)

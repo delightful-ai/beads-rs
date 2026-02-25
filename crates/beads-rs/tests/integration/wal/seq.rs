@@ -2,8 +2,8 @@
 
 use uuid::Uuid;
 
+use beads_core::{Limits, NamespaceId, ReplicaId, Seq1, StoreMeta};
 use beads_daemon::testkit::wal::{VerifiedRecord, WalIndex, rebuild_index};
-use beads_rs::core::{Limits, NamespaceId, ReplicaId, Seq1, StoreMeta};
 
 use crate::fixtures::wal::{TempWalDir, record_for_seq};
 

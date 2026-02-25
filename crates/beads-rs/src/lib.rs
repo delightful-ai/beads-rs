@@ -4,18 +4,11 @@
 // Re-export enum_str! macro from beads-macros for internal use and downstream consumers
 pub use beads_macros::enum_str;
 
-// Re-export beads-core as core module for backwards compatibility
-pub use beads_core as core;
-
-pub use beads_api as api;
-// Optional direct access to surface types.
-pub use beads_surface as surface;
 #[cfg(feature = "cli")]
 pub mod cli;
 pub mod compat;
 pub mod config;
 pub mod error;
-pub mod git;
 #[cfg(feature = "model-testing")]
 pub mod model;
 pub mod paths;

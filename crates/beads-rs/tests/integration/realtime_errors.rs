@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use beads_rs::core::ErrorCode;
+use beads_core::ErrorCode;
 
 fn parse_error_codes(doc: &str) -> BTreeSet<String> {
     let mut codes = BTreeSet::new();

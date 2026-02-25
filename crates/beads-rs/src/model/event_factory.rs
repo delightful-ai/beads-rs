@@ -1,6 +1,6 @@
 //! Helpers to construct production EventBody/EventFrameV1 instances for models.
 
-use crate::core::{
+use beads_core::{
     ActorId, ClientRequestId, EventBody, EventBytes, EventFrameError, EventFrameV1, EventId,
     EventKindV1, HlcMax, NamespaceId, Opaque, ReplicaId, Seq1, Sha256, StoreIdentity, TraceId,
     TxnDeltaV1, TxnId, TxnV1, encode_event_body_canonical, hash_event_body,

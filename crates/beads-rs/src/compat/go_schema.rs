@@ -5,14 +5,14 @@
 
 use serde::Serialize;
 
-use crate::core::ParentEdge;
-use crate::core::Stamp;
-use crate::core::composite::{Note, Workflow};
-use crate::core::dep::DepKey;
-use crate::core::domain::{BeadType, DepKind};
-use crate::core::state::CanonicalState;
-use crate::core::tombstone::Tombstone;
-use crate::core::{BeadProjection, BeadView};
+use beads_core::ParentEdge;
+use beads_core::Stamp;
+use beads_core::composite::{Note, Workflow};
+use beads_core::dep::DepKey;
+use beads_core::domain::{BeadType, DepKind};
+use beads_core::state::CanonicalState;
+use beads_core::tombstone::Tombstone;
+use beads_core::{BeadProjection, BeadView};
 
 /// Go-compatible issue representation.
 ///
@@ -296,12 +296,12 @@ fn dep_kind_to_go_type(kind: DepKind) -> String {
 }
 
 /// Convert Stamp to RFC3339 string.
-fn stamp_to_rfc3339(stamp: &crate::core::time::Stamp) -> String {
+fn stamp_to_rfc3339(stamp: &beads_core::time::Stamp) -> String {
     write_stamp_to_rfc3339(&stamp.at)
 }
 
 /// Convert WriteStamp to RFC3339 string.
-fn write_stamp_to_rfc3339(ws: &crate::core::time::WriteStamp) -> String {
+fn write_stamp_to_rfc3339(ws: &beads_core::time::WriteStamp) -> String {
     use chrono::{TimeZone, Utc};
 
     let secs = (ws.wall_ms / 1000) as i64;
@@ -314,7 +314,7 @@ fn write_stamp_to_rfc3339(ws: &crate::core::time::WriteStamp) -> String {
 }
 
 /// Check if a bead is blocked by unfinished dependencies.
-pub fn is_bead_blocked(bead_id: &crate::core::identity::BeadId, state: &CanonicalState) -> bool {
+pub fn is_bead_blocked(bead_id: &beads_core::identity::BeadId, state: &CanonicalState) -> bool {
     // Get all dependencies where this bead depends on something
     for key in state.deps_from(bead_id) {
         // Only Blocks kind actually blocks
@@ -339,7 +339,7 @@ mod tests {
 
     #[test]
     fn test_write_stamp_to_rfc3339() {
-        let ws = crate::core::time::WriteStamp::new(1700000000000, 0); // Nov 14, 2023
+        let ws = beads_core::time::WriteStamp::new(1700000000000, 0); // Nov 14, 2023
         let rfc = write_stamp_to_rfc3339(&ws);
         assert!(rfc.starts_with("2023-11-14"));
         assert!(rfc.ends_with("Z"));
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn test_derive_status() {
-        use crate::core::composite::Closure;
+        use beads_core::composite::Closure;
 
         assert_eq!(derive_status(&Workflow::Open, false), GoIssueStatus::Open);
         assert_eq!(derive_status(&Workflow::Open, true), GoIssueStatus::Blocked);

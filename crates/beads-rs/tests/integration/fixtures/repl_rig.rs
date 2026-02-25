@@ -14,21 +14,21 @@ use rusqlite::Connection;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-use beads_rs::api::{AdminStatusOutput, QueryResult};
-use beads_rs::config::{Config, ReplicationPeerConfig};
-use beads_rs::core::StoreId;
-use beads_rs::core::error::CliErrorCode;
-use beads_rs::core::{
+use beads_api::{AdminStatusOutput, QueryResult};
+use beads_core::StoreId;
+use beads_core::error::CliErrorCode;
+use beads_core::{
     Applied, BeadId, BeadType, ErrorPayload, IntoErrorPayload, NamespaceId, Priority,
     ProtocolErrorCode, ReplicaDurabilityRole, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster,
     StoreEpoch, StoreMeta, Watermarks,
 };
-use beads_rs::surface::ipc::{
+use beads_rs::config::{Config, ReplicationPeerConfig};
+use beads_surface::ipc::{
     AdminOp, CreatePayload, EmptyPayload, IdPayload, IpcClient, IpcConnection, IpcError,
     MutationCtx, MutationMeta, ReadConsistency, ReadCtx, RepoCtx, Request, Response,
     ResponsePayload,
 };
-use beads_rs::surface::ops::OpResult;
+use beads_surface::ops::OpResult;
 
 use super::daemon_boundary::wal::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 use super::daemon_runtime::{crash_daemon, shutdown_daemon};

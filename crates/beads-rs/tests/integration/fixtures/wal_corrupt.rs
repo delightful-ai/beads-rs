@@ -4,7 +4,7 @@ use std::fs::OpenOptions;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
-use beads_rs::core::NamespaceId;
+use beads_core::NamespaceId;
 use crc32c::crc32c;
 
 use super::daemon_boundary::wal::{

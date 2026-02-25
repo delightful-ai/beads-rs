@@ -1,14 +1,14 @@
 #![allow(dead_code)]
 
-use beads_rs::core::{
+use beads_core::{
     ActorId, BeadId, BeadType, ClientRequestId, DepKind, NamespaceId, Priority, TraceId,
     sha256_bytes,
 };
-use beads_rs::surface::ipc::{
+use beads_surface::ipc::{
     AddNotePayload, ClaimPayload, ClosePayload, CreatePayload, DeletePayload, DepPayload,
     IdPayload, LabelsPayload, LeasePayload, ParentPayload, UpdatePayload,
 };
-use beads_rs::surface::ops::{BeadPatch, Patch};
+use beads_surface::ops::{BeadPatch, Patch};
 use uuid::Uuid;
 
 use super::identity;

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::core::{
+use beads_core::{
     ActorId, ClientRequestId, DurabilityClass, Limits, NamespaceId, NamespacePolicies,
     NamespacePolicy, ReplicaId, ReplicaRole,
 };

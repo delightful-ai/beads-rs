@@ -1,15 +1,15 @@
 use thiserror::Error;
 
-use crate::core::CoreError;
-use crate::git::SyncError;
-use crate::surface::IpcError;
 use beads_cli::commands::CommandError;
 use beads_cli::commands::setup::SetupError;
 use beads_cli::filters::FilterError;
 use beads_cli::migrate::GoImportError;
 use beads_cli::runtime::RuntimeError;
 use beads_cli::validation::ValidationError;
+use beads_core::CoreError;
 use beads_core::ErrorPayload;
+use beads_git::SyncError;
+use beads_surface::IpcError;
 
 // Re-export Effect and Transience from beads-core
 pub use beads_core::{Effect, Transience};

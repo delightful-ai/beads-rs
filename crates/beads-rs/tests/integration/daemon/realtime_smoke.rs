@@ -1,6 +1,6 @@
 //! Realtime smoke test for basic WAL + apply plumbing.
 
-use beads_rs::core::NamespaceId;
+use beads_core::NamespaceId;
 
 use crate::fixtures::admin_status::StatusCollector;
 use crate::fixtures::load_gen::{Autostart, LoadGenerator};
