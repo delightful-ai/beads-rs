@@ -401,7 +401,7 @@ mod tests {
         ActorId, CanonicalState, ContentHash, Durable, HeadStatus, NamespaceId, ReplicaId, Seq0,
         StoreEpoch, StoreId, StoreState, Watermarks,
     };
-    use crate::git::checkpoint::{
+    use crate::checkpoint::{
         CheckpointExportInput, CheckpointSnapshotInput, build_snapshot, export_checkpoint,
     };
     use crate::paths;

@@ -7,6 +7,7 @@ const POLICY_CRATES: &[&str] = &[
     "beads-api",
     "beads-surface",
     "beads-cli",
+    "beads-git",
     "beads-daemon",
     "beads-daemon-core",
     "beads-rs",
@@ -19,6 +20,7 @@ const ALLOWED_EDGES: &[&str] = &[
     "beads-cli -> beads-surface",
     "beads-cli -> beads-core",
     "beads-cli -> beads-api",
+    "beads-git -> beads-core",
     "beads-daemon -> beads-surface",
     "beads-daemon -> beads-api",
     "beads-daemon -> beads-core",
@@ -28,6 +30,7 @@ const ALLOWED_EDGES: &[&str] = &[
     "beads-rs -> beads-api",
     "beads-rs -> beads-surface",
     "beads-rs -> beads-cli",
+    "beads-rs -> beads-git",
     "beads-rs -> beads-daemon",
     "beads-rs -> beads-daemon-core",
 ];

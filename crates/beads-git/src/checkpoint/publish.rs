@@ -16,7 +16,7 @@ use super::import::{CheckpointImportError, import_checkpoint_export, merge_store
 use super::json_canon::{CanonJsonError, to_canon_json_bytes};
 use super::layout::{MANIFEST_FILE, META_FILE};
 use crate::core::{CheckpointContentSha256, Limits, StoreEpoch, StoreId};
-use crate::git::error::SyncError;
+use crate::error::SyncError;
 
 pub const STORE_META_REF: &str = "refs/beads/meta";
 const STORE_META_FILE: &str = "store_meta.json";
@@ -819,7 +819,7 @@ mod tests {
         ActorId, CanonicalState, ContentHash, Durable, HeadStatus, Limits, NamespaceId, ReplicaId,
         Seq0, StoreEpoch, StoreId, StoreState, Watermarks,
     };
-    use crate::git::checkpoint::{
+    use crate::checkpoint::{
         CheckpointExportInput, CheckpointSnapshotInput, build_snapshot, export_checkpoint,
     };
 

@@ -747,7 +747,7 @@ impl SyncProcess<Committed> {
             if is_retryable(&err) {
                 return Err(SyncError::NonFastForward);
             }
-            return Err(crate::git::error::PushRejected { message: err }.into());
+            return Err(crate::error::PushRejected { message: err }.into());
         }
 
         let push_elapsed_ms = push_started.elapsed().as_millis();
@@ -1675,7 +1675,7 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
                         .map(|mut r| r.delete());
                     continue;
                 }
-                return Err(crate::git::error::PushRejected { message: err }.into());
+                return Err(crate::error::PushRejected { message: err }.into());
             }
         }
 
@@ -1691,7 +1691,7 @@ mod tests {
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Lww,
         Priority, ReplicaId, Stamp, StateJsonlSha256, Tombstone, Workflow,
     };
-    use crate::git::WireError;
+    use crate::WireError;
     #[cfg(feature = "slow-tests")]
     use proptest::prelude::*;
     use std::collections::BTreeMap;
