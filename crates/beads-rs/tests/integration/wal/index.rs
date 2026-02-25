@@ -8,7 +8,7 @@ use beads_daemon::testkit::wal::{
     FrameWriter, SegmentRow, VerifiedRecord, WalIndex, WalReplayError, catch_up_index,
     rebuild_index,
 };
-use beads_rs::{Limits, NamespaceId, ReplicaId, Seq0, Seq1, StoreMeta};
+use beads_rs::core::{Limits, NamespaceId, ReplicaId, Seq0, Seq1, StoreMeta};
 
 use crate::fixtures::wal::{SegmentFixture, TempWalDir, record_for_seq};
 

@@ -97,7 +97,7 @@ fn process_alive(pid: u32) -> bool {
 }
 
 #[cfg(feature = "slow-tests")]
-fn store_id_from_data_dir(data_dir: &Path) -> beads_rs::StoreId {
+fn store_id_from_data_dir(data_dir: &Path) -> beads_rs::core::StoreId {
     let stores_dir = data_dir.join("stores");
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -109,7 +109,7 @@ fn store_id_from_data_dir(data_dir: &Path) -> beads_rs::StoreId {
         if entries.len() == 1 {
             let meta_path = entries.remove(0).join("meta.json");
             let contents = fs::read_to_string(&meta_path).expect("read store meta");
-            let meta: beads_rs::StoreMeta =
+            let meta: beads_rs::core::StoreMeta =
                 serde_json::from_str(&contents).expect("parse store meta");
             return meta.store_id();
         }
@@ -160,7 +160,7 @@ struct TestRepo {
     remote_dir: TempDir,
     runtime_dir: TempDir,
     data_dir: PathBuf,
-    store_id: beads_rs::StoreId,
+    store_id: beads_rs::core::StoreId,
 }
 
 impl TestRepo {
@@ -179,7 +179,7 @@ impl TestRepo {
         let data_dir = data_dir_for_runtime(runtime_dir.path());
         let runtime_str = runtime_dir.path().to_string_lossy();
         let store_uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, runtime_str.as_bytes());
-        let store_id = beads_rs::StoreId::new(store_uuid);
+        let store_id = beads_rs::core::StoreId::new(store_uuid);
 
         Self {
             work_dir,

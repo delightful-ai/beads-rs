@@ -2,7 +2,7 @@
 
 use beads_rs::core::Label;
 use beads_rs::core::NoteAppendV1;
-use beads_rs::{
+use beads_rs::core::{
     ActorId, CanonicalState, DepKey, DepKind, EventBody, EventKindV1, HlcMax, Limits, ReplicaId,
     Stamp, TxnDeltaV1, TxnOpV1, ValidatedEventBody, WireBeadPatch, WireDepAddV1, WireDepRemoveV1,
     WireDotV1, WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireStamp, WriteStamp, apply_event,
@@ -25,7 +25,7 @@ fn validated(body: EventBody) -> ValidatedEventBody {
 }
 
 fn update_title_event(
-    bead_id: &beads_rs::BeadId,
+    bead_id: &beads_rs::core::BeadId,
     title: &str,
     actor: ActorId,
 ) -> ValidatedEventBody {

@@ -6,8 +6,8 @@ use beads_daemon::testkit::wal::{
     IndexDurabilityMode, SegmentConfig, SegmentSyncMode, SegmentWriter, SqliteWalIndex,
     WAL_FORMAT_VERSION, rebuild_index,
 };
+use beads_rs::core::{Limits, NamespaceId, Seq0, StoreMeta, StoreMetaVersions};
 use beads_rs::paths;
-use beads_rs::{Limits, NamespaceId, Seq0, StoreMeta, StoreMetaVersions};
 use rusqlite::params;
 use tempfile::TempDir;
 

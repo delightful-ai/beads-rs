@@ -9,7 +9,7 @@ use beads_daemon::testkit::repl::session::{
 use beads_daemon::testkit::repl::{
     ReplMessage, SessionAction, SessionConfig, WireEvents, WireReplMessage,
 };
-use beads_rs::{Limits, NamespaceId, ProtocolErrorCode, ReplicaId, StoreIdentity};
+use beads_rs::core::{Limits, NamespaceId, ProtocolErrorCode, ReplicaId, StoreIdentity};
 
 use crate::fixtures::identity;
 use crate::fixtures::repl_frames;

@@ -8,7 +8,7 @@ use beads_daemon::testkit::wal::fsck::{
     FsckCheckId, FsckEvidenceCode, FsckOptions, FsckRepairKind, FsckStatus, fsck_store_dir,
 };
 use beads_daemon::testkit::wal::{SegmentRow, VerifiedRecord, WalIndex, rebuild_index};
-use beads_rs::{Limits, NamespaceId, ReplicaId, StoreMeta};
+use beads_rs::core::{Limits, NamespaceId, ReplicaId, StoreMeta};
 
 use crate::fixtures::wal::{TempWalDir, record_for_seq};
 use crate::fixtures::wal_corrupt::{

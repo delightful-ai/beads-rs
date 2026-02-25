@@ -58,7 +58,7 @@ impl DaemonFixture {
             .join("daemon.meta.json")
     }
 
-    fn store_id(&self) -> beads_rs::StoreId {
+    fn store_id(&self) -> beads_rs::core::StoreId {
         let stores_dir = self.data_dir().join("stores");
         let mut entries: Vec<PathBuf> = fs::read_dir(&stores_dir)
             .expect("read stores dir")
@@ -69,7 +69,8 @@ impl DaemonFixture {
         assert_eq!(entries.len(), 1, "expected exactly one store dir");
         let meta_path = entries.remove(0).join("meta.json");
         let contents = fs::read_to_string(&meta_path).expect("read store meta");
-        let meta: beads_rs::StoreMeta = serde_json::from_str(&contents).expect("parse store meta");
+        let meta: beads_rs::core::StoreMeta =
+            serde_json::from_str(&contents).expect("parse store meta");
         meta.store_id()
     }
 

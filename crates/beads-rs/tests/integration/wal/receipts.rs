@@ -3,7 +3,7 @@
 use uuid::Uuid;
 
 use beads_daemon::testkit::wal::{ClientRequestEventIds, WalIndex, rebuild_index};
-use beads_rs::{
+use beads_rs::core::{
     DurabilityReceipt, EventId, Limits, NamespaceId, ReplicaId, Seq1, StoreEpoch, StoreId,
     StoreIdentity, TxnId, Watermarks, sha256_bytes,
 };

@@ -6,10 +6,10 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use beads_rs::surface::ipc::{EmptyPayload, IpcError, ReadConsistency, ReadCtx, Request, Response};
-use beads_rs::{
+use beads_rs::core::{
     Applied, CliErrorCode, HeadStatus, NamespaceId, ProtocolErrorCode, Seq0, Watermarks,
 };
+use beads_rs::surface::ipc::{EmptyPayload, IpcError, ReadConsistency, ReadCtx, Request, Response};
 
 use crate::fixtures::admin_status::StatusCollector;
 use crate::fixtures::ipc_stream::{StreamClientError, StreamingClient};
@@ -188,7 +188,7 @@ fn current_origin_seq(
     repo: &PathBuf,
     namespace: &NamespaceId,
     client: beads_rs::surface::ipc::IpcClient,
-) -> (beads_rs::ReplicaId, u64) {
+) -> (beads_rs::core::ReplicaId, u64) {
     let mut collector = StatusCollector::with_client(repo.clone(), client);
     let status = collector.sample().expect("admin status");
     let origin = status.replica_id;
@@ -202,7 +202,7 @@ fn current_origin_seq(
 
 fn require_min_seen(
     namespace: &NamespaceId,
-    origin: beads_rs::ReplicaId,
+    origin: beads_rs::core::ReplicaId,
     seq: u64,
 ) -> Watermarks<Applied> {
     let mut required = Watermarks::<Applied>::new();
@@ -219,7 +219,7 @@ fn require_min_seen(
 
 fn collect_origin_seqs(
     client: &mut StreamingClient,
-    origin: beads_rs::ReplicaId,
+    origin: beads_rs::core::ReplicaId,
     start_seq: u64,
     total: usize,
     repo: &PathBuf,

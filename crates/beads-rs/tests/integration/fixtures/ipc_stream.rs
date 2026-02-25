@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use beads_rs::NamespaceId;
 use beads_rs::api::{StreamEvent, SubscribeInfo};
+use beads_rs::core::NamespaceId;
 use beads_rs::surface::ipc::{
     EmptyPayload, IpcClient, IpcError, ReadConsistency, ReadCtx, Request, Response,
     ResponsePayload, SubscriptionStream,
@@ -23,7 +23,7 @@ pub enum StreamClientError {
     #[error(transparent)]
     Ipc(#[from] IpcError),
     #[error("stream error: {0:?}")]
-    Remote(Box<beads_rs::ErrorPayload>),
+    Remote(Box<beads_rs::core::ErrorPayload>),
     #[error("unexpected response payload: {0:?}")]
     Unexpected(Box<ResponsePayload>),
 }
@@ -133,11 +133,11 @@ mod tests {
     use super::*;
 
     use beads_rs::api::EventBody;
-    use beads_rs::surface::ipc::ResponsePayload;
-    use beads_rs::{
+    use beads_rs::core::{
         EventId, NamespaceId, ReplicaId, Seq1, StoreEpoch, StoreId, StoreIdentity, TxnDeltaV1,
         TxnId,
     };
+    use beads_rs::surface::ipc::ResponsePayload;
     use uuid::Uuid;
 
     #[test]

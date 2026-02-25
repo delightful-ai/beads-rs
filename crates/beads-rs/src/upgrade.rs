@@ -16,9 +16,12 @@ use beads_cli::upgrade::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use beads_daemon::runtime::ipc::{
+    Request, send_request_no_autostart, socket_path, wait_for_daemon_ready,
+};
+
 use crate::OpError;
 use crate::config::{Config, load_or_init};
-use crate::daemon::ipc::{Request, send_request_no_autostart, socket_path, wait_for_daemon_ready};
 use crate::{Error, Result};
 
 const AUTO_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);

@@ -12,7 +12,7 @@ use beads_daemon_core::repl::proto::{
     WatermarkMap, WatermarkState, Welcome, WireReplEnvelope, WireReplMessage, decode_envelope,
     encode_envelope,
 };
-use beads_rs::Limits;
+use beads_rs::core::Limits;
 use beads_rs::core::{
     ActorId, Durable, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HlcMax,
     NamespaceId, Opaque, ReplicaId, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnId, TxnV1,

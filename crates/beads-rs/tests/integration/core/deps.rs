@@ -1,11 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use beads_rs::git::wire::serialize_deps;
-use beads_rs::{
+use beads_rs::core::{
     BeadId, CanonicalState, DepKey, DepKind, EventBody, Limits, ParentEdge, ReplicaId, TxnDeltaV1,
     TxnOpV1, ValidatedEventBody, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1,
     WireParentAddV1, WireParentRemoveV1, apply_event,
 };
+use beads_rs::git::wire::serialize_deps;
 use serde_json::Value;
 use uuid::Uuid;
 
