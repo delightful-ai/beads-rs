@@ -2,22 +2,42 @@
 
 #![forbid(unsafe_code)]
 
+pub use beads_macros::enum_str;
+
 pub mod admission;
 pub mod broadcast;
 pub mod clock;
+pub mod compat;
 pub mod config;
 pub mod git_lane;
 pub mod io_budget;
 pub mod layout;
 pub mod metrics;
+pub mod paths;
 pub mod remote;
+pub mod repo;
+pub mod runtime;
 pub mod scheduler;
+pub mod telemetry;
 pub mod test_utils;
+
+pub mod error {
+    pub use beads_core::{Effect, Transience};
+}
+
+pub mod git {
+    pub use beads_git::*;
+}
+
+pub mod daemon {
+    pub use crate::runtime::*;
+}
 
 pub use beads_api as api;
 pub use beads_api::DaemonInfo;
 pub use beads_core as core;
 pub use beads_core::StoreId;
+pub use beads_core::WallClock;
 pub use beads_surface as surface;
 pub use beads_surface::{Request, Response};
 
@@ -47,4 +67,22 @@ impl DaemonExchange {
     pub fn new(request: Request, response: Response) -> Self {
         Self { request, response }
     }
+}
+
+pub use runtime::run_daemon;
+pub type Result<T> = std::result::Result<T, runtime::ipc::IpcError>;
+
+#[must_use]
+pub fn daemon_layout_from_paths() -> layout::DaemonLayout {
+    layout::DaemonLayout::new(
+        paths::data_dir(),
+        runtime::ipc::socket_path(),
+        paths::log_dir(),
+    )
+}
+
+#[must_use]
+pub fn daemon_runtime_config_from_config(config: &config::Config) -> config::DaemonRuntimeConfig {
+    paths::init_from_config(&config.paths);
+    config::daemon_runtime_from_config(config)
 }

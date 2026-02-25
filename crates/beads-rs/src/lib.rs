@@ -92,7 +92,7 @@ pub fn run_daemon_command() -> Result<()> {
     let actor = daemon_actor_from_config(&config)?;
     let layout = daemon_layout_from_paths();
     let runtime = daemon_runtime_config_from_config(&config);
-    daemon::run_daemon(actor, layout, runtime)
+    Ok(daemon::run_daemon(actor, layout, runtime)?)
 }
 
 pub(crate) fn daemon_layout_from_paths() -> beads_daemon::layout::DaemonLayout {
