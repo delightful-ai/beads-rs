@@ -103,6 +103,11 @@ pub struct GitLaneState {
 
     /// Last detected clock skew.
     pub last_clock_skew: Option<ClockSkewRecord>,
+
+    /// True only after the daemon successfully loaded state from git + WAL replay.
+    /// Used to gate Go-compat export and other operations that must not run
+    /// against uninitialized/empty state.
+    pub loaded_ok: bool,
 }
 
 impl GitLaneState {
@@ -124,15 +129,20 @@ impl GitLaneState {
             last_divergence: None,
             last_force_push: None,
             last_clock_skew: None,
+            loaded_ok: false,
         }
     }
 
     /// Create a new GitLaneState with root slug and initial clone path.
+    ///
+    /// Sets `loaded_ok = true` because this constructor is used after
+    /// successful git load in `apply_loaded_repo_state`.
     pub fn with_path(root_slug: Option<BeadSlug>, path: PathBuf) -> Self {
         let mut s = Self::new();
         s.root_slug = root_slug;
         s.known_paths.insert(path);
         s.last_refresh = Some(Instant::now());
+        s.loaded_ok = true;
         s
     }
 

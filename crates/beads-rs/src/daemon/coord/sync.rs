@@ -135,6 +135,8 @@ impl Daemon {
                             wall_ms: now_wall_ms,
                         });
 
+                repo_state.loaded_ok = true;
+
                 // If local/WAL has changes that remote doesn't (crash recovery),
                 // mark dirty so sync will push those changes.
                 if fresh.needs_sync && !repo_state.dirty {
@@ -275,6 +277,7 @@ impl Daemon {
                     next_state.set_core_state(merged);
                     store.state = next_state;
                     repo_state.complete_sync(wall_ms);
+                    repo_state.loaded_ok = true;
                     // Still dirty from mutations during sync - reschedule
                     repo_state.dirty = true;
                     reschedule_sync = true;
@@ -285,6 +288,7 @@ impl Daemon {
                     next_state.set_core_state(synced_state);
                     store.state = next_state;
                     repo_state.complete_sync(wall_ms);
+                    repo_state.loaded_ok = true;
 
                     sync_succeeded = true;
                 }

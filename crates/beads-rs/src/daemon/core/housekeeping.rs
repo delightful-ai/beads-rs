@@ -19,11 +19,27 @@ impl Daemon {
     /// Schedule export of core namespace state to Go-compatible JSONL format.
     ///
     /// Export runs asynchronously and is debounced to avoid per-mutation work.
+    /// Requires the store to have been successfully loaded (`loaded_ok == true`)
+    /// to prevent exporting empty/uninitialized state.
     pub(crate) fn export_go_compat(&mut self, store_id: StoreId, remote: &RemoteUrl) {
         if self.export_worker.is_none() {
             return;
         }
         if !self.stores.contains_key(&store_id) {
+            return;
+        }
+        // Defense-in-depth: never export from a store that hasn't been
+        // successfully loaded. An unloaded store has empty default state,
+        // and exporting it would overwrite the canonical issues.jsonl.
+        if !self
+            .git_lanes
+            .get(&store_id)
+            .is_some_and(|lane| lane.loaded_ok)
+        {
+            tracing::debug!(
+                store_id = %store_id,
+                "skipping Go-compat export: store not yet successfully loaded"
+            );
             return;
         }
 
@@ -64,6 +80,14 @@ impl Daemon {
             let Some(store) = self.stores.get(&store_id) else {
                 continue;
             };
+            // Double-check: don't export from a store that was never loaded.
+            if !self
+                .git_lanes
+                .get(&store_id)
+                .is_some_and(|lane| lane.loaded_ok)
+            {
+                continue;
+            }
             let empty_state = CanonicalState::new();
             let core_state = store
                 .state
