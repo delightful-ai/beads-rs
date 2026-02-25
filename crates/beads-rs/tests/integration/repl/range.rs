@@ -1,8 +1,8 @@
 use std::fs;
 use std::sync::Arc;
 
-use beads_rs::daemon::repl::{WalRangeError, WalRangeReader};
-use beads_rs::daemon::wal::{
+use beads_daemon::testkit::repl::{WalRangeError, WalRangeReader};
+use beads_daemon::testkit::wal::{
     IndexDurabilityMode, SegmentConfig, SegmentSyncMode, SegmentWriter, SqliteWalIndex,
     WAL_FORMAT_VERSION, rebuild_index,
 };
@@ -34,7 +34,7 @@ fn write_records(
     store_dir: &std::path::Path,
     meta: &StoreMeta,
     namespace: &NamespaceId,
-    records: &[beads_rs::daemon::wal::VerifiedRecord],
+    records: &[beads_daemon::testkit::wal::VerifiedRecord],
     limits: &Limits,
 ) {
     let config = SegmentConfig::from_limits(limits).with_sync_mode(SegmentSyncMode::None);

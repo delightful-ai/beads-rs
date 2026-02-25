@@ -985,12 +985,13 @@ mod tests {
             .with(tracing_subscriber::filter::LevelFilter::TRACE);
 
         let (git_tx, _git_rx) = crossbeam::channel::unbounded();
-        let client_request_id = ClientRequestId::new(Uuid::from_bytes([6u8; 16]));
         let request = Request::Create {
             ctx: crate::runtime::ipc::MutationCtx::new(
                 repo_path.clone(),
                 MutationMeta {
-                    client_request_id: Some(client_request_id),
+                    // Keep this unset so the request cannot short-circuit through idempotency
+                    // reuse and skip creating the `mutation` span under test.
+                    client_request_id: None,
                     ..MutationMeta::default()
                 },
             ),

@@ -391,6 +391,9 @@ mod tests {
     use tempfile::TempDir;
     use uuid::Uuid;
 
+    use crate::checkpoint::{
+        CheckpointExportInput, CheckpointSnapshotInput, build_snapshot, export_checkpoint,
+    };
     use crate::core::bead::{BeadCore, BeadFields};
     use crate::core::composite::{Claim, Workflow};
     use crate::core::crdt::Lww;
@@ -400,9 +403,6 @@ mod tests {
     use crate::core::{
         ActorId, CanonicalState, ContentHash, Durable, HeadStatus, NamespaceId, ReplicaId, Seq0,
         StoreEpoch, StoreId, StoreState, Watermarks,
-    };
-    use crate::checkpoint::{
-        CheckpointExportInput, CheckpointSnapshotInput, build_snapshot, export_checkpoint,
     };
     use crate::paths;
 

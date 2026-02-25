@@ -7,10 +7,10 @@
 
 pub use beads_core as core;
 
-mod paths;
 pub mod checkpoint;
 pub mod error;
 pub mod observe;
+mod paths;
 pub mod sync;
 pub mod wire;
 

@@ -3,7 +3,7 @@
 use std::fs;
 use std::io::{Seek, SeekFrom};
 
-use beads_rs::daemon::wal::{FrameReader, WalReplayError, rebuild_index};
+use beads_daemon::testkit::wal::{FrameReader, WalReplayError, rebuild_index};
 use beads_rs::{Limits, NamespaceId, ReplicaId, decode_event_body};
 use uuid::Uuid;
 
