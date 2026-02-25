@@ -286,8 +286,8 @@ mod tests {
         ActorId, NamespaceId, ReplicaId, SegmentId, Seq1, StoreEpoch, StoreId, StoreIdentity,
         StoreMeta, StoreMetaVersions, TxnId,
     };
-    use crate::daemon::wal::segment::SegmentHeader;
-    use crate::daemon::wal::{RecordHeader, RequestProof};
+    use crate::wal::segment::SegmentHeader;
+    use crate::wal::{RecordHeader, RequestProof};
 
     fn read_record_at_path(
         path: &Path,
@@ -307,7 +307,7 @@ mod tests {
                 path: Some(path.to_path_buf()),
                 source,
             })?;
-        let mut reader = crate::daemon::wal::frame::FrameReader::new(cursor, max_record_bytes);
+        let mut reader = crate::wal::frame::FrameReader::new(cursor, max_record_bytes);
         reader
             .read_next()
             .map_err(|err| match err {

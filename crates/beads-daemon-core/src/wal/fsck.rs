@@ -9,14 +9,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::core::{
-    Limits, NamespaceId, ReplicaId, StoreEpoch, StoreId, StoreMeta, decode_event_body,
+    Limits, NamespaceId, ReplicaId, StoreEpoch, StoreId, StoreMeta, WallClock, decode_event_body,
 };
-use crate::daemon::store::runtime::store_index_durability_mode;
-use crate::daemon::wal::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
-use crate::daemon::wal::record::{RecordVerifyError, UnverifiedRecord};
-use crate::daemon::wal::{
-    EventWalError, SegmentHeader, SqliteWalIndex, WalIndex, WalIndexError, WalReplayError,
-    rebuild_index,
+use crate::wal::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
+use crate::wal::record::{RecordVerifyError, UnverifiedRecord};
+use crate::wal::{
+    EventWalError, IndexDurabilityMode, SegmentHeader, SqliteWalIndex, WalIndex, WalIndexError,
+    WalReplayError, rebuild_index,
 };
 
 const QUARANTINE_DIR_NAME: &str = "quarantine";
@@ -31,6 +30,90 @@ impl FsckOptions {
     pub fn new(repair: bool, limits: Limits) -> Self {
         Self { repair, limits }
     }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(default)]
+struct StoreConfig {
+    index_durability_mode: IndexDurabilityMode,
+}
+
+impl Default for StoreConfig {
+    fn default() -> Self {
+        Self {
+            index_durability_mode: IndexDurabilityMode::Cache,
+        }
+    }
+}
+
+fn data_dir() -> PathBuf {
+    if let Some(dir) = std::env::var("BD_DATA_DIR")
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    {
+        return PathBuf::from(dir);
+    }
+
+    std::env::var("XDG_DATA_HOME")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("/tmp"))
+                .join(".local")
+                .join("share")
+        })
+        .join("beads-rs")
+}
+
+fn store_dir(store_id: &StoreId) -> PathBuf {
+    data_dir().join("stores").join(store_id.to_string())
+}
+
+fn store_meta_path(store_id: &StoreId) -> PathBuf {
+    store_dir(store_id).join("meta.json")
+}
+
+fn wal_index_path(store_id: &StoreId) -> PathBuf {
+    store_dir(store_id).join("index").join("wal.sqlite")
+}
+
+fn store_index_durability_mode(store_dir: &Path) -> Result<IndexDurabilityMode, FsckError> {
+    let path = store_dir.join("store_config.toml");
+    match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(FsckError::StoreConfig(format!(
+                "store config path is a symlink: {}",
+                path.display()
+            )));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(StoreConfig::default().index_durability_mode);
+        }
+        Err(err) => {
+            return Err(FsckError::StoreConfig(format!(
+                "store config read failed at {}: {err}",
+                path.display()
+            )));
+        }
+    }
+
+    let raw = fs::read_to_string(&path).map_err(|err| {
+        FsckError::StoreConfig(format!(
+            "store config read failed at {}: {err}",
+            path.display()
+        ))
+    })?;
+    let config: StoreConfig = toml::from_str(&raw).map_err(|err| {
+        FsckError::StoreConfig(format!(
+            "store config parse failed at {}: {err}",
+            path.display()
+        ))
+    })?;
+    Ok(config.index_durability_mode)
 }
 
 #[derive(Debug, Error)]
@@ -63,7 +146,7 @@ pub enum FsckError {
         source: std::io::Error,
     },
     #[error("store config error: {0}")]
-    StoreConfig(Box<crate::daemon::store::runtime::StoreRuntimeError>),
+    StoreConfig(String),
     #[error(transparent)]
     WalReplay(#[from] Box<WalReplayError>),
     #[error(transparent)]
@@ -218,9 +301,8 @@ pub struct FsckReport {
 }
 
 pub fn fsck_store(store_id: StoreId, options: FsckOptions) -> Result<FsckReport, FsckError> {
-    let layout = crate::daemon_layout_from_paths();
-    let store_dir = layout.store_dir(&store_id);
-    let meta_path = layout.store_meta_path(&store_id);
+    let store_dir = store_dir(&store_id);
+    let meta_path = store_meta_path(&store_id);
     let meta = read_store_meta(&meta_path)?;
     if meta.store_id() != store_id {
         return Err(FsckError::StoreIdMismatch {
@@ -236,7 +318,7 @@ pub fn fsck_store_dir(
     meta: &StoreMeta,
     options: FsckOptions,
 ) -> Result<FsckReport, FsckError> {
-    let checked_at_ms = crate::WallClock::now().0;
+    let checked_at_ms = WallClock::now().0;
     let mut builder = FsckReportBuilder::new(meta.store_id(), checked_at_ms);
 
     let wal_dir = store_dir.join("wal");
@@ -279,7 +361,7 @@ pub fn fsck_store_dir(
                 FsckEvidence {
                     code: FsckEvidenceCode::IndexOpenFailed,
                     message: format!("failed to rebuild wal index: {err}"),
-                    path: Some(crate::daemon_layout_from_paths().wal_index_path(&meta.store_id())),
+                    path: Some(wal_index_path(&meta.store_id())),
                     namespace: None,
                     origin: None,
                     seq: None,
@@ -290,7 +372,7 @@ pub fn fsck_store_dir(
         } else {
             builder.repairs.push(FsckRepair {
                 kind: FsckRepairKind::RebuildIndex,
-                path: Some(crate::daemon_layout_from_paths().wal_index_path(&meta.store_id())),
+                path: Some(wal_index_path(&meta.store_id())),
                 detail: "rebuilt wal.sqlite from WAL segments".to_string(),
             });
         }
@@ -1043,7 +1125,7 @@ fn check_index_offsets(
         return;
     }
 
-    let mode = match store_index_durability_mode(meta.store_id()) {
+    let mode = match store_index_durability_mode(store_dir) {
         Ok(mode) => mode,
         Err(err) => {
             builder.record_issue(
@@ -1315,16 +1397,15 @@ fn rebuild_index_after_repair(
     meta: &StoreMeta,
     options: &FsckOptions,
 ) -> Result<(), FsckError> {
-    remove_wal_index_files(meta.store_id())?;
-    let mode = store_index_durability_mode(meta.store_id())
-        .map_err(|err| FsckError::StoreConfig(Box::new(err)))?;
+    remove_wal_index_files(store_dir)?;
+    let mode = store_index_durability_mode(store_dir)?;
     let index = SqliteWalIndex::open(store_dir, meta, mode)?;
     rebuild_index(store_dir, meta, &index, &options.limits)?;
     Ok(())
 }
 
-fn remove_wal_index_files(store_id: StoreId) -> Result<(), FsckError> {
-    let db_path = crate::daemon_layout_from_paths().wal_index_path(&store_id);
+fn remove_wal_index_files(store_dir: &Path) -> Result<(), FsckError> {
+    let db_path = store_dir.join("index").join("wal.sqlite");
     for suffix in ["", "-wal", "-shm"] {
         let path = if suffix.is_empty() {
             db_path.clone()

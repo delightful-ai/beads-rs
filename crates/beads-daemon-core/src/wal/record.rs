@@ -13,7 +13,7 @@ use crate::core::{
 use super::{EventWalError, EventWalResult};
 
 const RECORD_HEADER_VERSION: u16 = 1;
-pub(crate) const RECORD_HEADER_BASE_LEN: usize = 88;
+pub const RECORD_HEADER_BASE_LEN: usize = 88;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RecordFlags {

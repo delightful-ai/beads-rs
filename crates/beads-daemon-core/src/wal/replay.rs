@@ -20,11 +20,9 @@ use crate::core::{
 
 use super::EventWalError;
 use super::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
-use super::index::{
-    ClientRequestEventIds, HlcRow, SegmentRow, WalIndex, WalIndexError, WatermarkRow,
-};
 use super::record::{RecordHeaderMismatch, RecordVerifyError, UnverifiedRecord, VerifiedRecord};
 use super::segment::{SEGMENT_HEADER_PREFIX_LEN, SEGMENT_MAGIC, SegmentHeader};
+use super::{ClientRequestEventIds, HlcRow, SegmentRow, WalIndex, WalIndexError, WatermarkRow};
 
 #[cfg(test)]
 use crate::core::sha256_bytes;
@@ -559,7 +557,7 @@ fn replay_index(
 
 #[allow(clippy::too_many_arguments)]
 fn index_record(
-    txn: &mut dyn super::index::WalIndexTxn,
+    txn: &mut dyn super::WalIndexTxn,
     tracker: &mut ReplayTracker,
     namespace: &NamespaceId,
     segment: &SegmentDescriptor<Verified>,
@@ -1158,10 +1156,10 @@ mod tests {
         StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1,
         encode_event_body_canonical,
     };
-    use crate::daemon::wal::SegmentConfig;
-    use crate::daemon::wal::record::{RecordHeader, RequestProof};
-    use crate::daemon::wal::segment::SegmentWriter;
-    use crate::daemon::wal::{IndexDurabilityMode, SqliteWalIndex};
+    use crate::wal::SegmentConfig;
+    use crate::wal::record::{RecordHeader, RequestProof};
+    use crate::wal::segment::SegmentWriter;
+    use crate::wal::{IndexDurabilityMode, SqliteWalIndex};
 
     fn test_meta(store_id: StoreId, store_epoch: StoreEpoch) -> StoreMeta {
         let identity = StoreIdentity::new(store_id, store_epoch);

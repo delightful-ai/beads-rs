@@ -14,7 +14,7 @@ use super::{
 /// # Laws
 /// - Appends are per-namespace and preserve monotonic byte offsets.
 /// - Returned [`AppendOutcome`] describes the exact persisted segment/offset/len.
-pub(crate) trait WalAppend {
+pub trait WalAppend {
     fn wal_append(
         &mut self,
         namespace: &NamespaceId,
@@ -39,7 +39,7 @@ impl WalAppend for EventWal {
 /// # Laws
 /// - The returned transaction has exclusive write intent for its backend semantics.
 /// - Callers must eventually `commit` or `rollback` (drop rolls back where supported).
-pub(crate) trait WalIndexTxnProvider {
+pub trait WalIndexTxnProvider {
     fn begin_wal_txn(&self) -> Result<Box<dyn WalIndexTxn>, WalIndexError>;
 }
 
@@ -54,7 +54,7 @@ impl<T: WalIndex + ?Sized> WalIndexTxnProvider for T {
 /// # Laws
 /// - Frames are contiguous by origin sequence with no gaps.
 /// - Frames are ordered ascending by origin sequence.
-pub(crate) trait WalReadRange {
+pub trait WalReadRange {
     type Error;
 
     fn read_range(
