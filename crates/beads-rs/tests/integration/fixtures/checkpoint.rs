@@ -2,13 +2,13 @@
 
 use std::collections::BTreeMap;
 
-use beads_rs::core::{
+use beads_core::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey, Durable,
     HeadStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp, StoreState, Tombstone,
     Watermarks, Workflow, WriteStamp, sha256_bytes,
 };
-use beads_rs::core::{ContentHash, Dot};
-use beads_rs::git::checkpoint::{
+use beads_core::{ContentHash, Dot};
+use beads_git::checkpoint::{
     CheckpointExport, CheckpointExportInput, CheckpointFileKind, CheckpointManifest,
     CheckpointMeta, CheckpointShardPath, CheckpointShardPayload, CheckpointSnapshot,
     CheckpointSnapshotInput, SHARD_COUNT, export_checkpoint, shard_name,
@@ -161,8 +161,8 @@ pub fn shard_paths(namespace: &NamespaceId, kind: CheckpointFileKind) -> Vec<Che
 
 pub fn build_manifest_from_files(
     checkpoint_group: &str,
-    store_id: beads_rs::core::StoreId,
-    store_epoch: beads_rs::core::StoreEpoch,
+    store_id: beads_core::StoreId,
+    store_epoch: beads_core::StoreEpoch,
     namespaces: Vec<NamespaceId>,
     files: &BTreeMap<CheckpointShardPath, CheckpointShardPayload>,
 ) -> CheckpointManifest {
@@ -171,7 +171,7 @@ pub fn build_manifest_from_files(
         let hash = ContentHash::from_bytes(sha256_bytes(payload.bytes.as_ref()).0);
         manifest_files.insert(
             path.clone(),
-            beads_rs::git::checkpoint::ManifestFile {
+            beads_git::checkpoint::ManifestFile {
                 sha256: hash,
                 bytes: payload.bytes.len() as u64,
             },
@@ -289,11 +289,11 @@ fn build_fixture_snapshot(
         store_state.set_namespace_state(namespace.clone(), state.clone());
     }
 
-    beads_rs::git::checkpoint::build_snapshot(CheckpointSnapshotInput {
+    beads_git::checkpoint::build_snapshot(CheckpointSnapshotInput {
         checkpoint_group: checkpoint_group.to_string(),
         namespaces: namespaces.into(),
         store_id: identity::store_id(1),
-        store_epoch: beads_rs::core::StoreEpoch::new(0),
+        store_epoch: beads_core::StoreEpoch::new(0),
         created_at_ms: 1_700_000_000_000,
         created_by_replica_id: identity::replica_id(9),
         policy_hash: ContentHash::from_bytes([9u8; 32]),

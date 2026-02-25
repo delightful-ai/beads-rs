@@ -6,7 +6,7 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use beads_rs::core::{
+use beads_core::{
     Applied, ClientRequestId, DurabilityReceipt, EventId, NamespaceId, ReplicaId, StoreEpoch,
     StoreId, StoreIdentity, TxnId, Watermarks,
 };
@@ -255,7 +255,7 @@ fn build_receipt(
         txn_id,
         event_ids.event_ids(),
         created_at_ms,
-        Watermarks::<beads_rs::core::Durable>::new(),
+        Watermarks::<beads_core::Durable>::new(),
         Watermarks::<Applied>::new(),
     );
     let snapshot = index.model_snapshot();
@@ -280,7 +280,7 @@ fn lookup_receipt(
         row.txn_id,
         row.event_ids.event_ids(),
         row.created_at_ms,
-        Watermarks::<beads_rs::core::Durable>::new(),
+        Watermarks::<beads_core::Durable>::new(),
         Watermarks::<Applied>::new(),
     ))
 }

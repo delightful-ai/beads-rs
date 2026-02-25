@@ -418,7 +418,7 @@ fn stop_daemon() -> Result<bool> {
     // Try to read PID from meta file and force kill
     let meta_path = socket.with_file_name("daemon.meta.json");
     if let Ok(contents) = fs::read_to_string(&meta_path)
-        && let Ok(meta) = serde_json::from_str::<crate::api::DaemonInfo>(&contents)
+        && let Ok(meta) = serde_json::from_str::<beads_api::DaemonInfo>(&contents)
     {
         use nix::sys::signal::{Signal, kill};
         use nix::unistd::Pid;

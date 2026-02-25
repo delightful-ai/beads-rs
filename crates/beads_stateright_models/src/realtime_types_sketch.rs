@@ -6,7 +6,7 @@
 //! correct signal to update the models.
 
 pub mod core {
-    pub use beads_rs::core::{
+    pub use beads_core::{
         ActorId, Applied, Canonical, CanonicalState, ClientRequestId, DecodeError, DurabilityClass,
         DurabilityProofV1, DurabilityReceipt, EncodeError, ErrorCode, ErrorPayload, EventBody,
         EventBytes, EventFrameError, EventFrameV1, EventId, EventKindV1, EventValidationError,

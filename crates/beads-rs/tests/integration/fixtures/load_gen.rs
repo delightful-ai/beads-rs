@@ -8,8 +8,8 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use beads_rs::core::{ActorId, BeadType, NamespaceId, Priority};
-use beads_rs::surface::ipc::{
+use beads_core::{ActorId, BeadType, NamespaceId, Priority};
+use beads_surface::ipc::{
     CreatePayload, IpcClient, IpcError, MutationCtx, MutationMeta, Request, Response,
 };
 
@@ -36,7 +36,7 @@ pub enum LoadError {
     #[error(transparent)]
     Ipc(#[from] IpcError),
     #[error("remote error: {0:?}")]
-    Remote(beads_rs::core::ErrorPayload),
+    Remote(beads_core::ErrorPayload),
 }
 
 #[derive(Debug, Default, Clone)]

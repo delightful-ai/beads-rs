@@ -5,8 +5,8 @@ use std::sync::{Arc, Mutex};
 
 use crossbeam::channel::{Receiver, Sender, unbounded};
 
+use beads_core::Limits;
 use beads_daemon_core::repl::proto::{ReplMessage, WireReplEnvelope};
-use beads_rs::core::Limits;
 
 use super::repl_frames;
 
@@ -267,7 +267,7 @@ mod tests {
     use crate::fixtures::identity;
     use uuid::Uuid;
 
-    use beads_rs::core::ReplicaId;
+    use beads_core::ReplicaId;
 
     #[test]
     fn fixtures_repl_transport_roundtrip() {

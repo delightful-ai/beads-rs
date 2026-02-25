@@ -10,9 +10,9 @@ use beads_surface::store_admin::{
 };
 
 use crate::config::load_or_init;
-use crate::git::SyncProcess;
 use crate::upgrade::{UpgradeMethod as HostUpgradeMethod, run_upgrade};
 use crate::{Error, OpError, Result};
+use beads_git::SyncProcess;
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct BeadsRsCliBackend;
@@ -63,7 +63,7 @@ impl CliHostBackend for BeadsRsCliBackend {
 
     fn run_migrate_detect(&self, request: MigrateDetectRequest) -> Result<u32> {
         let repo = git2::Repository::discover(&request.repo)
-            .map_err(|err| crate::git::SyncError::OpenRepo(request.repo, err))?;
+            .map_err(|err| beads_git::SyncError::OpenRepo(request.repo, err))?;
         read_current_format_version(&repo)
     }
 
@@ -72,7 +72,7 @@ impl CliHostBackend for BeadsRsCliBackend {
         request: MigrateApplyImportRequest,
     ) -> Result<MigrateApplyImportOutcome> {
         let repo = git2::Repository::discover(&request.repo)
-            .map_err(|err| crate::git::SyncError::OpenRepo(request.repo.clone(), err))?;
+            .map_err(|err| beads_git::SyncError::OpenRepo(request.repo.clone(), err))?;
 
         if repo.refname_to_id("refs/heads/beads/store").is_ok() && !request.force {
             return Err(Error::Op(OpError::ValidationFailed {
@@ -128,22 +128,22 @@ fn read_current_format_version(repo: &git2::Repository) -> Result<u32> {
 
     let oid = repo
         .refname_to_id("refs/heads/beads/store")
-        .map_err(|_| crate::git::SyncError::NoLocalRef("refs/heads/beads/store".into()))?;
-    let commit = repo.find_commit(oid).map_err(crate::git::SyncError::from)?;
-    let tree = commit.tree().map_err(crate::git::SyncError::from)?;
+        .map_err(|_| beads_git::SyncError::NoLocalRef("refs/heads/beads/store".into()))?;
+    let commit = repo.find_commit(oid).map_err(beads_git::SyncError::from)?;
+    let tree = commit.tree().map_err(beads_git::SyncError::from)?;
     let meta_entry = tree
         .get_name("meta.json")
-        .ok_or_else(|| crate::git::SyncError::MissingFile("meta.json".into()))?;
+        .ok_or_else(|| beads_git::SyncError::MissingFile("meta.json".into()))?;
     let meta_obj = repo
         .find_object(meta_entry.id(), Some(ObjectType::Blob))
-        .map_err(crate::git::SyncError::from)?;
+        .map_err(beads_git::SyncError::from)?;
     let meta_blob = meta_obj
         .peel_to_blob()
-        .map_err(|_| crate::git::SyncError::NotABlob("meta.json"))?;
-    let parsed = crate::git::wire::parse_supported_meta(meta_blob.content())
-        .map_err(crate::git::SyncError::from)?;
+        .map_err(|_| beads_git::SyncError::NotABlob("meta.json"))?;
+    let parsed = beads_git::wire::parse_supported_meta(meta_blob.content())
+        .map_err(beads_git::SyncError::from)?;
     match parsed.meta() {
-        crate::git::wire::StoreMeta::V1 { .. } => Ok(1),
-        crate::git::wire::StoreMeta::Legacy => Ok(0),
+        beads_git::wire::StoreMeta::V1 { .. } => Ok(1),
+        beads_git::wire::StoreMeta::Legacy => Ok(0),
     }
 }

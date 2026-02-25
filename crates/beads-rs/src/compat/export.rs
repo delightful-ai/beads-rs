@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use super::go_schema::{GoIssue, is_bead_blocked};
-use crate::core::{BeadProjection, state::CanonicalState};
+use beads_core::{BeadProjection, state::CanonicalState};
 
 /// Context for Go-compatible exports.
 ///
@@ -298,12 +298,12 @@ mod tests {
 
     #[test]
     fn test_export_with_beads() {
-        use crate::core::bead::{Bead, BeadCore, BeadFields};
-        use crate::core::composite::{Claim, Workflow};
-        use crate::core::crdt::Lww;
-        use crate::core::domain::{BeadType, Priority};
-        use crate::core::identity::{ActorId, BeadId};
-        use crate::core::time::{Stamp, WriteStamp};
+        use beads_core::bead::{Bead, BeadCore, BeadFields};
+        use beads_core::composite::{Claim, Workflow};
+        use beads_core::crdt::Lww;
+        use beads_core::domain::{BeadType, Priority};
+        use beads_core::identity::{ActorId, BeadId};
+        use beads_core::time::{Stamp, WriteStamp};
 
         let tmp = TempDir::new().unwrap();
         let ctx = ExportContext::with_dir(tmp.path().join("exports")).unwrap();
@@ -344,9 +344,9 @@ mod tests {
     fn test_tombstones_not_exported() {
         // Tombstones stay in CRDT layer (tombstones.jsonl) but are NOT exported
         // to Go-compat format - matches beads-go behavior where deleted = gone
-        use crate::core::identity::{ActorId, BeadId};
-        use crate::core::time::{Stamp, WriteStamp};
-        use crate::core::tombstone::Tombstone;
+        use beads_core::identity::{ActorId, BeadId};
+        use beads_core::time::{Stamp, WriteStamp};
+        use beads_core::tombstone::Tombstone;
 
         let tmp = TempDir::new().unwrap();
         let ctx = ExportContext::with_dir(tmp.path().join("exports")).unwrap();
@@ -542,12 +542,12 @@ mod tests {
 
     #[test]
     fn test_export_sorted_by_id() {
-        use crate::core::bead::{Bead, BeadCore, BeadFields};
-        use crate::core::composite::{Claim, Workflow};
-        use crate::core::crdt::Lww;
-        use crate::core::domain::{BeadType, Priority};
-        use crate::core::identity::{ActorId, BeadId};
-        use crate::core::time::{Stamp, WriteStamp};
+        use beads_core::bead::{Bead, BeadCore, BeadFields};
+        use beads_core::composite::{Claim, Workflow};
+        use beads_core::crdt::Lww;
+        use beads_core::domain::{BeadType, Priority};
+        use beads_core::identity::{ActorId, BeadId};
+        use beads_core::time::{Stamp, WriteStamp};
 
         let tmp = TempDir::new().unwrap();
         let ctx = ExportContext::with_dir(tmp.path().join("exports")).unwrap();

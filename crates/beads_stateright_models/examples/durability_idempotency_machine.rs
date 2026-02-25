@@ -9,12 +9,12 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use beads_daemon_core::repl::WatermarkState;
-use beads_rs::core::{
+use beads_core::{
     Applied, ClientRequestId, DurabilityClass, DurabilityReceipt, Durable, EventId, HeadStatus,
     NamespaceId, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId,
     Watermark, Watermarks,
 };
+use beads_daemon_core::repl::WatermarkState;
 use beads_rs::model::{
     ClientRequestEventIds, DurabilityCoordinator, MemoryWalIndex, MemoryWalIndexSnapshot,
     PeerAckTable, ReplicatedPoll, WalIndex, durability,
@@ -118,8 +118,8 @@ struct ServerCfg {
     store: StoreIdentity,
     namespace: NamespaceId,
     local_replica: ReplicaId,
-    roster: beads_rs::core::ReplicaRoster,
-    policies: BTreeMap<NamespaceId, beads_rs::core::NamespacePolicy>,
+    roster: beads_core::ReplicaRoster,
+    policies: BTreeMap<NamespaceId, beads_core::NamespacePolicy>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -191,19 +191,19 @@ impl Default for History {
 impl ModelActor {
     fn server() -> Self {
         let local_replica = replica_for(SERVER_ID);
-        let roster = beads_rs::core::ReplicaRoster {
+        let roster = beads_core::ReplicaRoster {
             replicas: vec![
-                beads_rs::core::ReplicaEntry {
+                beads_core::ReplicaEntry {
                     replica_id: local_replica,
                     name: "local".to_string(),
-                    role: beads_rs::core::ReplicaDurabilityRole::anchor(true),
+                    role: beads_core::ReplicaDurabilityRole::anchor(true),
                     allowed_namespaces: None,
                     expire_after_ms: None,
                 },
-                beads_rs::core::ReplicaEntry {
+                beads_core::ReplicaEntry {
                     replica_id: replica_for(PEER_ID),
                     name: "peer".to_string(),
-                    role: beads_rs::core::ReplicaDurabilityRole::peer(true),
+                    role: beads_core::ReplicaDurabilityRole::peer(true),
                     allowed_namespaces: None,
                     expire_after_ms: None,
                 },
@@ -213,7 +213,7 @@ impl ModelActor {
         let mut policies = BTreeMap::new();
         policies.insert(
             namespace.clone(),
-            beads_rs::core::NamespacePolicy::core_default(),
+            beads_core::NamespacePolicy::core_default(),
         );
         let store = StoreIdentity::new(
             StoreId::new(Uuid::from_bytes([7u8; 16])),
@@ -594,7 +594,7 @@ fn build_receipt(
         txn_id,
         event_ids.event_ids(),
         created_at_ms,
-        Watermarks::<beads_rs::core::Durable>::new(),
+        Watermarks::<beads_core::Durable>::new(),
         Watermarks::<Applied>::new(),
     );
     let snapshot = index.model_snapshot();
@@ -619,7 +619,7 @@ fn lookup_receipt(
         row.txn_id,
         row.event_ids.event_ids(),
         row.created_at_ms,
-        Watermarks::<beads_rs::core::Durable>::new(),
+        Watermarks::<beads_core::Durable>::new(),
         Watermarks::<Applied>::new(),
     ))
 }

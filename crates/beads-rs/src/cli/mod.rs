@@ -6,11 +6,11 @@
 use std::path::{Path, PathBuf};
 
 use crate::config::{Config, apply_env_overrides, load_for_repo};
-use crate::core::{ActorId, Applied, DurabilityClass, NamespaceId, Watermarks};
 use crate::{Error, Result};
 use beads_cli::cli::{CliHost, RuntimeBuildArgs};
 use beads_cli::runtime::{CliRuntimeCtx, validate_actor_id as cli_validate_actor_id};
 use beads_cli::validation::{normalize_optional_client_request_id, normalize_optional_namespace};
+use beads_core::{ActorId, Applied, DurabilityClass, NamespaceId, Watermarks};
 
 pub use beads_cli::cli::{Cli, Command, command_name, parse_from};
 pub use beads_cli::commands::daemon::DaemonCmd;
@@ -155,11 +155,11 @@ mod tests {
     use super::*;
     use crate::OpError;
     use crate::config::DefaultsConfig;
-    use crate::core::{HeadStatus, ReplicaId, Seq0};
     use beads_cli::validation::{
         normalize_bead_id, normalize_bead_slug_for, normalize_optional_client_request_id,
         normalize_optional_namespace,
     };
+    use beads_core::{HeadStatus, ReplicaId, Seq0};
     use std::num::NonZeroU32;
     use std::path::PathBuf;
     use uuid::Uuid;

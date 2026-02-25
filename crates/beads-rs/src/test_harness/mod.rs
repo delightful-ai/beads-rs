@@ -11,13 +11,13 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use uuid::Uuid;
 
-use crate::core::time::{WallClockGuard, WallClockSource, set_wall_clock_source_for_tests};
-use crate::core::{
+use crate::paths;
+use beads_core::time::{WallClockGuard, WallClockSource, set_wall_clock_source_for_tests};
+use beads_core::{
     ActorId, Applied, BeadId, DurabilityClass, Durable, EventId, EventShaLookupError, Limits,
     NamespaceId, NamespaceSet, ReplicaDurabilityRole, ReplicaEntry, ReplicaId, ReplicaRoster, Seq0,
     Sha256, StoreEpoch, StoreId, StoreIdentity, VerifiedEventFrame,
 };
-use crate::paths;
 use beads_daemon::admission::AdmissionController;
 use beads_daemon::remote::RemoteUrl;
 use beads_daemon::testkit::Clock;
@@ -400,8 +400,8 @@ impl TestNode {
                 id: None,
                 parent: None,
                 title: title.to_string(),
-                bead_type: crate::core::BeadType::Task,
-                priority: crate::core::Priority::MEDIUM,
+                bead_type: beads_core::BeadType::Task,
+                priority: beads_core::Priority::MEDIUM,
                 description: None,
                 design: None,
                 acceptance_criteria: None,
@@ -521,7 +521,7 @@ impl TestNode {
                 peer,
                 ack.durable(),
                 ack.applied(),
-                crate::core::WallClock::now().0,
+                beads_core::WallClock::now().0,
             );
         });
     }

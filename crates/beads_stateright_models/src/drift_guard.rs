@@ -6,7 +6,7 @@
 //! is required for correctness.
 
 #[allow(unused_imports)]
-use beads_rs::core::{
+use beads_core::{
     CanonicalState, EventBody, EventFrameV1, EventId, EventKindV1, HlcMax, NamespaceId,
     PrevDeferred, PrevVerified, ReplicaId, Seq0, Seq1, Sha256, StoreIdentity, TxnDeltaV1, TxnId,
     TxnV1, VerifiedEvent,
@@ -28,8 +28,8 @@ fn _drift_guard_examples(
     seq: Seq1,
     frame: &EventFrameV1,
     store: StoreIdentity,
-    limits: &beads_rs::core::Limits,
-    lookup: &dyn beads_rs::core::EventShaLookup,
+    limits: &beads_core::Limits,
+    lookup: &dyn beads_core::EventShaLookup,
 ) {
     let _digest = digest::canonical_state_canon_json_sha256(state);
     let _event = factory.txn_body(
@@ -46,7 +46,7 @@ fn _drift_guard_examples(
     let _ = OriginStreamState::new(
         namespace.clone(),
         origin,
-        beads_rs::core::Watermark::genesis(),
+        beads_core::Watermark::genesis(),
         limits,
     );
     let _ = IngestDecision::DuplicateNoop;
@@ -70,7 +70,7 @@ fn _drift_guard_examples(
         namespace: namespace.clone(),
         origin,
         durable: WatermarkSnapshot {
-            seq: beads_rs::core::Seq0::ZERO,
+            seq: beads_core::Seq0::ZERO,
             head: HeadSnapshot::Genesis,
         },
         gap: GapBufferSnapshot {

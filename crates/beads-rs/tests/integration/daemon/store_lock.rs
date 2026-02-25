@@ -5,8 +5,8 @@ use std::fs;
 use crate::fixtures::store_dir::TempStoreDir;
 use uuid::Uuid;
 
+use beads_core::{NamespaceId, ReplicaId, StoreId};
 use beads_daemon::testkit::store::{StoreLock, StoreLockError, read_lock_meta};
-use beads_rs::core::{NamespaceId, ReplicaId, StoreId};
 
 #[test]
 fn store_paths_live_under_bd_data_dir() {

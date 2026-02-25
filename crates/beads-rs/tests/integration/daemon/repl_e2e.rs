@@ -10,17 +10,17 @@ use crate::fixtures::repl_rig::{
     DurabilityEligibility, FaultProfile, ReplRig, ReplRigOptions, TailnetTraceConfig,
 };
 use crate::fixtures::tailnet_proxy::TailnetTraceMode;
-use beads_rs::api::QueryResult;
-use beads_rs::core::error::details::{DurabilityTimeoutDetails, RequireMinSeenUnsatisfiedDetails};
-use beads_rs::core::{
+use beads_api::QueryResult;
+use beads_core::error::details::{DurabilityTimeoutDetails, RequireMinSeenUnsatisfiedDetails};
+use beads_core::{
     BeadId, BeadType, DurabilityClass, HeadStatus, NamespaceId, Priority, ProtocolErrorCode,
     ReplicaDurabilityRole, ReplicaEntry, Seq0,
 };
-use beads_rs::surface::ipc::{
+use beads_surface::ipc::{
     AdminCheckpointWaitPayload, AdminOp, CreatePayload, IdPayload, IpcClient, MutationCtx,
     MutationMeta, ReadConsistency, ReadCtx, RepoCtx, Request, Response, ResponsePayload,
 };
-use beads_rs::surface::ops::OpResult;
+use beads_surface::ops::OpResult;
 use tempfile::TempDir;
 
 fn sample_ids<'a>(ids: &'a [String]) -> Vec<&'a String> {
@@ -636,7 +636,7 @@ fn repl_daemon_replicated_fsync_timeout_receipt() {
             );
 
             let receipt = err
-                .receipt_as::<beads_rs::core::DurabilityReceipt>()
+                .receipt_as::<beads_core::DurabilityReceipt>()
                 .expect("receipt decode");
             let receipt = receipt.expect("receipt missing");
             assert!(receipt.outcome().is_pending());
@@ -650,7 +650,7 @@ fn create_issue_with_durability(
     node_idx: usize,
     title: &str,
     k: NonZeroU32,
-) -> (BeadId, beads_rs::core::DurabilityReceipt) {
+) -> (BeadId, beads_core::DurabilityReceipt) {
     let mut attempts = 0u8;
     loop {
         let response = create_issue_with_durability_result(rig, node_idx, title, k);

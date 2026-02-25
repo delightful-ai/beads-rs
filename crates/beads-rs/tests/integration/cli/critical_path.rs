@@ -49,8 +49,8 @@ fn socket_path(runtime_dir: &Path) -> PathBuf {
 
 #[cfg(feature = "slow-tests")]
 fn daemon_pid(runtime_dir: &Path) -> u32 {
-    use beads_rs::api::QueryResult;
-    use beads_rs::surface::ipc::{Request, Response, ResponsePayload};
+    use beads_api::QueryResult;
+    use beads_surface::ipc::{Request, Response, ResponsePayload};
 
     let socket = socket_path(runtime_dir);
     let mut stream =
@@ -74,7 +74,7 @@ fn daemon_pid(runtime_dir: &Path) -> u32 {
 }
 
 #[cfg(feature = "slow-tests")]
-fn parse_response_payload(bytes: &[u8]) -> beads_rs::surface::ipc::ResponsePayload {
+fn parse_response_payload(bytes: &[u8]) -> beads_surface::ipc::ResponsePayload {
     serde_json::from_slice(bytes).expect("parse response payload")
 }
 
@@ -97,7 +97,7 @@ fn process_alive(pid: u32) -> bool {
 }
 
 #[cfg(feature = "slow-tests")]
-fn store_id_from_data_dir(data_dir: &Path) -> beads_rs::core::StoreId {
+fn store_id_from_data_dir(data_dir: &Path) -> beads_core::StoreId {
     let stores_dir = data_dir.join("stores");
     let deadline = Instant::now() + Duration::from_secs(2);
     loop {
@@ -109,7 +109,7 @@ fn store_id_from_data_dir(data_dir: &Path) -> beads_rs::core::StoreId {
         if entries.len() == 1 {
             let meta_path = entries.remove(0).join("meta.json");
             let contents = fs::read_to_string(&meta_path).expect("read store meta");
-            let meta: beads_rs::core::StoreMeta =
+            let meta: beads_core::StoreMeta =
                 serde_json::from_str(&contents).expect("parse store meta");
             return meta.store_id();
         }
@@ -160,7 +160,7 @@ struct TestRepo {
     remote_dir: TempDir,
     runtime_dir: TempDir,
     data_dir: PathBuf,
-    store_id: beads_rs::core::StoreId,
+    store_id: beads_core::StoreId,
 }
 
 impl TestRepo {
@@ -179,7 +179,7 @@ impl TestRepo {
         let data_dir = data_dir_for_runtime(runtime_dir.path());
         let runtime_str = runtime_dir.path().to_string_lossy();
         let store_uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, runtime_str.as_bytes());
-        let store_id = beads_rs::core::StoreId::new(store_uuid);
+        let store_id = beads_core::StoreId::new(store_uuid);
 
         Self {
             work_dir,
@@ -3689,10 +3689,10 @@ fn test_show_with_all_optional_fields() {
 #[cfg(feature = "slow-tests")]
 #[test]
 fn test_crash_recovery_replays_wal() {
-    use beads_rs::api::QueryResult;
-    use beads_rs::git::sync::read_state_at_oid;
-    use beads_rs::surface::ipc::ResponsePayload;
-    use beads_rs::surface::ops::OpResult;
+    use beads_api::QueryResult;
+    use beads_git::sync::read_state_at_oid;
+    use beads_surface::ipc::ResponsePayload;
+    use beads_surface::ops::OpResult;
     use git2::Repository;
 
     let repo = TestRepo::new();
@@ -3710,10 +3710,8 @@ fn test_crash_recovery_replays_wal() {
             OpResult::Created { id } => id,
             other => panic!("unexpected create op result: {other:?}"),
         },
-        ResponsePayload::Query(QueryResult::Issue(issue)) => {
-            beads_rs::core::BeadId::parse(&issue.id)
-                .unwrap_or_else(|e| panic!("invalid issue id in create response: {e}"))
-        }
+        ResponsePayload::Query(QueryResult::Issue(issue)) => beads_core::BeadId::parse(&issue.id)
+            .unwrap_or_else(|e| panic!("invalid issue id in create response: {e}")),
         other => panic!("unexpected create payload: {other:?}"),
     };
 
@@ -3722,7 +3720,7 @@ fn test_crash_recovery_replays_wal() {
         .join("stores")
         .join(store_id.to_string())
         .join("wal")
-        .join(beads_rs::core::NamespaceId::core().as_str());
+        .join(beads_core::NamespaceId::core().as_str());
     let wal_entries = wait_for_wal_segments(&wal_dir, Duration::from_secs(2));
     assert!(!wal_entries.is_empty(), "expected WAL entry before crash");
 

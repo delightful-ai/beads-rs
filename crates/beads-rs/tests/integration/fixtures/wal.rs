@@ -12,7 +12,7 @@ use super::daemon_boundary::wal::{
     RequestProof, SEGMENT_HEADER_PREFIX_LEN, SegmentConfig, SegmentHeader, SegmentWriter,
     SqliteWalIndex, VerifiedRecord, WAL_FORMAT_VERSION, WalIndexError, encode_frame,
 };
-use beads_rs::core::{
+use beads_core::{
     ActorId, Canonical, ClientRequestId, EventBody, EventBytes, EventKindV1, HlcMax, Limits,
     NamespaceId, ReplicaId, Seq1, StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnDeltaV1,
     TxnId, TxnV1, ValidatedEventBody, encode_event_body_canonical,
@@ -191,7 +191,7 @@ pub fn record_for_seq(
     let txn_id = TxnId::new(Uuid::from_bytes([seq as u8; 16]));
     let body = event_body(meta, namespace, origin, seq, event_time_ms, txn_id, None);
     let payload = event_body_bytes(&body);
-    let sha = beads_rs::core::hash_event_body(&payload).0;
+    let sha = beads_core::hash_event_body(&payload).0;
     let header = RecordHeader {
         origin_replica_id: origin,
         origin_seq: Seq1::from_u64(seq).expect("seq1"),
@@ -222,7 +222,7 @@ pub fn sample_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Ver
         client_request_id,
     );
     let payload = event_body_bytes(&body);
-    let sha = beads_rs::core::sha256_bytes(payload.as_ref()).0;
+    let sha = beads_core::sha256_bytes(payload.as_ref()).0;
     let header = RecordHeader {
         origin_replica_id: origin,
         origin_seq: Seq1::from_u64(origin_seq).expect("seq1"),
@@ -255,7 +255,7 @@ pub fn simple_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Ver
         None,
     );
     let payload = event_body_bytes(&body);
-    let sha = beads_rs::core::sha256_bytes(payload.as_ref()).0;
+    let sha = beads_core::sha256_bytes(payload.as_ref()).0;
     let header = RecordHeader {
         origin_replica_id: origin,
         origin_seq: Seq1::from_u64(origin_seq).expect("seq1"),
