@@ -7,6 +7,7 @@ const POLICY_CRATES: &[&str] = &[
     "beads-api",
     "beads-surface",
     "beads-cli",
+    "beads-git",
     "beads-daemon",
     "beads-daemon-core",
     "beads-rs",
@@ -19,18 +20,25 @@ const ALLOWED_EDGES: &[&str] = &[
     "beads-cli -> beads-surface",
     "beads-cli -> beads-core",
     "beads-cli -> beads-api",
+    "beads-git -> beads-core",
     "beads-daemon -> beads-surface",
     "beads-daemon -> beads-api",
     "beads-daemon -> beads-core",
+    "beads-daemon -> beads-git",
     "beads-daemon -> beads-daemon-core",
     "beads-daemon-core -> beads-core",
     "beads-rs -> beads-core",
     "beads-rs -> beads-api",
     "beads-rs -> beads-surface",
     "beads-rs -> beads-cli",
+    "beads-rs -> beads-git",
     "beads-rs -> beads-daemon",
     "beads-rs -> beads-daemon-core",
 ];
+
+fn dependency_kind_allowed(dep_kind: Option<&str>) -> bool {
+    dep_kind.is_none() || dep_kind == Some("build") || dep_kind == Some("dev")
+}
 
 #[test]
 fn crate_dag_matches_policy() {
@@ -93,7 +101,7 @@ fn crate_dag_matches_policy() {
                 continue;
             }
             let dep_kind = dependency["kind"].as_str();
-            if dep_kind.is_none() || dep_kind == Some("build") {
+            if dependency_kind_allowed(dep_kind) {
                 actual_edges.insert(format!("{package_name} -> {dep_name}"));
             }
         }
@@ -123,4 +131,12 @@ fn crate_dag_matches_policy() {
             extra_edges.join(", ")
         },
     );
+}
+
+#[test]
+fn dependency_kind_policy_includes_dev_dependencies() {
+    assert!(dependency_kind_allowed(None));
+    assert!(dependency_kind_allowed(Some("build")));
+    assert!(dependency_kind_allowed(Some("dev")));
+    assert!(!dependency_kind_allowed(Some("proc-macro")));
 }

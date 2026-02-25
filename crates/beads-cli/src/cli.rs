@@ -569,3 +569,22 @@ fn daemon_cmd_name(cmd: &commands::daemon::DaemonCmd) -> &'static str {
         commands::daemon::DaemonCmd::Run => "run",
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn epic_status_accepts_epic_id() {
+        let cli = parse_from(["bd", "epic", "status", "bd-i5t"]);
+        match cli.command {
+            Command::Epic {
+                cmd: commands::epic::EpicCmd::Status(args),
+            } => {
+                assert_eq!(args.id.as_deref(), Some("bd-i5t"));
+                assert!(!args.eligible_only);
+            }
+            other => panic!("expected epic status command, got {other:?}"),
+        }
+    }
+}

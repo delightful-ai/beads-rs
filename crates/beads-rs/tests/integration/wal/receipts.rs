@@ -2,11 +2,11 @@
 
 use uuid::Uuid;
 
-use beads_rs::daemon::wal::{ClientRequestEventIds, WalIndex, rebuild_index};
-use beads_rs::{
+use beads_core::{
     DurabilityReceipt, EventId, Limits, NamespaceId, ReplicaId, Seq1, StoreEpoch, StoreId,
     StoreIdentity, TxnId, Watermarks, sha256_bytes,
 };
+use beads_daemon::testkit::wal::{ClientRequestEventIds, WalIndex, rebuild_index};
 
 use crate::fixtures::identity;
 use crate::fixtures::receipt;

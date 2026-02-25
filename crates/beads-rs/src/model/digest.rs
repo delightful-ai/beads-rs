@@ -1,6 +1,6 @@
 //! Digest helpers for model state summaries.
 
-use crate::core::{CanonJsonError, CanonicalState, StateCanonicalJsonSha256};
+use beads_core::{CanonJsonError, CanonicalState, StateCanonicalJsonSha256};
 
 pub fn canonical_state_canon_json_sha256(
     state: &CanonicalState,

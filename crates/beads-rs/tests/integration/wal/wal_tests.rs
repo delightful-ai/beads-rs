@@ -3,8 +3,8 @@
 use std::fs;
 use std::io::{Seek, SeekFrom};
 
-use beads_rs::daemon::wal::{FrameReader, WalReplayError, rebuild_index};
-use beads_rs::{Limits, NamespaceId, ReplicaId, decode_event_body};
+use beads_core::{Limits, NamespaceId, ReplicaId, decode_event_body};
+use beads_daemon::testkit::wal::{FrameReader, WalReplayError, rebuild_index};
 use uuid::Uuid;
 
 use crate::fixtures::wal::{TempWalDir, record_for_seq, sample_record};

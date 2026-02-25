@@ -4,17 +4,17 @@
 //! serialized representations. They depend on git::wire serialization and thus
 //! live in beads-rs rather than beads-core.
 
-use beads_rs::core::bead::{Bead, BeadCore, BeadFields};
-use beads_rs::core::composite::{Claim, Workflow};
-use beads_rs::core::crdt::Lww;
-use beads_rs::core::domain::{BeadType, DepKind, Priority};
-use beads_rs::core::identity::{ActorId, BeadId, ReplicaId};
-use beads_rs::core::orset::Dot;
-use beads_rs::core::state::CanonicalState;
-use beads_rs::core::time::{Stamp, WriteStamp};
-use beads_rs::core::tombstone::Tombstone;
-use beads_rs::core::{DepKey, ParentEdge};
-use beads_rs::git::wire;
+use beads_core::bead::{Bead, BeadCore, BeadFields};
+use beads_core::composite::{Claim, Workflow};
+use beads_core::crdt::Lww;
+use beads_core::domain::{BeadType, DepKind, Priority};
+use beads_core::identity::{ActorId, BeadId, ReplicaId};
+use beads_core::orset::Dot;
+use beads_core::state::CanonicalState;
+use beads_core::time::{Stamp, WriteStamp};
+use beads_core::tombstone::Tombstone;
+use beads_core::{DepKey, ParentEdge};
+use beads_git::wire;
 use proptest::prelude::*;
 use uuid::Uuid;
 

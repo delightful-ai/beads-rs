@@ -11,35 +11,37 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use uuid::Uuid;
 
-use crate::core::time::{WallClockGuard, WallClockSource, set_wall_clock_source_for_tests};
-use crate::core::{
+use crate::paths;
+use beads_core::time::{WallClockGuard, WallClockSource, set_wall_clock_source_for_tests};
+use beads_core::{
     ActorId, Applied, BeadId, DurabilityClass, Durable, EventId, EventShaLookupError, Limits,
     NamespaceId, NamespaceSet, ReplicaDurabilityRole, ReplicaEntry, ReplicaId, ReplicaRoster, Seq0,
     Sha256, StoreEpoch, StoreId, StoreIdentity, VerifiedEventFrame,
 };
-use crate::daemon::Clock;
-use crate::daemon::core::{Daemon, HandleOutcome, insert_store_for_tests, replay_event_wal};
-use crate::daemon::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
-use crate::daemon::executor::DurabilityWait;
-use crate::daemon::ipc::{
+use beads_daemon::admission::AdmissionController;
+use beads_daemon::remote::RemoteUrl;
+use beads_daemon::testkit::Clock;
+use beads_daemon::testkit::core::{
+    Daemon, HandleOutcome, insert_store_for_tests, replay_event_wal,
+};
+use beads_daemon::testkit::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
+use beads_daemon::testkit::executor::DurabilityWait;
+use beads_daemon::testkit::ipc::{
     CreatePayload, MutationCtx, MutationMeta, Request, Response, ResponseExt, ResponsePayload,
 };
-use crate::daemon::ops::OpError;
-use crate::daemon::repl::session::{
+use beads_daemon::testkit::ops::OpError;
+use beads_daemon::testkit::repl::session::{
     Inbound, InboundConnecting, Outbound, OutboundConnecting, SessionState, handle_inbound_message,
     handle_outbound_message,
 };
-use crate::daemon::repl::{
+use beads_daemon::testkit::repl::{
     Events, IngestOutcome, ReplError, SessionAction, SessionConfig, SessionStore, ValidatedAck,
     Want, WatermarkMap, WatermarkSnapshot, WatermarkState,
 };
-use crate::daemon::wal::{
+use beads_daemon::testkit::wal::{
     EventWal, MemoryWalIndex, ReplicaLivenessRow, SegmentConfig, SegmentSyncMode, WalIndexError,
     rebuild_index,
 };
-use crate::paths;
-use beads_daemon::admission::AdmissionController;
-use beads_daemon::remote::RemoteUrl;
 use beads_daemon_core::repl::frame::{FrameLimitState, FrameReader, encode_frame};
 use beads_daemon_core::repl::proto::{
     PROTOCOL_VERSION_V1, ReplEnvelope, WireReplEnvelope, decode_envelope, encode_envelope,
@@ -139,8 +141,8 @@ struct TestNodeInner {
     repo_path: PathBuf,
     data_dir: PathBuf,
     _dir: TestDir,
-    git_tx: Sender<crate::daemon::GitOp>,
-    _git_rx: Receiver<crate::daemon::GitOp>,
+    git_tx: Sender<beads_daemon::testkit::GitOp>,
+    _git_rx: Receiver<beads_daemon::testkit::GitOp>,
 }
 
 #[derive(Clone)]
@@ -398,8 +400,8 @@ impl TestNode {
                 id: None,
                 parent: None,
                 title: title.to_string(),
-                bead_type: crate::core::BeadType::Task,
-                priority: crate::core::Priority::MEDIUM,
+                bead_type: beads_core::BeadType::Task,
+                priority: beads_core::Priority::MEDIUM,
                 description: None,
                 design: None,
                 acceptance_criteria: None,
@@ -486,7 +488,7 @@ impl TestNode {
             let store_id = self.store_id();
             let runtime = daemon.store_runtime_by_id(store_id).expect("store runtime");
             let limits = daemon.limits().clone();
-            let reader = crate::daemon::repl::WalRangeReader::new(
+            let reader = beads_daemon::testkit::repl::WalRangeReader::new(
                 store_id,
                 runtime.wal_index.clone(),
                 limits.clone(),
@@ -504,7 +506,7 @@ impl TestNode {
                             .expect("wal frame verify")
                     })
                     .collect(),
-                Err(crate::daemon::repl::WalRangeError::MissingRange { .. }) => Vec::new(),
+                Err(beads_daemon::testkit::repl::WalRangeError::MissingRange { .. }) => Vec::new(),
                 Err(err) => panic!("wal range: {err:?}"),
             }
         })
@@ -519,7 +521,7 @@ impl TestNode {
                 peer,
                 ack.durable(),
                 ack.applied(),
-                crate::core::WallClock::now().0,
+                beads_core::WallClock::now().0,
             );
         });
     }
@@ -533,7 +535,7 @@ impl TestNode {
 
     fn with_daemon_mut<R>(
         &self,
-        f: impl FnOnce(&mut Daemon, &Sender<crate::daemon::GitOp>) -> R,
+        f: impl FnOnce(&mut Daemon, &Sender<beads_daemon::testkit::GitOp>) -> R,
     ) -> R {
         let data_dir = self.inner.borrow().data_dir.clone();
         let _guard = paths::override_data_dir_for_tests(Some(data_dir));
@@ -608,7 +610,7 @@ impl SessionStore for TestSessionStore {
 
     fn ingest_remote_batch(
         &mut self,
-        batch: &crate::daemon::repl::ContiguousBatch,
+        batch: &beads_daemon::testkit::repl::ContiguousBatch,
         now_ms: u64,
     ) -> Result<IngestOutcome, ReplError> {
         self.node.with_daemon_mut(|daemon, _git_tx| {
@@ -621,14 +623,14 @@ impl SessionStore for TestSessionStore {
         replica_id: ReplicaId,
         last_seen_ms: u64,
         last_handshake_ms: u64,
-        role: crate::daemon::wal::ReplicaDurabilityRole,
+        role: beads_daemon::testkit::wal::ReplicaDurabilityRole,
     ) -> Result<(), WalIndexError> {
         self.node.with_daemon(|daemon| {
             let runtime = daemon
                 .store_runtime_by_id(self.store_id)
                 .expect("store runtime");
             let mut txn = runtime.wal_index.writer().begin_txn()?;
-            txn.upsert_replica_liveness(&crate::daemon::wal::ReplicaLivenessRow {
+            txn.upsert_replica_liveness(&beads_daemon::testkit::wal::ReplicaLivenessRow {
                 replica_id,
                 last_seen_ms,
                 last_handshake_ms,
@@ -1140,7 +1142,7 @@ impl RigLink {
                     };
                     self.transport
                         .b
-                        .send_message(&crate::daemon::repl::ReplMessage::Want(want));
+                        .send_message(&beads_daemon::testkit::repl::ReplMessage::Want(want));
                     self.last_want_sent = Some(want_map);
                     self.last_want_sent_at_ms = Some(now_ms);
                     progressed = true;
@@ -1194,7 +1196,8 @@ impl RigLink {
                 let events = source.read_wal_range(&namespace, &origin, from_seq);
                 if !events.is_empty() {
                     let message = Events { events };
-                    transport.send_message(&crate::daemon::repl::ReplMessage::Events(message));
+                    transport
+                        .send_message(&beads_daemon::testkit::repl::ReplMessage::Events(message));
                 }
             }
             SessionAction::PeerAck(ack) => match endpoint {
@@ -1579,7 +1582,7 @@ pub struct ChannelEndpoint {
 }
 
 impl ChannelEndpoint {
-    pub fn send_message(&self, message: &crate::daemon::repl::ReplMessage) {
+    pub fn send_message(&self, message: &beads_daemon::testkit::repl::ReplMessage) {
         let frame = encode_message_frame(message.clone(), self.max_frame_bytes);
         self.sender.send(frame);
     }
@@ -1662,7 +1665,7 @@ pub fn measure_latency<F: FnOnce()>(f: F) -> u128 {
 }
 
 fn encode_message_frame(
-    message: crate::daemon::repl::ReplMessage,
+    message: beads_daemon::testkit::repl::ReplMessage,
     max_frame_bytes: usize,
 ) -> Vec<u8> {
     let envelope = ReplEnvelope {

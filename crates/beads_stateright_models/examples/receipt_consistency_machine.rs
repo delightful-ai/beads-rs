@@ -6,11 +6,11 @@
 use std::borrow::Cow;
 use std::time::Duration;
 
-use beads_rs::model::{ClientRequestEventIds, MemoryWalIndex, MemoryWalIndexSnapshot, WalIndex};
-use beads_rs::{
+use beads_core::{
     Applied, ClientRequestId, DurabilityReceipt, EventId, NamespaceId, ReplicaId, StoreEpoch,
     StoreId, StoreIdentity, TxnId, Watermarks,
 };
+use beads_rs::model::{ClientRequestEventIds, MemoryWalIndex, MemoryWalIndexSnapshot, WalIndex};
 use stateright::actor::register::RegisterMsg;
 use stateright::actor::{Actor, ActorModel, Id, LossyNetwork, Network, Out};
 use stateright::report::WriteReporter;
@@ -255,7 +255,7 @@ fn build_receipt(
         txn_id,
         event_ids.event_ids(),
         created_at_ms,
-        Watermarks::<beads_rs::Durable>::new(),
+        Watermarks::<beads_core::Durable>::new(),
         Watermarks::<Applied>::new(),
     );
     let snapshot = index.model_snapshot();
@@ -280,7 +280,7 @@ fn lookup_receipt(
         row.txn_id,
         row.event_ids.event_ids(),
         row.created_at_ms,
-        Watermarks::<beads_rs::Durable>::new(),
+        Watermarks::<beads_core::Durable>::new(),
         Watermarks::<Applied>::new(),
     ))
 }

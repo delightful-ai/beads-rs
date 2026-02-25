@@ -8,7 +8,7 @@ use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use beads_daemon::test_utils::{daemon_meta_path, daemon_socket_path, poll_until_with_backoff};
-use beads_rs::surface::ipc::{Request, Response};
+use beads_surface::ipc::{Request, Response};
 
 /// Best-effort daemon shutdown for tests.
 ///

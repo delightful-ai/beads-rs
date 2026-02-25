@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use crate::config::PathsConfig;
-use crate::core::{NamespaceId, StoreId};
 use beads_cli::paths as moved;
+use beads_core::{NamespaceId, StoreId};
 
 // =============================================================================
 // Config-based path overrides (from beads.toml)
@@ -24,6 +24,10 @@ pub fn init_from_config(config: &PathsConfig) {
     *guard = config.clone();
 
     beads_surface::ipc::set_runtime_dir_override(config.runtime_dir.clone());
+    beads_daemon::paths::init_from_config(&beads_daemon::config::PathsConfig {
+        data_dir: config.data_dir.clone(),
+        runtime_dir: config.runtime_dir.clone(),
+    });
 }
 
 /// Get the config-based data_dir override, if set.
@@ -73,12 +77,17 @@ pub(crate) fn log_dir() -> PathBuf {
 #[doc(hidden)]
 pub struct DataDirOverride {
     prev: Option<PathBuf>,
+    _daemon_override: beads_daemon::paths::DataDirOverride,
 }
 
 impl DataDirOverride {
     pub fn new(path: Option<PathBuf>) -> Self {
+        let daemon_override = beads_daemon::paths::override_data_dir_for_tests(path.clone());
         let prev = TEST_DATA_DIR_OVERRIDE.with(|cell| cell.replace(path));
-        Self { prev }
+        Self {
+            prev,
+            _daemon_override: daemon_override,
+        }
     }
 }
 

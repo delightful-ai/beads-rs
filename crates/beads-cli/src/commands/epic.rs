@@ -20,6 +20,9 @@ pub enum EpicCmd {
 
 #[derive(Args, Debug)]
 pub struct EpicStatusArgs {
+    /// Show only this epic.
+    pub id: Option<String>,
+
     /// Show only epics eligible for closure.
     #[arg(long)]
     pub eligible_only: bool,
@@ -41,10 +44,15 @@ struct EpicCloseResult {
 pub fn handle(ctx: &CliRuntimeCtx, cmd: EpicCmd) -> CommandResult<()> {
     match cmd {
         EpicCmd::Status(args) => {
+            let id = match args.id {
+                Some(id) => Some(normalize_bead_id(&id)?),
+                None => None,
+            };
             let req = Request::EpicStatus {
                 ctx: ctx.read_ctx(),
                 payload: EpicStatusPayload {
                     eligible_only: args.eligible_only,
+                    epic_id: id,
                 },
             };
             let ok = send(&req)?;
@@ -64,6 +72,7 @@ pub fn handle(ctx: &CliRuntimeCtx, cmd: EpicCmd) -> CommandResult<()> {
                 ctx: ctx.read_ctx(),
                 payload: EpicStatusPayload {
                     eligible_only: true,
+                    epic_id: None,
                 },
             };
             let ok = send(&req)?;

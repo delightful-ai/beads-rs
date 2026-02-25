@@ -1,0 +1,35 @@
+[package]
+name = "beads-git"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Git sync and checkpoint subsystem for beads"
+
+[dependencies]
+beads-core = { path = "../beads-core" }
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+sha2.workspace = true
+hex.workspace = true
+bytes.workspace = true
+git2 = { version = "0.20", features = ["vendored-libgit2", "vendored-openssl"] }
+flate2 = "1"
+tar = "0.4"
+tempfile = "3"
+dirs = "6.0.0"
+nix = { version = "0.29", features = ["signal", "user"] }
+
+[features]
+default = []
+slow-tests = []
+
+[dev-dependencies]
+proptest = "1"
+uuid = { workspace = true }
+
+[lints]
+workspace = true

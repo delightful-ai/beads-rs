@@ -1,0 +1,1170 @@
+//! Query executors - read operations against state.
+//!
+//! Queries are pure reads - no clock, no dirty, no scheduling.
+
+use std::path::Path;
+use std::time::Instant;
+
+use crossbeam::channel::Sender;
+
+use super::core::{Daemon, ReadScope};
+use super::git_worker::GitOp;
+use super::ipc::{ReadConsistency, Response, ResponseExt, ResponsePayload};
+use super::ops::{MapLiveError, OpError};
+use super::query::{Filters, QueryResult};
+use super::store::runtime::StoreRuntime;
+use crate::core::{BeadId, CanonicalState, DepKey, DepKind, WallClock};
+use crate::git_lane::GitLaneState;
+use crate::remote::RemoteUrl;
+use beads_api::{
+    BlockedIssue, CountGroup, CountResult, DeletedLookup, DepCycles, DepEdge, EpicStatus, Issue,
+    IssueSummary, Note, ReadyResult, ShowDetails, StatusOutput, StatusSummary, SyncStatus,
+    SyncWarning, Tombstone,
+};
+
+mod helpers;
+use helpers::*;
+
+struct ReadCtx<'a> {
+    remote: RemoteUrl,
+    read: ReadScope,
+    store: &'a StoreRuntime,
+    state: &'a CanonicalState,
+    repo_state: Option<&'a GitLaneState>,
+}
+
+struct StatusParts {
+    summary: StatusSummary,
+    warnings: Vec<SyncWarning>,
+    sync_dirty: bool,
+    sync_in_progress: bool,
+    last_sync_wall_ms: Option<u64>,
+    consecutive_failures: u32,
+    remote_url: RemoteUrl,
+}
+
+impl Daemon {
+    fn with_read_ctx<F, T>(
+        &mut self,
+        repo: &Path,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+        want_repo_state: bool,
+        f: F,
+    ) -> Result<T, OpError>
+    where
+        F: for<'a> FnOnce(ReadCtx<'a>) -> Result<T, OpError>,
+    {
+        let loaded = self.ensure_repo_fresh(repo, git_tx)?;
+        let read = loaded.read_scope(read)?;
+        loaded.check_read_gate(&read)?;
+        let store = loaded.runtime();
+        let state = Self::namespace_state(&loaded, read.namespace());
+        let repo_state = want_repo_state.then(|| loaded.lane());
+        let remote = loaded.remote().clone();
+
+        f(ReadCtx {
+            remote,
+            read,
+            store,
+            state,
+            repo_state,
+        })
+    }
+
+    fn with_read_ctx_without_gate<F, T>(
+        &mut self,
+        repo: &Path,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+        want_repo_state: bool,
+        f: F,
+    ) -> Result<T, OpError>
+    where
+        F: for<'a> FnOnce(ReadCtx<'a>) -> Result<T, OpError>,
+    {
+        let loaded = self.ensure_repo_fresh(repo, git_tx)?;
+        let read = loaded.read_scope(read)?;
+        let store = loaded.runtime();
+        let state = Self::namespace_state(&loaded, read.namespace());
+        let repo_state = want_repo_state.then(|| loaded.lane());
+        let remote = loaded.remote().clone();
+
+        f(ReadCtx {
+            remote,
+            read,
+            store,
+            state,
+            repo_state,
+        })
+    }
+
+    fn with_read_ctx_response_without_gate<F>(
+        &mut self,
+        repo: &Path,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+        want_repo_state: bool,
+        f: F,
+    ) -> Response
+    where
+        F: for<'a> FnOnce(ReadCtx<'a>) -> Result<ResponsePayload, OpError>,
+    {
+        match self.with_read_ctx_without_gate(repo, read, git_tx, want_repo_state, f) {
+            Ok(payload) => Response::ok(payload),
+            Err(err) => Response::err_from(err),
+        }
+    }
+
+    fn with_read_ctx_response<F>(
+        &mut self,
+        repo: &Path,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+        want_repo_state: bool,
+        f: F,
+    ) -> Response
+    where
+        F: for<'a> FnOnce(ReadCtx<'a>) -> Result<ResponsePayload, OpError>,
+    {
+        match self.with_read_ctx(repo, read, git_tx, want_repo_state, f) {
+            Ok(payload) => Response::ok(payload),
+            Err(err) => Response::err_from(err),
+        }
+    }
+
+    /// Get a single bead.
+    pub(in crate::runtime) fn query_show(
+        &mut self,
+        repo: &Path,
+        id: &BeadId,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
+            match ctx.state.require_live(id).map_live_err(id) {
+                Ok(_) => {
+                    let view = ctx.state.bead_view(id).expect("live bead should have view");
+                    let issue = Issue::from_view(ctx.read.namespace(), &view);
+                    Ok(ResponsePayload::query(QueryResult::Issue(issue)))
+                }
+                Err(e) => Err(e),
+            }
+        })
+    }
+
+    /// Get multiple beads (batch fetch for summaries).
+    pub(in crate::runtime) fn query_show_multiple(
+        &mut self,
+        repo: &Path,
+        ids: &[BeadId],
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
+            let mut summaries = Vec::with_capacity(ids.len());
+            for id in ids {
+                if let Some(view) = ctx.state.bead_view(id) {
+                    summaries.push(IssueSummary::from_view(ctx.read.namespace(), &view));
+                }
+            }
+
+            Ok(ResponsePayload::query(QueryResult::Issues(summaries)))
+        })
+    }
+
+    /// Get a single bead with dependency edges and dependency summaries.
+    pub(in crate::runtime) fn query_show_details(
+        &mut self,
+        repo: &Path,
+        id: &BeadId,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
+            ctx.state.require_live(id).map_live_err(id)?;
+
+            let view = ctx.state.bead_view(id).expect("live bead should have view");
+            let mut issue = Issue::from_view(ctx.read.namespace(), &view);
+
+            let mut incoming = Vec::new();
+            let mut outgoing = Vec::new();
+            let mut related_ids = std::collections::BTreeSet::new();
+
+            for (to, kind) in ctx.state.dep_indexes().out_edges(id) {
+                if let Ok(key) = DepKey::new(id.clone(), to.clone(), *kind) {
+                    outgoing.push(DepEdge::from(&key));
+                    related_ids.insert(to.clone());
+                }
+            }
+
+            for (from, kind) in ctx.state.dep_indexes().in_edges(id) {
+                if let Ok(key) = DepKey::new(from.clone(), id.clone(), *kind) {
+                    incoming.push(DepEdge::from(&key));
+                    related_ids.insert(from.clone());
+                }
+            }
+
+            issue.deps_incoming = incoming.clone();
+            issue.deps_outgoing = outgoing.clone();
+
+            let mut summaries = Vec::with_capacity(related_ids.len());
+            for related_id in related_ids {
+                if let Some(dep_view) = ctx.state.bead_view(&related_id) {
+                    summaries.push(IssueSummary::from_view(ctx.read.namespace(), &dep_view));
+                }
+            }
+
+            let details = ShowDetails {
+                issue,
+                incoming,
+                outgoing,
+                summaries,
+            };
+            Ok(ResponsePayload::query(QueryResult::ShowDetails(details)))
+        })
+    }
+
+    /// List beads with optional filters.
+    pub(in crate::runtime) fn query_list(
+        &mut self,
+        repo: &Path,
+        filters: &Filters,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
+            let state = ctx.state;
+
+            // Build children set if parent filter is specified.
+            // Parent deps: from=child, to=parent, kind=Parent.
+            let children_of_parent: Option<std::collections::HashSet<BeadId>> =
+                filters.parent.as_ref().map(|parent_id| {
+                    state
+                        .parent_edges_to(parent_id)
+                        .into_iter()
+                        .map(|edge| edge.child().clone())
+                        .collect()
+                });
+
+            let mut views: Vec<IssueSummary> = state
+                .iter_live()
+                .filter_map(|(id, _)| {
+                    // If parent filter specified, only include children of that parent.
+                    if let Some(ref children) = children_of_parent
+                        && !children.contains(id)
+                    {
+                        return None;
+                    }
+                    let view = state.bead_view(id)?;
+                    if !filters.matches(&view) {
+                        return None;
+                    }
+                    Some(IssueSummary::from_view(ctx.read.namespace(), &view))
+                })
+                .collect();
+
+            // Sort
+            if let Some(sort_by) = filters.sort_by {
+                use super::query::SortField;
+                match sort_by {
+                    SortField::Priority => {
+                        views.sort_by(|a, b| {
+                            if filters.ascending {
+                                a.priority.cmp(&b.priority)
+                            } else {
+                                b.priority.cmp(&a.priority)
+                            }
+                        });
+                    }
+                    SortField::CreatedAt => {
+                        views.sort_by(|a, b| {
+                            if filters.ascending {
+                                a.created_at.cmp(&b.created_at)
+                            } else {
+                                b.created_at.cmp(&a.created_at)
+                            }
+                        });
+                    }
+                    SortField::UpdatedAt => {
+                        views.sort_by(|a, b| {
+                            if filters.ascending {
+                                a.updated_at.cmp(&b.updated_at)
+                            } else {
+                                b.updated_at.cmp(&a.updated_at)
+                            }
+                        });
+                    }
+                    SortField::Title => {
+                        views.sort_by(|a, b| {
+                            if filters.ascending {
+                                a.title.cmp(&b.title)
+                            } else {
+                                b.title.cmp(&a.title)
+                            }
+                        });
+                    }
+                }
+            } else {
+                // Default: sort by priority (high to low), then updated_at (newest first)
+                views.sort_by(|a, b| {
+                    b.priority
+                        .cmp(&a.priority)
+                        .then_with(|| b.updated_at.cmp(&a.updated_at))
+                });
+            }
+
+            // Apply limit
+            if let Some(limit) = filters.limit {
+                views.truncate(limit);
+            }
+
+            Ok(ResponsePayload::query(QueryResult::Issues(views)))
+        })
+    }
+
+    /// Get ready beads (no blockers, open status).
+    pub(in crate::runtime) fn query_ready(
+        &mut self,
+        repo: &Path,
+        limit: Option<usize>,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
+            let state = ctx.state;
+
+            // Collect IDs that are blocked by *blocking* deps (kind=blocks).
+            let mut blocked: std::collections::HashSet<&BeadId> = std::collections::HashSet::new();
+            for key in state.dep_store().values() {
+                // Only count `blocks` edges where the target is not closed.
+                if key.kind() == crate::core::DepKind::Blocks
+                    && let Some(to_bead) = state.get_live(key.to())
+                    && !to_bead.fields.workflow.value.is_closed()
+                {
+                    blocked.insert(key.from());
+                }
+            }
+
+            // Count blocked and closed issues for summary.
+            let mut blocked_count = 0usize;
+            let mut closed_count = 0usize;
+
+            let mut views: Vec<IssueSummary> = Vec::new();
+            for (id, bead) in state.iter_live() {
+                if bead.fields.workflow.value.is_closed() {
+                    closed_count += 1;
+                    continue;
+                }
+                if blocked.contains(id) {
+                    blocked_count += 1;
+                    continue;
+                }
+                if let Some(view) = state.bead_view(id) {
+                    views.push(IssueSummary::from_view(ctx.read.namespace(), &view));
+                }
+            }
+
+            // Sort by priority (low to high), then created_at (oldest first).
+            sort_ready_issues(&mut views);
+
+            // Apply limit
+            if let Some(limit) = limit {
+                views.truncate(limit);
+            }
+
+            let result = ReadyResult {
+                issues: views,
+                blocked_count,
+                closed_count,
+            };
+
+            Ok(ResponsePayload::query(QueryResult::Ready(result)))
+        })
+    }
+
+    /// Get dependency tree for a bead.
+    pub(in crate::runtime) fn query_dep_tree(
+        &mut self,
+        repo: &Path,
+        id: &BeadId,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
+            let state = ctx.state;
+
+            // Check if bead exists
+            state.require_live(id).map_live_err(id)?;
+
+            // Collect all edges in the transitive closure
+            let mut edges = Vec::new();
+            let mut visited = std::collections::HashSet::new();
+            let mut queue = std::collections::VecDeque::new();
+            queue.push_back(id.clone());
+
+            while let Some(current) = queue.pop_front() {
+                if !visited.insert(current.clone()) {
+                    continue;
+                }
+
+                for (to, kind) in state.dep_indexes().out_edges(&current) {
+                    if let Ok(key) = DepKey::new(current.clone(), to.clone(), *kind) {
+                        edges.push(DepEdge::from(&key));
+                        if !visited.contains(key.to()) {
+                            queue.push_back(key.to().clone());
+                        }
+                    }
+                }
+            }
+
+            Ok(ResponsePayload::query(QueryResult::DepTree {
+                root: id.clone(),
+                edges,
+            }))
+        })
+    }
+
+    /// Get direct dependencies for a bead.
+    pub(in crate::runtime) fn query_deps(
+        &mut self,
+        repo: &Path,
+        id: &BeadId,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
+            let state = ctx.state;
+
+            // Check if bead exists
+            state.require_live(id).map_live_err(id)?;
+
+            let mut incoming = Vec::new();
+            let mut outgoing = Vec::new();
+
+            for (to, kind) in state.dep_indexes().out_edges(id) {
+                if let Ok(key) = DepKey::new(id.clone(), to.clone(), *kind) {
+                    outgoing.push(DepEdge::from(&key));
+                }
+            }
+
+            for (from, kind) in state.dep_indexes().in_edges(id) {
+                if let Ok(key) = DepKey::new(from.clone(), id.clone(), *kind) {
+                    incoming.push(DepEdge::from(&key));
+                }
+            }
+
+            Ok(ResponsePayload::query(QueryResult::Deps {
+                incoming,
+                outgoing,
+            }))
+        })
+    }
+
+    /// Get notes for a bead.
+    pub(in crate::runtime) fn query_notes(
+        &mut self,
+        repo: &Path,
+        id: &BeadId,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
+            let state = ctx.state;
+
+            if state.get_live(id).is_none() {
+                return Err(OpError::NotFound(id.clone()));
+            }
+
+            let notes: Vec<Note> = state.notes_for(id).into_iter().map(Note::from).collect();
+
+            Ok(ResponsePayload::query(QueryResult::Notes(notes)))
+        })
+    }
+
+    /// Get sync status for a repo.
+    pub(in crate::runtime) fn query_status(
+        &mut self,
+        repo: &Path,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let parts = match self.with_read_ctx(repo, read, git_tx, true, |ctx| {
+            let ReadCtx {
+                remote,
+                read,
+                store,
+                state,
+                repo_state,
+            } = ctx;
+            let repo_state = repo_state.expect("repo state requested");
+
+            let blocked_by = compute_blocked_by(state);
+            let blocked_set: std::collections::HashSet<&BeadId> = blocked_by.keys().collect();
+
+            let mut open_issues = 0usize;
+            let mut in_progress_issues = 0usize;
+            let mut closed_issues = 0usize;
+            let mut blocked_issues = 0usize;
+            let mut ready_issues = 0usize;
+
+            for (id, bead) in state.iter_live() {
+                if bead.fields.workflow.value.is_closed() {
+                    closed_issues += 1;
+                    continue;
+                }
+
+                match bead.fields.workflow.value.status() {
+                    "open" => open_issues += 1,
+                    "in_progress" => in_progress_issues += 1,
+                    _ => {}
+                }
+
+                if blocked_set.contains(id) {
+                    blocked_issues += 1;
+                } else {
+                    ready_issues += 1;
+                }
+            }
+
+            let epics_eligible_for_closure =
+                compute_epic_statuses(read.namespace(), state, true, None).len();
+
+            let summary = StatusSummary {
+                total_issues: state.live_count(),
+                open_issues,
+                in_progress_issues,
+                blocked_issues,
+                closed_issues,
+                ready_issues,
+                tombstone_issues: Some(state.tombstone_count()),
+                epics_eligible_for_closure: Some(epics_eligible_for_closure),
+            };
+
+            let mut warnings = Vec::new();
+            if let Some(fetch) = &repo_state.last_fetch_error {
+                warnings.push(SyncWarning::Fetch {
+                    message: fetch.message.clone(),
+                    at_wall_ms: fetch.wall_ms,
+                });
+            }
+            if let Some(diverged) = &repo_state.last_divergence {
+                warnings.push(SyncWarning::Diverged {
+                    local_oid: diverged.local_oid.clone(),
+                    remote_oid: diverged.remote_oid.clone(),
+                    at_wall_ms: diverged.wall_ms,
+                });
+            }
+            if let Some(force_push) = &repo_state.last_force_push {
+                warnings.push(SyncWarning::ForcePush {
+                    previous_remote_oid: force_push.previous_remote_oid.clone(),
+                    remote_oid: force_push.remote_oid.clone(),
+                    at_wall_ms: force_push.wall_ms,
+                });
+            }
+            if let Some(skew) = &repo_state.last_clock_skew {
+                warnings.push(SyncWarning::ClockSkew {
+                    delta_ms: skew.delta_ms,
+                    at_wall_ms: skew.wall_ms,
+                });
+            }
+            if let Some(repair) = &store.last_wal_tail_truncated {
+                warnings.push(SyncWarning::WalTailTruncated {
+                    namespace: repair.namespace.clone(),
+                    segment_id: repair.segment_id,
+                    truncated_from_offset: repair.truncated_from_offset,
+                    at_wall_ms: repair.wall_ms,
+                });
+            }
+
+            Ok(StatusParts {
+                summary,
+                warnings,
+                sync_dirty: repo_state.dirty,
+                sync_in_progress: repo_state.sync_in_progress,
+                last_sync_wall_ms: repo_state.last_sync_wall_ms,
+                consecutive_failures: repo_state.consecutive_failures,
+                remote_url: remote,
+            })
+        }) {
+            Ok(parts) => parts,
+            Err(err) => return Response::err_from(err),
+        };
+
+        let next_retry = self.next_sync_deadline_for(&parts.remote_url);
+        let (next_retry_wall_ms, next_retry_in_ms) = match next_retry {
+            Some(deadline) => {
+                let now = Instant::now();
+                let now_wall = WallClock::now().0;
+                let delta = deadline.saturating_duration_since(now);
+                let delta_ms = delta.as_millis() as u64;
+                (Some(now_wall.saturating_add(delta_ms)), Some(delta_ms))
+            }
+            None => (None, None),
+        };
+
+        let sync = SyncStatus {
+            dirty: parts.sync_dirty,
+            sync_in_progress: parts.sync_in_progress,
+            last_sync_wall_ms: parts.last_sync_wall_ms,
+            next_retry_wall_ms,
+            next_retry_in_ms,
+            consecutive_failures: parts.consecutive_failures,
+            warnings: parts.warnings,
+        };
+
+        let out = StatusOutput {
+            summary: parts.summary,
+            sync: Some(sync),
+        };
+
+        Response::ok(ResponsePayload::query(QueryResult::Status(out)))
+    }
+
+    /// Get blocked issues.
+    pub(in crate::runtime) fn query_blocked(
+        &mut self,
+        repo: &Path,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
+            let state = ctx.state;
+            let blocked_by = compute_blocked_by(state);
+            let mut out: Vec<BlockedIssue> = Vec::new();
+
+            for (from, deps) in blocked_by {
+                let view = match state.bead_view(&from) {
+                    Some(view) => view,
+                    None => continue,
+                };
+                if view.bead.fields.workflow.value.is_closed() {
+                    continue;
+                }
+
+                let mut blocked_by_ids: Vec<String> =
+                    deps.into_iter().map(|id| id.as_str().to_string()).collect();
+                blocked_by_ids.sort();
+                blocked_by_ids.dedup();
+
+                out.push(BlockedIssue {
+                    issue: IssueSummary::from_view(ctx.read.namespace(), &view),
+                    blocked_by_count: blocked_by_ids.len(),
+                    blocked_by: blocked_by_ids,
+                });
+            }
+
+            // Sort by priority (high to low), then updated_at (newest first).
+            out.sort_by(|a, b| {
+                b.issue
+                    .priority
+                    .cmp(&a.issue.priority)
+                    .then_with(|| b.issue.updated_at.cmp(&a.issue.updated_at))
+            });
+
+            Ok(ResponsePayload::query(QueryResult::Blocked(out)))
+        })
+    }
+
+    /// Get stale issues (not updated recently).
+    pub(in crate::runtime) fn query_stale(
+        &mut self,
+        repo: &Path,
+        days: u32,
+        status: Option<&str>,
+        limit: Option<usize>,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let cutoff_ms = self
+            .clock()
+            .wall_ms()
+            .saturating_sub(days as u64 * 24 * 60 * 60 * 1000);
+        self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
+            let status = status.map(|s| s.trim()).filter(|s| !s.is_empty());
+            if let Some(s) = status
+                && s != "open"
+                && s != "in_progress"
+                && s != "blocked"
+            {
+                return Err(OpError::ValidationFailed {
+                    field: "status".into(),
+                    reason: "valid values: open, in_progress, blocked".into(),
+                });
+            }
+
+            let state = ctx.state;
+            let blocked_by = compute_blocked_by(state);
+
+            let mut out: Vec<IssueSummary> = Vec::new();
+
+            for (id, bead) in state.iter_live() {
+                if bead.fields.workflow.value.is_closed() {
+                    continue;
+                }
+
+                let Some(view) = state.bead_view(id) else {
+                    continue;
+                };
+
+                // Stale check.
+                let updated_ms = view.updated_stamp().at.wall_ms;
+                if updated_ms > cutoff_ms {
+                    continue;
+                }
+
+                // Status filter:
+                // - open/in_progress: stored workflow status
+                // - blocked: derived via active `blocks` deps to open issues
+                if let Some(s) = status {
+                    match s {
+                        "open" | "in_progress" => {
+                            if bead.fields.workflow.value.status() != s {
+                                continue;
+                            }
+                        }
+                        "blocked" => {
+                            if !blocked_by.contains_key(id) {
+                                continue;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                out.push(IssueSummary::from_view(ctx.read.namespace(), &view));
+            }
+
+            // Stalest first (oldest updated_at).
+            out.sort_by(|a, b| a.updated_at.cmp(&b.updated_at));
+
+            // Apply limit (go default is 50; CLI should set it, but be defensive).
+            let limit = limit.unwrap_or(50);
+            out.truncate(limit);
+
+            Ok(ResponsePayload::query(QueryResult::Stale(out)))
+        })
+    }
+
+    /// Count issues matching filters.
+    pub(in crate::runtime) fn query_count(
+        &mut self,
+        repo: &Path,
+        filters: &Filters,
+        group_by: Option<&str>,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
+            let state = ctx.state;
+            let blocked_by = compute_blocked_by(state);
+
+            let status_filter = filters
+                .status
+                .as_deref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty());
+            let mut base_filters = filters.clone();
+            base_filters.status = None;
+
+            // Validate group_by (if any).
+            let group_by = group_by.map(|s| s.trim()).filter(|s| !s.is_empty());
+            if let Some(g) = group_by {
+                match g {
+                    "status" | "priority" | "type" | "assignee" | "label" => {}
+                    _ => {
+                        return Err(OpError::ValidationFailed {
+                            field: "group_by".into(),
+                            reason: "valid values: status, priority, type, assignee, label".into(),
+                        });
+                    }
+                }
+            }
+
+            let mut matched = Vec::new();
+
+            for (id, bead) in state.iter_live() {
+                let Some(view) = state.bead_view(id) else {
+                    continue;
+                };
+                if !base_filters.matches(&view) {
+                    continue;
+                }
+
+                // Status filter has a derived "blocked" meaning in beads-rs.
+                if let Some(s) = status_filter {
+                    match s {
+                        "open" | "in_progress" | "closed" => {
+                            if bead.fields.workflow.value.status() != s {
+                                continue;
+                            }
+                        }
+                        "blocked" => {
+                            if bead.fields.workflow.value.is_closed()
+                                || !blocked_by.contains_key(id)
+                            {
+                                continue;
+                            }
+                        }
+                        "all" => {}
+                        _ => {
+                            return Err(OpError::ValidationFailed {
+                                field: "status".into(),
+                                reason: "valid values: open, in_progress, blocked, closed".into(),
+                            });
+                        }
+                    }
+                }
+
+                matched.push(view);
+            }
+
+            let Some(group_by) = group_by else {
+                return Ok(ResponsePayload::query(QueryResult::Count(
+                    CountResult::Simple {
+                        count: matched.len(),
+                    },
+                )));
+            };
+
+            let mut counts: std::collections::BTreeMap<String, usize> =
+                std::collections::BTreeMap::new();
+            for view in &matched {
+                let bead = &view.bead;
+                let id = bead.id();
+                match group_by {
+                    "status" => {
+                        let group = if bead.fields.workflow.value.is_closed() {
+                            "closed".to_string()
+                        } else if blocked_by.contains_key(id) {
+                            "blocked".to_string()
+                        } else {
+                            bead.fields.workflow.value.status().to_string()
+                        };
+                        *counts.entry(group).or_insert(0) += 1;
+                    }
+                    "priority" => {
+                        let group = format!("P{}", bead.fields.priority.value.value());
+                        *counts.entry(group).or_insert(0) += 1;
+                    }
+                    "type" => {
+                        let group = bead.fields.bead_type.value.as_str().to_string();
+                        *counts.entry(group).or_insert(0) += 1;
+                    }
+                    "assignee" => {
+                        let group = match &bead.fields.claim.value {
+                            crate::core::Claim::Claimed { assignee, .. } => {
+                                assignee.as_str().to_string()
+                            }
+                            crate::core::Claim::Unclaimed => "(unassigned)".to_string(),
+                        };
+                        *counts.entry(group).or_insert(0) += 1;
+                    }
+                    "label" => {
+                        if view.labels.is_empty() {
+                            *counts.entry("(no labels)".to_string()).or_insert(0) += 1;
+                        } else {
+                            for l in view.labels.iter() {
+                                *counts.entry(l.as_str().to_string()).or_insert(0) += 1;
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+
+            let groups: Vec<CountGroup> = counts
+                .into_iter()
+                .map(|(group, count)| CountGroup { group, count })
+                .collect();
+
+            Ok(ResponsePayload::query(QueryResult::Count(
+                CountResult::Grouped {
+                    total: matched.len(),
+                    groups,
+                },
+            )))
+        })
+    }
+
+    /// Show deleted (tombstoned) issues.
+    pub(in crate::runtime) fn query_deleted(
+        &mut self,
+        repo: &Path,
+        since_ms: Option<u64>,
+        id: Option<&BeadId>,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let cutoff_ms = since_ms.map(|d| self.clock().wall_ms().saturating_sub(d));
+        self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
+            let state = ctx.state;
+
+            if let Some(id) = id {
+                let record = state.get_tombstone(id).map(Tombstone::from);
+                let out = DeletedLookup {
+                    found: record.is_some(),
+                    id: id.as_str().to_string(),
+                    record,
+                };
+                return Ok(ResponsePayload::query(QueryResult::DeletedLookup(out)));
+            }
+
+            let mut tombs: Vec<Tombstone> = state
+                .iter_tombstones()
+                .filter(|(_, t)| {
+                    t.lineage.is_none()
+                        && cutoff_ms.map(|c| t.deleted.at.wall_ms >= c).unwrap_or(true)
+                })
+                .map(|(_, t)| Tombstone::from(t))
+                .collect();
+
+            // Most recent first.
+            tombs.sort_by(|a, b| b.deleted_at.cmp(&a.deleted_at));
+
+            Ok(ResponsePayload::query(QueryResult::Deleted(tombs)))
+        })
+    }
+
+    /// Epic completion status.
+    pub(in crate::runtime) fn query_epic_status(
+        &mut self,
+        repo: &Path,
+        eligible_only: bool,
+        epic_id: Option<&BeadId>,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
+            let statuses =
+                compute_epic_statuses(ctx.read.namespace(), ctx.state, eligible_only, epic_id);
+            Ok(ResponsePayload::query(QueryResult::EpicStatus(statuses)))
+        })
+    }
+
+    /// Validate state.
+    pub(in crate::runtime) fn query_validate(
+        &mut self,
+        repo: &Path,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
+            let state = ctx.state;
+
+            // Run validation checks
+            let mut errors = Vec::new();
+
+            // Check for orphan dependencies
+            for key in state.dep_store().values() {
+                if state.get_live(key.from()).is_none() {
+                    errors.push(format!(
+                        "orphan dep: {} depends on {} but {} doesn't exist",
+                        key.from().as_str(),
+                        key.to().as_str(),
+                        key.from().as_str()
+                    ));
+                }
+                if state.get_live(key.to()).is_none() {
+                    errors.push(format!(
+                        "orphan dep: {} depends on {} but {} doesn't exist",
+                        key.from().as_str(),
+                        key.to().as_str(),
+                        key.to().as_str()
+                    ));
+                }
+            }
+
+            // Check for dependency cycles
+            // (simplified - just report if found, don't enumerate all)
+            for (id, _) in state.iter_live() {
+                let mut visited = std::collections::HashSet::new();
+                let mut queue = std::collections::VecDeque::new();
+                queue.push_back(id.clone());
+
+                while let Some(current) = queue.pop_front() {
+                    if current == *id && !visited.is_empty() {
+                        errors.push(format!("dependency cycle involving {}", id.as_str()));
+                        break;
+                    }
+                    if !visited.insert(current.clone()) {
+                        continue;
+                    }
+                    for (to, _) in state.dep_indexes().out_edges(&current) {
+                        queue.push_back(to.clone());
+                    }
+                }
+            }
+
+            Ok(ResponsePayload::query(QueryResult::Validation {
+                warnings: errors,
+            }))
+        })
+    }
+
+    /// Dependency cycles.
+    pub(in crate::runtime) fn query_dep_cycles(
+        &mut self,
+        repo: &Path,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        // `dep_cycles` is diagnostic/structural and should remain queryable even
+        // when min-seen watermarks are not yet satisfied.
+        self.with_read_ctx_response_without_gate(repo, read, git_tx, false, |ctx| {
+            let cycles = dep_cycles_from_state(ctx.state);
+            Ok(ResponsePayload::query(QueryResult::DepCycles(cycles)))
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Issue, IssueSummary};
+    use super::{dep_cycles_from_state, sort_ready_issues};
+    use crate::core::{
+        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey,
+        DepKind, Dot, Lww, NamespaceId, Priority, ReplicaId, Stamp, Workflow, WorkflowStatus,
+        WriteStamp,
+    };
+    use uuid::Uuid;
+
+    fn issue_summary(id: &str, priority: u8, created_at_ms: u64) -> IssueSummary {
+        let stamp = WriteStamp::new(created_at_ms, 0);
+        IssueSummary {
+            id: id.to_string(),
+            namespace: NamespaceId::core(),
+            title: format!("title-{id}"),
+            description: "desc".to_string(),
+            design: None,
+            acceptance_criteria: None,
+            status: WorkflowStatus::Open,
+            priority,
+            issue_type: BeadType::Task,
+            labels: Vec::new(),
+            assignee: None,
+            assignee_expires: None,
+            created_at: stamp.clone(),
+            created_by: "tester".to_string(),
+            updated_at: stamp,
+            updated_by: "tester".to_string(),
+            estimated_minutes: None,
+            content_hash: "hash".to_string(),
+            note_count: 0,
+        }
+    }
+
+    fn make_bead(id: &str, stamp: &Stamp) -> Bead {
+        let id = BeadId::parse(id).expect("bead id");
+        let title = format!("title-{}", id.as_str());
+        let core = BeadCore::new(id, stamp.clone(), None);
+        let fields = BeadFields {
+            title: Lww::new(title, stamp.clone()),
+            description: Lww::new("desc".to_string(), stamp.clone()),
+            design: Lww::new(None, stamp.clone()),
+            acceptance_criteria: Lww::new(None, stamp.clone()),
+            priority: Lww::new(Priority::default(), stamp.clone()),
+            bead_type: Lww::new(BeadType::Task, stamp.clone()),
+            external_ref: Lww::new(None, stamp.clone()),
+            source_repo: Lww::new(None, stamp.clone()),
+            estimated_minutes: Lww::new(None, stamp.clone()),
+            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            claim: Lww::new(Claim::default(), stamp.clone()),
+        };
+        Bead::new(core, fields)
+    }
+
+    #[test]
+    fn ready_sort_orders_by_priority_then_created_at() {
+        let mut issues = vec![
+            issue_summary("a", 2, 30),
+            issue_summary("b", 0, 20),
+            issue_summary("c", 1, 10),
+            issue_summary("d", 0, 5),
+        ];
+
+        sort_ready_issues(&mut issues);
+
+        let ids: Vec<&str> = issues.iter().map(|issue| issue.id.as_str()).collect();
+        assert_eq!(ids, vec!["d", "b", "c", "a"]);
+    }
+
+    #[test]
+    fn issue_summary_uses_read_namespace() {
+        let actor = ActorId::new("tester").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(1_000, 0), actor);
+        let bead = make_bead("bd-123", &stamp);
+        let namespace = NamespaceId::parse("wf").unwrap();
+        let mut state = CanonicalState::new();
+
+        state.insert(bead).expect("insert bead");
+        let view = state
+            .bead_view(&BeadId::parse("bd-123").unwrap())
+            .expect("bead view");
+
+        let summary = IssueSummary::from_view(&namespace, &view);
+
+        assert_eq!(summary.namespace, namespace);
+    }
+
+    #[test]
+    fn issue_view_uses_read_namespace() {
+        let actor = ActorId::new("tester").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(2_000, 0), actor);
+        let bead = make_bead("bd-456", &stamp);
+        let namespace = NamespaceId::parse("wf").unwrap();
+        let mut state = CanonicalState::new();
+
+        state.insert(bead).expect("insert bead");
+        let view = state
+            .bead_view(&BeadId::parse("bd-456").unwrap())
+            .expect("bead view");
+
+        let issue = Issue::from_view(&namespace, &view);
+
+        assert_eq!(issue.namespace, namespace);
+    }
+
+    #[test]
+    fn dep_cycles_from_state_reports_cycle() {
+        let mut state = CanonicalState::new();
+        let actor = ActorId::new("alice").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(1000, 0), actor);
+
+        let a = "bd-aaa";
+        let b = "bd-bbb";
+        state.insert(make_bead(a, &stamp)).expect("insert bead a");
+        state.insert(make_bead(b, &stamp)).expect("insert bead b");
+
+        let ab = DepKey::new(
+            crate::core::BeadId::parse(a).unwrap(),
+            crate::core::BeadId::parse(b).unwrap(),
+            DepKind::Blocks,
+        )
+        .expect("dep key");
+        let ba = DepKey::new(
+            crate::core::BeadId::parse(b).unwrap(),
+            crate::core::BeadId::parse(a).unwrap(),
+            DepKind::Blocks,
+        )
+        .expect("dep key");
+        let dep_dot = Dot {
+            replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
+            counter: 1,
+        };
+        let dep_dot_2 = Dot {
+            replica: ReplicaId::new(Uuid::from_bytes([2u8; 16])),
+            counter: 1,
+        };
+        let ab = state.check_dep_add_key(ab).expect("dep key");
+        let ba = state.check_dep_add_key(ba).expect("dep key");
+        state.apply_dep_add(ab, dep_dot, stamp.clone());
+        state.apply_dep_add(ba, dep_dot_2, stamp);
+
+        let cycles = dep_cycles_from_state(&state);
+        assert_eq!(
+            cycles.cycles,
+            vec![vec![a.to_string(), b.to_string(), a.to_string()]]
+        );
+    }
+}
