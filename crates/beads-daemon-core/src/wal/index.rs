@@ -10,18 +10,16 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use uuid::Uuid;
 
 use crate::core::{
-    ActorId, Applied, ClientRequestId, Durable, EventId, HeadStatus, NamespaceId, ReplicaId,
-    ReplicaRole, SegmentId, Seq0, Seq1, StoreMeta, StoreMetaVersions, TxnId, Watermark,
+    ActorId, Applied, ClientRequestId, Durable, EventId, HeadStatus, NamespaceId,
+    ReplicaDurabilityRole, ReplicaDurabilityRoleError, ReplicaId, ReplicaRole, SegmentId, Seq0,
+    Seq1, StoreMeta, StoreMetaVersions, TxnId, Watermark,
 };
 
-pub use beads_daemon_core::wal::{
+pub use super::{
     ClientRequestEventIds, ClientRequestEventIdsError, ClientRequestRow, HlcRow,
     IndexDurabilityMode, IndexedRangeItem, ReplicaLivenessRow, SegmentRow, WalIndex, WalIndexError,
     WalIndexReader, WalIndexTxn, WalIndexWriter, WatermarkRow,
 };
-
-// Re-export for compatibility if needed, but usage should ideally migrate
-pub use beads_daemon_core::wal::{ReplicaDurabilityRole, ReplicaDurabilityRoleError};
 
 const INDEX_SCHEMA_VERSION: u32 = StoreMetaVersions::INDEX_SCHEMA_VERSION;
 const BUSY_TIMEOUT_MS: u64 = 5_000;
@@ -2024,7 +2022,7 @@ mod tests {
             std::fs::create_dir_all(&path).unwrap();
             SqliteWalIndex::open(&path, &meta, IndexDurabilityMode::Cache).unwrap()
         };
-        beads_daemon_core::wal::contract::wal_index_laws(factory);
+        crate::wal::contract::wal_index_laws(factory);
     }
 }
 

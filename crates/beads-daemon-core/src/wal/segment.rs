@@ -16,6 +16,8 @@ use super::frame::encode_frame;
 use super::record::VerifiedRecord;
 use super::{EventWalError, EventWalResult};
 
+fn maybe_pause(_hook: &str) {}
+
 pub(crate) const SEGMENT_MAGIC: &[u8; 5] = b"BDWAL";
 /// Current WAL format version encoded in segment headers.
 pub const WAL_FORMAT_VERSION: u32 = StoreMetaVersions::WAL_FORMAT_VERSION;
@@ -366,7 +368,7 @@ impl SegmentWriter {
                 path: Some(self.path.clone()),
                 source,
             })?;
-        crate::daemon::test_hooks::maybe_pause("wal_after_write");
+        maybe_pause("wal_after_write");
         // LocalFsync: fsync record data; metadata fsync happens on segment creation/rotation.
         sync_segment(&self.file, &self.path, self.config.sync_mode)?;
         self.bytes_written = self
@@ -593,12 +595,12 @@ mod tests {
 
     fn test_record() -> VerifiedRecord {
         let limits = crate::core::Limits::default();
-        let header = crate::daemon::wal::record::RecordHeader {
+        let header = crate::wal::record::RecordHeader {
             origin_replica_id: crate::core::ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             origin_seq: crate::core::Seq1::from_u64(1).unwrap(),
             event_time_ms: 1_700_000_000_100,
             txn_id: crate::core::TxnId::new(Uuid::from_bytes([2u8; 16])),
-            request_proof: crate::daemon::wal::RequestProof::None,
+            request_proof: crate::wal::RequestProof::None,
             sha256: [0u8; 32],
             prev_sha256: None,
         };

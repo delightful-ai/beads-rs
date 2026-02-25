@@ -167,9 +167,9 @@ mod tests {
     use crate::core::{
         ReplicaId, SegmentId, Seq1, StoreEpoch, StoreId, StoreIdentity, StoreMetaVersions,
     };
-    use crate::daemon::wal::frame::encode_frame;
-    use crate::daemon::wal::segment::SegmentHeader;
-    use crate::daemon::wal::{RecordHeader, RequestProof};
+    use crate::wal::frame::encode_frame;
+    use crate::wal::segment::SegmentHeader;
+    use crate::wal::{RecordHeader, RequestProof};
 
     fn test_meta(store_id: StoreId) -> StoreMeta {
         let identity = StoreIdentity::new(store_id, StoreEpoch::new(1));

@@ -969,43 +969,6 @@ fn load_store_config_with_layout(
     }
 }
 
-fn load_store_config(
-    store_id: StoreId,
-    write_default: bool,
-) -> Result<StoreConfig, StoreRuntimeError> {
-    let path = crate::daemon_layout_from_paths().store_config_path(&store_id);
-    match read_secure_store_file(&path) {
-        Ok(Some(raw)) => {
-            toml::from_str(&raw).map_err(|source| StoreRuntimeError::StoreConfigParse {
-                path: Box::new(path),
-                source,
-            })
-        }
-        Ok(None) => {
-            let config = StoreConfig::default();
-            if write_default {
-                write_store_config(&path, &config)?;
-            }
-            Ok(config)
-        }
-        Err(StoreConfigFileError::Symlink { path }) => Err(StoreRuntimeError::StoreConfigSymlink {
-            path: Box::new(path),
-        }),
-        Err(StoreConfigFileError::Read { path, source }) => {
-            Err(StoreRuntimeError::StoreConfigRead {
-                path: Box::new(path),
-                source,
-            })
-        }
-    }
-}
-
-pub(crate) fn store_index_durability_mode(
-    store_id: StoreId,
-) -> Result<IndexDurabilityMode, StoreRuntimeError> {
-    Ok(load_store_config(store_id, false)?.index_durability_mode)
-}
-
 fn write_store_config(path: &Path, config: &StoreConfig) -> Result<(), StoreRuntimeError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| StoreRuntimeError::StoreConfigWrite {

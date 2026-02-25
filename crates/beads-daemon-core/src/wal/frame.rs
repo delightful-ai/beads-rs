@@ -5,9 +5,9 @@ use std::io::{Read, Write};
 use crc32c::crc32c;
 
 use super::{EventWalError, EventWalResult};
-use crate::daemon::wal::record::{UnverifiedRecord, VerifiedRecord};
+use crate::wal::record::{UnverifiedRecord, VerifiedRecord};
 
-pub(crate) const FRAME_MAGIC: u32 = 0x4244_5232; // "BDR2"
+pub const FRAME_MAGIC: u32 = 0x4244_5232; // "BDR2"
 /// Frame header length in bytes for the WAL wire format.
 pub const FRAME_HEADER_LEN: usize = 12;
 /// Offset of the CRC field within the frame header.
@@ -137,7 +137,7 @@ mod tests {
         Seq1, StoreEpoch, StoreId, StoreIdentity, TraceId, TxnDeltaV1, TxnId, TxnV1,
         encode_event_body_canonical, hash_event_body,
     };
-    use crate::daemon::wal::record::{RecordHeader, RequestProof, VerifiedRecord};
+    use crate::wal::record::{RecordHeader, RequestProof, VerifiedRecord};
     use std::io::Cursor;
     use uuid::Uuid;
 

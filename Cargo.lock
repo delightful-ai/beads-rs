@@ -198,11 +198,17 @@ dependencies = [
  "beads-core",
  "bytes",
  "crc32c",
+ "dirs",
  "hex",
  "minicbor",
+ "rand",
+ "rusqlite",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror 1.0.69",
+ "toml",
+ "tracing",
  "uuid",
 ]
 

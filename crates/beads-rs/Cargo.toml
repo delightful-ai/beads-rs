@@ -23,7 +23,7 @@ beads-macros = { path = "../beads-macros" }
 beads-cli = { path = "../beads-cli" }
 beads-git = { path = "../beads-git" }
 beads-daemon = { path = "../beads-daemon" }
-beads-daemon-core = { path = "../beads-daemon-core" }
+beads-daemon-core = { path = "../beads-daemon-core", features = ["wal-sqlite", "wal-fs"] }
 clap = { version = "4", features = ["derive"], optional = true }
 thiserror = "1"
 serde = { version = "1", features = ["derive"] }
@@ -73,7 +73,7 @@ assert_cmd = "2"
 pathdiff = "0.2.3"
 predicates = "3"
 proptest = "1"
-beads-daemon-core = { path = "../beads-daemon-core", features = ["test-harness"] }
+beads-daemon-core = { path = "../beads-daemon-core", features = ["test-harness", "wal-sqlite", "wal-fs"] }
 
 [lints]
 workspace = true
