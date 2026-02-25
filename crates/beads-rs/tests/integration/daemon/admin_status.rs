@@ -7,8 +7,8 @@ use std::path::PathBuf;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use beads_rs::NamespaceId;
 use beads_rs::api::AdminStatusOutput;
+use beads_rs::core::NamespaceId;
 
 use crate::fixtures::admin_status::{StatusCollector, assert_monotonic_watermarks};
 use crate::fixtures::load_gen::{Autostart, LoadGenerator, LoadReport};

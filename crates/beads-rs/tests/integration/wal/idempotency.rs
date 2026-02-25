@@ -3,7 +3,7 @@
 use uuid::Uuid;
 
 use beads_daemon::testkit::wal::{ClientRequestEventIds, WalIndex, WalIndexError};
-use beads_rs::{EventId, NamespaceId, Seq1, TxnId};
+use beads_rs::core::{EventId, NamespaceId, Seq1, TxnId};
 
 use crate::fixtures::identity;
 use crate::fixtures::mutation;

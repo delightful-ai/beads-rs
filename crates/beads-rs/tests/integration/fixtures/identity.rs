@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use beads_rs::{
+use beads_rs::core::{
     ClientRequestId, NamespaceId, ReplicaId, SegmentId, StoreEpoch, StoreId, StoreIdentity,
     StoreMeta, StoreMetaVersions, TxnId,
 };

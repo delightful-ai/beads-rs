@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use beads_daemon_core::repl::proto::{ReplMessage, WatermarkState};
-use beads_rs::Limits;
+use beads_rs::core::Limits;
 use beads_rs::core::{
     Applied, Durable, EventId, EventShaLookupError, HeadStatus, NamespaceId, ReplicaId, Seq0, Seq1,
     Sha256, StoreIdentity, VerifiedEventFrame, Watermark,
@@ -105,8 +105,8 @@ pub struct MockPeerOutput {
     pub sent: Vec<ReplMessage>,
     pub peer_acks: Vec<ValidatedAck>,
     pub peer_wants: Vec<Want>,
-    pub peer_errors: Vec<beads_rs::ErrorPayload>,
-    pub closed: Option<beads_rs::ErrorPayload>,
+    pub peer_errors: Vec<beads_rs::core::ErrorPayload>,
+    pub closed: Option<beads_rs::core::ErrorPayload>,
 }
 
 pub struct MockPeer<R> {

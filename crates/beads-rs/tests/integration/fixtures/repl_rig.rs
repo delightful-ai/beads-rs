@@ -14,9 +14,9 @@ use rusqlite::Connection;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-use beads_rs::StoreId;
 use beads_rs::api::{AdminStatusOutput, QueryResult};
 use beads_rs::config::{Config, ReplicationPeerConfig};
+use beads_rs::core::StoreId;
 use beads_rs::core::error::CliErrorCode;
 use beads_rs::core::{
     Applied, BeadId, BeadType, ErrorPayload, IntoErrorPayload, NamespaceId, Priority,

@@ -14,7 +14,6 @@ pub use beads_surface as surface;
 pub mod cli;
 pub mod compat;
 pub mod config;
-pub mod daemon;
 pub mod error;
 pub mod git;
 #[cfg(feature = "model-testing")]
@@ -87,18 +86,18 @@ fn init_cli_tracing(verbose: u8, is_daemon: bool) -> telemetry::TelemetryGuard {
 pub fn run_daemon_command() -> Result<()> {
     let config = config::load_or_init();
     paths::init_from_config(&config.paths);
-    let _socket_dir = daemon::ipc::ensure_socket_dir()?;
+    let _socket_dir = beads_daemon::runtime::ipc::ensure_socket_dir()?;
 
     let actor = daemon_actor_from_config(&config)?;
     let layout = daemon_layout_from_paths();
     let runtime = daemon_runtime_config_from_config(&config);
-    Ok(daemon::run_daemon(actor, layout, runtime)?)
+    Ok(beads_daemon::run_daemon(actor, layout, runtime)?)
 }
 
 pub(crate) fn daemon_layout_from_paths() -> beads_daemon::layout::DaemonLayout {
     beads_daemon::layout::DaemonLayout::new(
         paths::data_dir(),
-        daemon::ipc::socket_path(),
+        beads_daemon::runtime::ipc::socket_path(),
         paths::log_dir(),
     )
 }
@@ -150,42 +149,14 @@ pub(crate) fn daemon_runtime_config_from_config(
     }
 }
 
-fn daemon_actor_from_config(config: &config::Config) -> Result<ActorId> {
+fn daemon_actor_from_config(config: &config::Config) -> Result<beads_core::ActorId> {
     match config.defaults.actor.clone() {
         Some(actor) => Ok(actor),
         None => {
             let username = whoami::username();
             let hostname = whoami::fallible::hostname().unwrap_or_else(|_| "unknown".into());
             let default_actor = format!("{username}@{hostname}");
-            Ok(ActorId::new(default_actor)?)
+            Ok(beads_core::ActorId::new(default_actor)?)
         }
     }
 }
-
-// Re-export core types at crate root for convenience
-pub use crate::core::{
-    ActorId, AcyclicDepKey, Applied, ApplyError, ApplyOutcome, Bead, BeadCore, BeadFields, BeadId,
-    BeadPatchWireV1, BeadSnapshotWireV1, BeadType, CanonJsonError, Canonical, CanonicalState,
-    CheckpointContentSha256, CheckpointGroup, Claim, CliErrorCode, ClientRequestId, Closure,
-    DecodeError, DepAddKey, DepKey, DepKind, DurabilityClass, DurabilityOutcome, DurabilityProofV1,
-    DurabilityReceipt, Durable, EncodeError, ErrorCode, ErrorPayload, EventBody, EventBytes,
-    EventFrameError, EventFrameV1, EventId, EventKindV1, EventShaLookup, EventShaLookupError,
-    EventValidationError, FreeDepKey, GcAuthority, HeadStatus, HlcMax, Labels, Limits,
-    LocalFsyncProof, Lww, NamespaceId, NamespacePolicies, NamespacePoliciesError, NamespacePolicy,
-    NamespaceVisibility, NoCycleProof, Note, NoteId, NoteKey, Opaque, ParentEdge, PrevDeferred,
-    PrevVerified, Priority, ProtocolErrorCode, ReceiptMergeError, ReplicaDurabilityRole,
-    ReplicaDurabilityRoleError, ReplicaEntry, ReplicaId, ReplicaRole, ReplicaRoster,
-    ReplicaRosterError, ReplicateMode, ReplicatedProof, RetentionPolicy, SegmentId, Seq0, Seq1,
-    Sha256, Stamp, StateCanonicalJsonSha256, StateDigest, StateJsonlSha256, StoreEpoch, StoreId,
-    StoreIdentity, StoreMeta, StoreMetaVersions, StoreState, Tombstone, TraceId, TtlBasis,
-    TxnDeltaError, TxnDeltaV1, TxnId, TxnOpKey, TxnOpV1, TxnV1, ValidatedActorId, ValidatedBeadId,
-    ValidatedBeadPatch, ValidatedDepAdd, ValidatedDepKind, ValidatedDepRemove, ValidatedEventBody,
-    ValidatedEventKindV1, ValidatedNamespaceId, ValidatedParentAdd, ValidatedParentRemove,
-    ValidatedTombstone, ValidatedTxnDeltaV1, ValidatedTxnOpV1, ValidatedTxnV1, VerifiedEvent,
-    VerifiedEventAny, WallClock, Watermark, WatermarkError, Watermarks, WireBeadFull,
-    WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireFieldStamp,
-    WireLabelAddV1, WireLabelRemoveV1, WireLabelStateV1, WireNoteV1, WireParentAddV1,
-    WireParentRemoveV1, WirePatch, WireStamp, WireTombstoneV1, Workflow, WorkflowStatus,
-    WriteStamp, apply_event, decode_event_body, decode_event_hlc_max, encode_event_body_canonical,
-    hash_event_body, sha256_bytes, to_canon_json_bytes, verify_event_frame,
-};

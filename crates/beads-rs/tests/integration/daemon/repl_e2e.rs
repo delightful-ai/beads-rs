@@ -636,7 +636,7 @@ fn repl_daemon_replicated_fsync_timeout_receipt() {
             );
 
             let receipt = err
-                .receipt_as::<beads_rs::DurabilityReceipt>()
+                .receipt_as::<beads_rs::core::DurabilityReceipt>()
                 .expect("receipt decode");
             let receipt = receipt.expect("receipt missing");
             assert!(receipt.outcome().is_pending());
@@ -650,7 +650,7 @@ fn create_issue_with_durability(
     node_idx: usize,
     title: &str,
     k: NonZeroU32,
-) -> (BeadId, beads_rs::DurabilityReceipt) {
+) -> (BeadId, beads_rs::core::DurabilityReceipt) {
     let mut attempts = 0u8;
     loop {
         let response = create_issue_with_durability_result(rig, node_idx, title, k);

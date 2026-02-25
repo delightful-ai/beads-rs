@@ -15,13 +15,13 @@ use beads_daemon::testkit::wal::{
     IndexDurabilityMode, SegmentConfig, SegmentWriter, SqliteWalIndex, rebuild_index,
 };
 use beads_rs::core::error::details as error_details;
-use beads_rs::paths;
-use beads_rs::{
+use beads_rs::core::{
     ActorId, EventBody, EventBytes, EventFrameV1, EventId, EventKindV1, HeadStatus, HlcMax, Limits,
     NamespaceId, Opaque, ProtocolErrorCode, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId,
     StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1, Watermark,
     encode_event_body_canonical, hash_event_body,
 };
+use beads_rs::paths;
 
 use crate::fixtures::identity;
 use crate::fixtures::repl_frames;

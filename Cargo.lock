@@ -316,6 +316,8 @@ dependencies = [
 name = "beads-rs-fuzz"
 version = "0.2.0-alpha"
 dependencies = [
+ "beads-core",
+ "beads-daemon-core",
  "beads-rs",
  "libfuzzer-sys",
  "libz-sys",
@@ -339,6 +341,7 @@ dependencies = [
 name = "beads_stateright_models"
 version = "0.2.0-alpha"
 dependencies = [
+ "beads-daemon-core",
  "beads-rs",
  "bytes",
  "env_logger",

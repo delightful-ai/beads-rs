@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use beads_rs::{DurabilityClass, DurabilityReceipt};
+use beads_rs::core::{DurabilityClass, DurabilityReceipt};
 
 pub fn assert_receipt_identity(expected: &DurabilityReceipt, actual: &DurabilityReceipt) {
     assert_eq!(expected.store(), actual.store(), "store identity mismatch");

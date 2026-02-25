@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex};
 use crossbeam::channel::{Receiver, Sender, unbounded};
 
 use beads_daemon_core::repl::proto::{ReplMessage, WireReplEnvelope};
-use beads_rs::Limits;
+use beads_rs::core::Limits;
 
 use super::repl_frames;
 

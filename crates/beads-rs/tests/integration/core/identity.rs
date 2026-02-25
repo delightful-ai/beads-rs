@@ -11,7 +11,7 @@ use crate::fixtures::store_dir::TempStoreDir;
 use uuid::Uuid;
 
 use beads_daemon::remote::normalize_url;
-use beads_rs::{NamespaceId, StoreId, StoreMeta};
+use beads_rs::core::{NamespaceId, StoreId, StoreMeta};
 
 fn write_store_meta(path: &Path, meta: &StoreMeta) -> io::Result<()> {
     let json = serde_json::to_vec(meta).expect("serialize store meta");
