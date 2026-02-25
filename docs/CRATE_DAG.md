@@ -30,6 +30,7 @@ Only the directed edges below are allowed:
 - `beads-daemon -> beads-surface`
 - `beads-daemon -> beads-api`
 - `beads-daemon -> beads-core`
+- `beads-daemon -> beads-git`
 - `beads-daemon -> beads-daemon-core`
 - `beads-daemon-core -> beads-core`
 - `beads-rs -> beads-core`
@@ -49,7 +50,7 @@ Only the directed edges below are allowed:
 - `beads-cli` must not depend on `beads-git`, `beads-daemon`, `beads-daemon-core`, or `beads-rs`.
 - `beads-git` must not depend on `beads-api`, `beads-surface`, `beads-cli`, `beads-daemon`, `beads-daemon-core`, or `beads-rs`.
 - `beads-daemon-core` must not depend on `beads-api`, `beads-surface`, `beads-cli`, `beads-git`, `beads-daemon`, or `beads-rs`.
-- `beads-daemon` must not depend on `beads-cli`, `beads-git`, or `beads-rs`.
+- `beads-daemon` must not depend on `beads-cli` or `beads-rs`.
 - `beads-rs` must not be used as a dependency by `beads-core`, `beads-api`, `beads-surface`, `beads-cli`, `beads-git`, `beads-daemon-core`, or `beads-daemon`.
 
 ## CLI Boundary Invariant
