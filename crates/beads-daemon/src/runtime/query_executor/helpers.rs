@@ -47,6 +47,7 @@ pub(super) fn compute_epic_statuses(
     namespace: &crate::core::NamespaceId,
     state: &CanonicalState,
     eligible_only: bool,
+    epic_id: Option<&BeadId>,
 ) -> Vec<EpicStatus> {
     // Build epic -> children mapping from parent edges.
     let mut children: std::collections::BTreeMap<BeadId, Vec<BeadId>> =
@@ -61,6 +62,11 @@ pub(super) fn compute_epic_statuses(
     let mut out = Vec::new();
     for (id, bead) in state.iter_live() {
         if bead.fields.bead_type.value != crate::core::BeadType::Epic {
+            continue;
+        }
+        if let Some(target) = epic_id
+            && id != target
+        {
             continue;
         }
         if bead.fields.workflow.value.is_closed() {

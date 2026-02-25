@@ -528,7 +528,7 @@ impl Daemon {
             }
 
             let epics_eligible_for_closure =
-                compute_epic_statuses(read.namespace(), state, true).len();
+                compute_epic_statuses(read.namespace(), state, true, None).len();
 
             let summary = StatusSummary {
                 total_issues: state.live_count(),
@@ -931,11 +931,13 @@ impl Daemon {
         &mut self,
         repo: &Path,
         eligible_only: bool,
+        epic_id: Option<&BeadId>,
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
-            let statuses = compute_epic_statuses(ctx.read.namespace(), ctx.state, eligible_only);
+            let statuses =
+                compute_epic_statuses(ctx.read.namespace(), ctx.state, eligible_only, epic_id);
             Ok(ResponsePayload::query(QueryResult::EpicStatus(statuses)))
         })
     }

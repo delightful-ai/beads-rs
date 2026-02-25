@@ -192,8 +192,14 @@ impl Daemon {
             Request::EpicStatus { ctx, payload } => {
                 let repo = ctx.repo.path;
                 let read = ctx.read;
-                self.query_epic_status(&repo, payload.eligible_only, read, git_tx)
-                    .into()
+                self.query_epic_status(
+                    &repo,
+                    payload.eligible_only,
+                    payload.epic_id.as_ref(),
+                    read,
+                    git_tx,
+                )
+                .into()
             }
 
             Request::Status { ctx, .. } => {

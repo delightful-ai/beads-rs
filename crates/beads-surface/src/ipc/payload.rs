@@ -152,6 +152,8 @@ pub struct DeletedPayload {
 pub struct EpicStatusPayload {
     #[serde(default)]
     pub eligible_only: bool,
+    #[serde(default)]
+    pub epic_id: Option<BeadId>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
