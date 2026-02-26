@@ -9,6 +9,7 @@ pub mod broadcast;
 pub mod clock;
 pub mod compat;
 pub mod config;
+mod env_flags;
 pub mod git_lane;
 pub mod io_budget;
 pub mod layout;

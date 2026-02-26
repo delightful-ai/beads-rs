@@ -8,6 +8,8 @@ use beads_core::{
 };
 use serde::{Deserialize, Serialize};
 
+use crate::env_flags::env_flag_truthy;
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct DefaultsConfig {
@@ -377,14 +379,4 @@ fn default_checkpoint_groups() -> BTreeMap<String, CheckpointGroupConfig> {
         },
     );
     checkpoint_groups
-}
-
-fn env_flag_truthy(name: &str) -> bool {
-    let Ok(raw) = std::env::var(name) else {
-        return false;
-    };
-    !matches!(
-        raw.trim().to_ascii_lowercase().as_str(),
-        "0" | "false" | "no" | "n" | "off"
-    )
 }

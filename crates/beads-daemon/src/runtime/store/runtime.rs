@@ -124,7 +124,7 @@ impl StoreRuntime {
             }
         };
 
-        let lock = StoreLock::acquire(store_id, meta.replica_id, now_ms, daemon_version)?;
+        let lock = StoreLock::acquire(layout, store_id, meta.replica_id, now_ms, daemon_version)?;
 
         if existing.is_none() {
             write_store_meta(&meta_path, &meta)?;
@@ -300,6 +300,10 @@ impl StoreRuntime {
         self.lock.update_heartbeat(now_ms)
     }
 
+    pub(crate) fn layout(&self) -> &DaemonLayout {
+        &self.layout
+    }
+
     pub fn hlc_state_for_actor(
         &self,
         actor: &ActorId,
@@ -316,7 +320,7 @@ impl StoreRuntime {
     }
 
     fn checkpoint_roster_hash(&self) -> Result<Option<ContentHash>, CheckpointSnapshotError> {
-        let roster = match load_replica_roster(self.meta.store_id()) {
+        let roster = match load_replica_roster(&self.layout, self.meta.store_id()) {
             Ok(Some(roster)) => roster,
             Ok(None) => return Ok(None),
             Err(err) => {
@@ -1081,9 +1085,10 @@ pub(crate) fn load_namespace_policies(
 }
 
 pub(crate) fn load_replica_roster(
+    layout: &DaemonLayout,
     store_id: StoreId,
 ) -> Result<Option<ReplicaRoster>, StoreRuntimeError> {
-    let path = crate::daemon_layout_from_paths().replicas_path(&store_id);
+    let path = layout.replicas_path(&store_id);
     let raw = match read_secure_store_file(&path) {
         Ok(Some(raw)) => raw,
         Ok(None) => return Ok(None),

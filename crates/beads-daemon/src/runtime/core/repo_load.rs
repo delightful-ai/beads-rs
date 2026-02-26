@@ -92,7 +92,8 @@ impl Daemon {
             if let Some(repo_state) = self.git_lanes.get_mut(&store_id) {
                 repo_state.register_path(repo.to_owned());
             } else {
-                let repo_state = GitLaneState::with_path(None, repo.to_owned());
+                let mut repo_state = GitLaneState::with_path(None, repo.to_owned());
+                repo_state.mark_loaded_from_git();
                 self.git_lanes.insert(store_id, repo_state);
             }
             if store.primary_remote != remote {
@@ -176,7 +177,8 @@ impl Daemon {
             if let Some(repo_state) = self.git_lanes.get_mut(&store_id) {
                 repo_state.register_path(repo.to_owned());
             } else {
-                let repo_state = GitLaneState::with_path(None, repo.to_owned());
+                let mut repo_state = GitLaneState::with_path(None, repo.to_owned());
+                repo_state.mark_loaded_from_git();
                 self.git_lanes.insert(store_id, repo_state);
             }
             if store.primary_remote != remote {
@@ -216,12 +218,13 @@ impl Daemon {
         }
 
         let replayed_event_wal = {
+            let store_dir = self.layout().store_dir(&store_id);
             let store = self
                 .stores
                 .get(&store_id)
                 .expect("loaded store missing from state");
             replay_event_wal(
-                store_id,
+                &store_dir,
                 store.wal_index.as_ref(),
                 &mut state,
                 self.limits(),
@@ -299,7 +302,6 @@ impl Daemon {
         // on immediate retry; only runtime state/schedulers are rolled back.
         self.drop_store_state(store_id);
         self.export_pending.remove(&store_id);
-        self.checkpoint_scheduler.drop_store(store_id);
     }
 
     fn load_timeout_error(repo: &Path, remote: &RemoteUrl, timeout: Duration) -> OpError {

@@ -300,20 +300,15 @@ impl WalIndexTxn for SqliteWalIndexTxn {
             .map_err(map_sqlite_error)?
         };
         if inserted == 0 {
-            let mut stmt = self.conn.prepare_cached(
-                "SELECT sha, prev_sha, segment_id, segment_offset, len, event_time_ms, txn_id, client_request_id \
+            type ExistingEventRow = (Vec<u8>, Option<Vec<u8>>, i64, Vec<u8>, Option<Vec<u8>>);
+            let mut stmt = self
+                .conn
+                .prepare_cached(
+                    "SELECT sha, prev_sha, event_time_ms, txn_id, client_request_id \
                  FROM events WHERE namespace = ?1 AND origin_replica_id = ?2 AND origin_seq = ?3",
-            ).map_err(map_sqlite_error)?;
-            let existing: Option<(
-                Vec<u8>,
-                Option<Vec<u8>>,
-                Vec<u8>,
-                i64,
-                i64,
-                i64,
-                Vec<u8>,
-                Option<Vec<u8>>,
-            )> = stmt
+                )
+                .map_err(map_sqlite_error)?;
+            let existing: Option<ExistingEventRow> = stmt
                 .query_row(params![namespace, origin_blob, eid_seq], |row| {
                     Ok((
                         row.get(0)?,
@@ -321,9 +316,6 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                         row.get(2)?,
                         row.get(3)?,
                         row.get(4)?,
-                        row.get(5)?,
-                        row.get(6)?,
-                        row.get(7)?,
                     ))
                 })
                 .optional()
@@ -331,9 +323,6 @@ impl WalIndexTxn for SqliteWalIndexTxn {
             if let Some((
                 existing_sha,
                 existing_prev_sha,
-                existing_segment_id,
-                existing_offset,
-                existing_len,
                 existing_event_time_ms,
                 existing_txn_id,
                 existing_client_request_id,
@@ -351,12 +340,6 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                 }
 
                 let existing_prev_sha = existing_prev_sha.map(blob_32).transpose()?;
-                let existing_segment_id = SegmentId::new(blob_uuid(existing_segment_id)?);
-                let existing_offset = u64::try_from(existing_offset).map_err(|_| {
-                    WalIndexError::EventIdDecode("segment_offset out of range".to_string())
-                })?;
-                let existing_len = u32::try_from(existing_len)
-                    .map_err(|_| WalIndexError::EventIdDecode("len out of range".to_string()))?;
                 let existing_event_time_ms =
                     u64::try_from(existing_event_time_ms).map_err(|_| {
                         WalIndexError::EventIdDecode("event_time_ms out of range".to_string())
@@ -370,15 +353,6 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                 let mut mismatches = Vec::new();
                 if existing_prev_sha != prev_sha {
                     mismatches.push("prev_sha");
-                }
-                if existing_segment_id != segment_id {
-                    mismatches.push("segment_id");
-                }
-                if existing_offset != offset {
-                    mismatches.push("segment_offset");
-                }
-                if existing_len != len {
-                    mismatches.push("len");
                 }
                 if existing_event_time_ms != event_time_ms {
                     mismatches.push("event_time_ms");
@@ -2032,6 +2006,53 @@ mod tests {
         .unwrap();
         txn.record_event(
             &ns, &event_id, sha, None, segment_id, 128, 64, 1_700_000, txn_id, None,
+        )
+        .unwrap();
+        txn.commit().unwrap();
+
+        let reader = index.reader();
+        assert_eq!(reader.lookup_event_sha(&ns, &event_id).unwrap(), Some(sha));
+    }
+
+    #[test]
+    fn sqlite_index_record_event_idempotent_when_storage_location_differs() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let origin = meta.replica_id;
+        let mut txn = index.writer().begin_txn().unwrap();
+        let origin_seq = txn.next_origin_seq(&ns, &origin).unwrap();
+        let event_id = EventId::new(origin, ns.clone(), origin_seq);
+        let txn_id = TxnId::new(Uuid::from_bytes([2u8; 16]));
+        let sha = [9u8; 32];
+        let segment_id_a = SegmentId::new(Uuid::from_bytes([4u8; 16]));
+        let segment_id_b = SegmentId::new(Uuid::from_bytes([5u8; 16]));
+
+        txn.record_event(
+            &ns,
+            &event_id,
+            sha,
+            None,
+            segment_id_a,
+            128,
+            64,
+            1_700_000,
+            txn_id,
+            None,
+        )
+        .unwrap();
+        txn.record_event(
+            &ns,
+            &event_id,
+            sha,
+            None,
+            segment_id_b,
+            2048,
+            96,
+            1_700_000,
+            txn_id,
+            None,
         )
         .unwrap();
         txn.commit().unwrap();

@@ -24,13 +24,13 @@ pub(super) struct WalSegmentStats {
 pub(super) fn build_wal_status(
     store: &crate::runtime::store::runtime::StoreRuntime,
     namespaces: &BTreeSet<NamespaceId>,
+    store_dir: &Path,
     limits: &Limits,
     now_ms: u64,
 ) -> Result<WalStatusReport, OpError> {
     let reader = store.wal_index.reader();
     let mut out = Vec::new();
     let mut warnings = Vec::new();
-    let store_dir = crate::daemon_layout_from_paths().store_dir(&store.meta.store_id());
     for namespace in namespaces {
         let mut segments = reader
             .list_segments(namespace)
@@ -40,7 +40,7 @@ pub(super) fn build_wal_status(
         let mut segment_stats = Vec::new();
         let mut total_bytes = 0u64;
         for segment in segments {
-            let resolved_path = resolve_segment_path(&store_dir, segment.segment_path());
+            let resolved_path = resolve_segment_path(store_dir, segment.segment_path());
             let bytes = segment_bytes(&resolved_path, segment.final_len());
             if let Some(value) = bytes {
                 total_bytes = total_bytes.saturating_add(value);

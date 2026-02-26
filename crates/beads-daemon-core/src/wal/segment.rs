@@ -16,6 +16,33 @@ use super::frame::encode_frame;
 use super::record::VerifiedRecord;
 use super::{EventWalError, EventWalResult};
 
+#[cfg(any(test, feature = "test-harness"))]
+fn maybe_pause(hook: &str) {
+    let Ok(target) = std::env::var("BD_TEST_WAL_HANG_STAGE") else {
+        return;
+    };
+    if target != hook {
+        return;
+    }
+
+    let Ok(dir) = std::env::var("BD_TEST_WAL_HANG_DIR") else {
+        return;
+    };
+
+    let marker = PathBuf::from(dir).join(format!("beads-wal-hang-{hook}"));
+    let _ = fs::write(marker, b"");
+
+    let timeout_ms = std::env::var("BD_TEST_WAL_HANG_TIMEOUT_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(30_000);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    while std::time::Instant::now() < deadline {
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[cfg(not(any(test, feature = "test-harness")))]
 fn maybe_pause(_hook: &str) {}
 
 pub(crate) const SEGMENT_MAGIC: &[u8; 5] = b"BDWAL";

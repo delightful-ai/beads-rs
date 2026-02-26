@@ -196,6 +196,10 @@ impl ReplicationHandles {
 }
 
 impl Daemon {
+    pub(crate) fn layout(&self) -> &DaemonLayout {
+        &self.layout
+    }
+
     /// Create a daemon with default runtime config and current layout wiring.
     pub fn new(actor: ActorId) -> Self {
         Self::new_with_limits(actor, Limits::default())
@@ -719,7 +723,8 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644))
             .expect("chmod replicas.toml");
 
-        let roster = load_replica_roster(store_id).expect("load roster");
+        let layout = crate::daemon_layout_from_paths();
+        let roster = load_replica_roster(&layout, store_id).expect("load roster");
         assert!(roster.is_some());
 
         let mode = std::fs::metadata(&path)
@@ -744,7 +749,8 @@ mod tests {
         std::fs::write(&target, b"").expect("write target");
         symlink(&target, &path).expect("symlink replicas.toml");
 
-        let err = load_replica_roster(store_id).unwrap_err();
+        let layout = crate::daemon_layout_from_paths();
+        let err = load_replica_roster(&layout, store_id).unwrap_err();
         assert!(matches!(
             err,
             StoreRuntimeError::ReplicaRosterSymlink { .. }
@@ -774,6 +780,22 @@ mod tests {
         assert_eq!(out.namespace, NamespaceId::core());
         assert!(out.checkpoint_now);
         assert!(out.checkpoint_groups.contains(&"core".to_string()));
+    }
+
+    #[test]
+    fn insert_store_for_tests_marks_git_lane_loaded() {
+        let tmp = test_store_dir();
+        let actor = test_actor();
+        let mut daemon = Daemon::new(actor);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo dir");
+
+        let store_id = StoreId::new(Uuid::from_bytes([56u8; 16]));
+        let remote = RemoteUrl::new("example.com/test/repo");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let lane = daemon.git_lanes.get(&store_id).expect("lane");
+        assert!(lane.is_loaded_from_git());
     }
 
     fn verified_event_with_delta(

@@ -19,7 +19,12 @@ impl Daemon {
                         .to_string(),
             });
         }
-        let output = match offline_store_fsck_output(store_id, false) {
+        let output = match fsck_output_with_layout_and_limits(
+            store_id,
+            false,
+            self.layout(),
+            self.limits().clone(),
+        ) {
             Ok(output) => output,
             Err(err) => return Response::err_from(err),
         };
@@ -37,8 +42,11 @@ impl Daemon {
     }
 
     pub fn admin_store_unlock(&self, store_id: StoreId, force: bool) -> Response {
-        let lock_path = crate::daemon_layout_from_paths().store_lock_path(&store_id);
-        let meta = match crate::runtime::store::lock::read_lock_meta(store_id) {
+        let lock_path = self.layout().store_lock_path(&store_id);
+        let meta = match crate::runtime::store::lock::read_lock_meta_with_layout(
+            self.layout(),
+            store_id,
+        ) {
             Ok(meta) => meta,
             Err(err) => {
                 return Response::err_from(OpError::StoreRuntime(Box::new(
@@ -74,7 +82,9 @@ impl Daemon {
         }
 
         // Remove: either forced or stale (dead PID).
-        if let Err(err) = crate::runtime::store::lock::remove_lock_file(store_id) {
+        if let Err(err) =
+            crate::runtime::store::lock::remove_lock_file_with_layout(self.layout(), store_id)
+        {
             return Response::err_from(OpError::StoreRuntime(Box::new(StoreRuntimeError::Lock(
                 err,
             ))));
@@ -100,13 +110,26 @@ pub fn offline_store_fsck_output(
     repair: bool,
 ) -> Result<AdminFsckOutput, OpError> {
     let config = crate::config::load_or_init();
-    let options = crate::runtime::wal::fsck::FsckOptions::new(repair, config.limits);
-    let report = crate::runtime::wal::fsck::fsck_store(store_id, options).map_err(|err| {
-        OpError::InvalidRequest {
-            field: Some("store-id".into()),
-            reason: err.to_string(),
-        }
-    })?;
+    crate::paths::init_from_config(&config.paths);
+    let layout = crate::daemon_layout_from_paths();
+    fsck_output_with_layout_and_limits(store_id, repair, &layout, config.limits)
+}
+
+fn fsck_output_with_layout_and_limits(
+    store_id: StoreId,
+    repair: bool,
+    layout: &crate::layout::DaemonLayout,
+    limits: Limits,
+) -> Result<AdminFsckOutput, OpError> {
+    let store_dir = layout.store_dir(&store_id);
+    let options = crate::runtime::wal::fsck::FsckOptions::new(repair, limits);
+    let report =
+        crate::runtime::wal::fsck::fsck_store(store_id, &store_dir, options).map_err(|err| {
+            OpError::InvalidRequest {
+                field: Some("store-id".into()),
+                reason: err.to_string(),
+            }
+        })?;
     Ok(fsck_report_to_output(report))
 }
 

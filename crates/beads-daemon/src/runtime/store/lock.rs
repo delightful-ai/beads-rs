@@ -11,6 +11,7 @@ use crate::core::error::details as error_details;
 use crate::core::{
     ErrorCode, ErrorPayload, IntoErrorPayload, ProtocolErrorCode, ReplicaId, StoreId, Transience,
 };
+use crate::layout::DaemonLayout;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreLockMeta {
@@ -57,12 +58,14 @@ pub struct StoreLock {
 
 impl StoreLock {
     pub fn acquire(
+        layout: &DaemonLayout,
         store_id: StoreId,
         replica_id: ReplicaId,
         started_at_ms: u64,
         daemon_version: impl Into<String>,
     ) -> Result<Self, StoreLockError> {
         Self::acquire_with_pid_check(
+            layout,
             store_id,
             replica_id,
             started_at_ms,
@@ -72,6 +75,7 @@ impl StoreLock {
     }
 
     fn acquire_with_pid_check<F>(
+        layout: &DaemonLayout,
         store_id: StoreId,
         replica_id: ReplicaId,
         started_at_ms: u64,
@@ -81,7 +85,6 @@ impl StoreLock {
     where
         F: FnOnce(u32) -> LockPidState,
     {
-        let layout = crate::daemon_layout_from_paths();
         ensure_dir(&layout.stores_dir)?;
         let store_dir = layout.store_dir(&store_id);
         ensure_dir(&store_dir)?;
@@ -219,8 +222,11 @@ impl Drop for StoreLock {
     }
 }
 
-pub fn read_lock_meta(store_id: StoreId) -> Result<Option<StoreLockMeta>, StoreLockError> {
-    let path = crate::daemon_layout_from_paths().store_lock_path(&store_id);
+pub fn read_lock_meta_with_layout(
+    layout: &DaemonLayout,
+    store_id: StoreId,
+) -> Result<Option<StoreLockMeta>, StoreLockError> {
+    let path = layout.store_lock_path(&store_id);
     match fs::symlink_metadata(&path) {
         Ok(meta) if meta.file_type().is_symlink() => Err(StoreLockError::Symlink { path }),
         Ok(_) => Ok(Some(read_metadata(&path)?)),
@@ -233,8 +239,16 @@ pub fn read_lock_meta(store_id: StoreId) -> Result<Option<StoreLockMeta>, StoreL
     }
 }
 
-pub fn remove_lock_file(store_id: StoreId) -> Result<bool, StoreLockError> {
-    let path = crate::daemon_layout_from_paths().store_lock_path(&store_id);
+pub fn read_lock_meta(store_id: StoreId) -> Result<Option<StoreLockMeta>, StoreLockError> {
+    let layout = crate::daemon_layout_from_paths();
+    read_lock_meta_with_layout(&layout, store_id)
+}
+
+pub fn remove_lock_file_with_layout(
+    layout: &DaemonLayout,
+    store_id: StoreId,
+) -> Result<bool, StoreLockError> {
+    let path = layout.store_lock_path(&store_id);
     match fs::symlink_metadata(&path) {
         Ok(meta) if meta.file_type().is_symlink() => Err(StoreLockError::Symlink { path }),
         Ok(_) => {
@@ -252,6 +266,11 @@ pub fn remove_lock_file(store_id: StoreId) -> Result<bool, StoreLockError> {
             source: err,
         }),
     }
+}
+
+pub fn remove_lock_file(store_id: StoreId) -> Result<bool, StoreLockError> {
+    let layout = crate::daemon_layout_from_paths();
+    remove_lock_file_with_layout(&layout, store_id)
 }
 
 #[derive(Debug, Error)]
@@ -574,8 +593,10 @@ mod tests {
             };
             let lock_path = paths::store_lock_path(store_id);
             write_lock_meta(&lock_path, &stale_meta);
+            let layout = crate::daemon_layout_from_paths();
 
             let lock = StoreLock::acquire_with_pid_check(
+                &layout,
                 store_id,
                 ReplicaId::new(Uuid::from_bytes([13u8; 16])),
                 10,
@@ -608,8 +629,10 @@ mod tests {
             };
             let lock_path = paths::store_lock_path(store_id);
             write_lock_meta(&lock_path, &stale_meta);
+            let layout = crate::daemon_layout_from_paths();
 
             let err = StoreLock::acquire_with_pid_check(
+                &layout,
                 store_id,
                 ReplicaId::new(Uuid::from_bytes([23u8; 16])),
                 10,

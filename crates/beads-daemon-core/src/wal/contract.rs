@@ -63,6 +63,25 @@ where
     .expect("record event idempotent");
     txn.commit().expect("commit");
 
+    // Metadata conflict (same SHA, different metadata)
+    let mut txn = index.writer().begin_txn().expect("begin txn");
+    let err = txn
+        .record_event(
+            &ns,
+            &event_id,
+            sha,
+            Some([9u8; 32]),
+            segment_id,
+            0,
+            100,
+            1000,
+            txn_id,
+            None,
+        )
+        .expect_err("event conflict");
+    assert!(matches!(err, WalIndexError::EventConflict { .. }));
+    drop(txn);
+
     // Equivocation (different SHA)
     let mut txn = index.writer().begin_txn().expect("begin txn");
     let other_sha = [2u8; 32];

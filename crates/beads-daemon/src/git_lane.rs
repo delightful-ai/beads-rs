@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::core::{BeadSlug, WriteStamp};
+use crate::env_flags::env_flag_truthy;
 
 const DEFAULT_BACKOFF_BASE_MS: u64 = 500;
 const TEST_FAST_BACKOFF_BASE_MS: u64 = 50;
@@ -18,16 +19,6 @@ fn backoff_base_ms() -> u64 {
     } else {
         DEFAULT_BACKOFF_BASE_MS
     }
-}
-
-fn env_flag_truthy(name: &str) -> bool {
-    let Ok(raw) = std::env::var(name) else {
-        return false;
-    };
-    !matches!(
-        raw.trim().to_ascii_lowercase().as_str(),
-        "0" | "false" | "no" | "n" | "off"
-    )
 }
 
 #[derive(Clone, Debug)]

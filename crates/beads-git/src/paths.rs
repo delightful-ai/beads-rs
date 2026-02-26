@@ -1,11 +1,20 @@
 //! Minimal path helpers needed by checkpoint cache.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 use beads_core::StoreId;
 
 #[cfg(test)]
 use std::cell::RefCell;
+
+static DATA_DIR_OVERRIDE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+
+pub fn init_data_dir_override(path: Option<PathBuf>) {
+    let lock = DATA_DIR_OVERRIDE.get_or_init(|| Mutex::new(path.clone()));
+    let mut guard = lock.lock().expect("beads-git paths config lock poisoned");
+    *guard = path;
+}
 
 #[cfg(test)]
 #[doc(hidden)]
@@ -63,6 +72,10 @@ fn data_dir() -> PathBuf {
         return PathBuf::from(dir);
     }
 
+    if let Some(dir) = config_data_dir_override() {
+        return dir;
+    }
+
     std::env::var("XDG_DATA_HOME")
         .ok()
         .filter(|value| !value.is_empty())
@@ -74,6 +87,12 @@ fn data_dir() -> PathBuf {
                 .join("share")
         })
         .join("beads-rs")
+}
+
+fn config_data_dir_override() -> Option<PathBuf> {
+    DATA_DIR_OVERRIDE
+        .get()
+        .and_then(|lock| lock.lock().ok().and_then(|path| path.clone()))
 }
 
 #[cfg(test)]

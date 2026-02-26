@@ -348,7 +348,7 @@ pub enum StoreMeta {
     V1 {
         root_slug: Option<BeadSlug>,
         last_write_stamp: Option<WriteStamp>,
-        checksums: StoreChecksums,
+        checksums: Option<StoreChecksums>,
     },
 }
 
@@ -372,7 +372,7 @@ impl StoreMeta {
     pub fn checksums(&self) -> Option<&StoreChecksums> {
         match self {
             StoreMeta::Legacy => None,
-            StoreMeta::V1 { checksums, .. } => Some(checksums),
+            StoreMeta::V1 { checksums, .. } => checksums.as_ref(),
         }
     }
 }
@@ -404,15 +404,16 @@ impl SupportedStoreMeta {
             meta.deps_sha256,
             meta.notes_sha256,
         ) {
-            (Some(state), Some(tombstones), Some(deps), notes) => StoreChecksums {
+            (Some(state), Some(tombstones), Some(deps), notes) => Some(StoreChecksums {
                 state,
                 tombstones,
                 deps,
                 notes,
-            },
+            }),
+            (None, None, None, None) => None,
             _ => {
                 return Err(WireError::InvalidValue(
-                    "meta.json missing checksum fields".into(),
+                    "meta.json has partial checksum fields".into(),
                 ));
             }
         };
@@ -1555,7 +1556,7 @@ mod tests {
                 } => {
                     prop_assert_eq!(root_slug, &expected_root);
                     prop_assert_eq!(last_write_stamp, &write_stamp);
-                    prop_assert_eq!(parsed_checksums, &checksums);
+                    prop_assert_eq!(parsed_checksums.as_ref(), Some(&checksums));
                 }
                 StoreMeta::Legacy => {
                     prop_assert!(false, "expected v1 meta");
@@ -1815,7 +1816,23 @@ mod tests {
     }
 
     #[test]
-    fn parse_supported_meta_rejects_missing_required_checksums() {
+    fn parse_supported_meta_accepts_v1_without_checksums() {
+        let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
+        let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        let obj = value.as_object_mut().expect("object");
+        obj.remove("state_sha256");
+        obj.remove("tombstones_sha256");
+        obj.remove("deps_sha256");
+        obj.remove("notes_sha256");
+        let mutated = serde_json::to_vec(&value).expect("json");
+
+        let parsed = parse_supported_meta(&mutated).expect("v1 without checksums should parse");
+        assert!(parsed.checksums().is_none());
+    }
+
+    #[test]
+    fn parse_supported_meta_rejects_partial_required_checksums() {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
@@ -1826,7 +1843,7 @@ mod tests {
         let mutated = serde_json::to_vec(&value).expect("json");
 
         let err =
-            parse_supported_meta(&mutated).expect_err("missing required checksums should fail");
+            parse_supported_meta(&mutated).expect_err("partial required checksums should fail");
         assert!(matches!(err, WireError::InvalidValue(_)));
     }
     #[test]
@@ -1857,7 +1874,7 @@ mod tests {
                     &Some(BeadSlug::parse("valid-slug").expect("slug"))
                 );
                 assert_eq!(last_write_stamp, &None);
-                assert_eq!(parsed_checksums, &checksums);
+                assert_eq!(parsed_checksums.as_ref(), Some(&checksums));
             }
             StoreMeta::Legacy => panic!("expected v1 meta"),
         }

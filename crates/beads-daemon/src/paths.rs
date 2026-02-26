@@ -15,6 +15,7 @@ pub fn init_from_config(config: &PathsConfig) {
     let mut guard = lock.lock().expect("paths config lock poisoned");
     *guard = config.clone();
 
+    beads_git::init_data_dir_override(config.data_dir.clone());
     beads_surface::ipc::set_runtime_dir_override(config.runtime_dir.clone());
 }
 

@@ -284,7 +284,7 @@ fn repl_want_reads_from_wal() {
         .expect("open wal index");
     rebuild_index(&store_dir, &meta, &index, &limits).expect("rebuild index");
 
-    let reader = WalRangeReader::new(store_id, Arc::new(index), limits.clone());
+    let reader = WalRangeReader::new(store_dir, Arc::new(index), limits.clone());
     let frames = reader
         .read_range(
             &namespace,

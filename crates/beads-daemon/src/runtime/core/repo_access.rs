@@ -75,6 +75,7 @@ impl Daemon {
         if let Some(store) = self.stores.get(&store_id) {
             self.scheduler.cancel(&store.primary_remote);
         }
+        self.checkpoint_scheduler.drop_store(store_id);
         self.stores.remove(&store_id);
         self.git_lanes.remove(&store_id);
     }

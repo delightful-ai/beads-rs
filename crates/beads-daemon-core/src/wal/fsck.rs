@@ -48,38 +48,12 @@ impl Default for StoreConfig {
     }
 }
 
-fn data_dir() -> PathBuf {
-    if let Some(dir) = std::env::var("BD_DATA_DIR")
-        .ok()
-        .map(|value| value.trim().to_owned())
-        .filter(|value| !value.is_empty())
-    {
-        return PathBuf::from(dir);
-    }
-
-    std::env::var("XDG_DATA_HOME")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join(".local")
-                .join("share")
-        })
-        .join("beads-rs")
+fn store_meta_path(store_dir: &Path) -> PathBuf {
+    store_dir.join("meta.json")
 }
 
-fn store_dir(store_id: &StoreId) -> PathBuf {
-    data_dir().join("stores").join(store_id.to_string())
-}
-
-fn store_meta_path(store_id: &StoreId) -> PathBuf {
-    store_dir(store_id).join("meta.json")
-}
-
-fn wal_index_path(store_id: &StoreId) -> PathBuf {
-    store_dir(store_id).join("index").join("wal.sqlite")
+fn wal_index_path(store_dir: &Path) -> PathBuf {
+    store_dir.join("index").join("wal.sqlite")
 }
 
 fn store_index_durability_mode(store_dir: &Path) -> Result<IndexDurabilityMode, FsckError> {
@@ -302,9 +276,12 @@ pub struct FsckReport {
     pub repairs: Vec<FsckRepair>,
 }
 
-pub fn fsck_store(store_id: StoreId, options: FsckOptions) -> Result<FsckReport, FsckError> {
-    let store_dir = store_dir(&store_id);
-    let meta_path = store_meta_path(&store_id);
+pub fn fsck_store(
+    store_id: StoreId,
+    store_dir: &Path,
+    options: FsckOptions,
+) -> Result<FsckReport, FsckError> {
+    let meta_path = store_meta_path(store_dir);
     let meta = read_store_meta(&meta_path)?;
     if meta.store_id() != store_id {
         return Err(FsckError::StoreIdMismatch {
@@ -312,7 +289,7 @@ pub fn fsck_store(store_id: StoreId, options: FsckOptions) -> Result<FsckReport,
             got: meta.store_id(),
         });
     }
-    fsck_store_dir(&store_dir, &meta, options)
+    fsck_store_dir(store_dir, &meta, options)
 }
 
 pub fn fsck_store_dir(
@@ -363,7 +340,7 @@ pub fn fsck_store_dir(
                 FsckEvidence {
                     code: FsckEvidenceCode::IndexOpenFailed,
                     message: format!("failed to rebuild wal index: {err}"),
-                    path: Some(wal_index_path(&meta.store_id())),
+                    path: Some(wal_index_path(store_dir)),
                     namespace: None,
                     origin: None,
                     seq: None,
@@ -374,7 +351,7 @@ pub fn fsck_store_dir(
         } else {
             builder.repairs.push(FsckRepair {
                 kind: FsckRepairKind::RebuildIndex,
-                path: Some(wal_index_path(&meta.store_id())),
+                path: Some(wal_index_path(store_dir)),
                 detail: "rebuilt wal.sqlite from WAL segments".to_string(),
             });
         }

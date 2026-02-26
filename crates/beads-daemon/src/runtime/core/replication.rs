@@ -45,15 +45,15 @@ impl Daemon {
 
         let wal_index: Arc<dyn WalIndex> = store.wal_index.clone();
         let wal_reader = Some(WalRangeReader::new(
-            store_id,
+            self.layout().store_dir(&store_id),
             wal_index.clone(),
             self.limits.clone(),
         ));
         let session_store =
             SharedSessionStore::new(ReplSessionStore::new(store_id, wal_index, ingest_tx));
 
-        let roster =
-            load_replica_roster(store_id).map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
+        let roster = load_replica_roster(self.layout(), store_id)
+            .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
         let peers = self.replication_peers();
 
         let manager_config = ReplicationManagerConfig {
@@ -230,7 +230,7 @@ impl Daemon {
                 reason: format!("failed to reload config: {e}"),
             }
         })?;
-        let runtime = crate::daemon_runtime_config_from_config(&config);
+        let runtime = crate::config::daemon_runtime_from_config(&config);
         self.replication = runtime.replication;
         Ok(())
     }

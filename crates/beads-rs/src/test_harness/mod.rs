@@ -260,7 +260,10 @@ impl TestNode {
         std::fs::create_dir_all(&data_dir).expect("create data dir");
 
         let actor = ActorId::new(format!("test-{label}")).expect("actor id");
-        let mut daemon = Daemon::new_with_limits(actor.clone(), options.limits.clone());
+        let mut daemon = {
+            let _guard = paths::override_data_dir_for_tests(Some(data_dir.clone()));
+            Daemon::new_with_limits(actor.clone(), options.limits.clone())
+        };
         *daemon.clock_mut() = Clock::with_time_source_and_max_forward_drift(
             Box::new(clock.clone()),
             options.limits.hlc_max_forward_drift_ms,
@@ -353,7 +356,10 @@ impl TestNode {
             )
         };
 
-        let mut daemon = Daemon::new_with_limits(actor.clone(), options.limits.clone());
+        let mut daemon = {
+            let _guard = paths::override_data_dir_for_tests(Some(data_dir.clone()));
+            Daemon::new_with_limits(actor.clone(), options.limits.clone())
+        };
         *daemon.clock_mut() = Clock::with_time_source_and_max_forward_drift(
             Box::new(clock.clone()),
             options.limits.hlc_max_forward_drift_ms,
@@ -374,9 +380,10 @@ impl TestNode {
                 .expect("insert store");
             configure_runtime_for_options(&mut inner.daemon, store_id, &options);
             let limits = inner.daemon.limits().clone();
+            let store_dir = crate::daemon_layout_from_paths().store_dir(&store_id);
             if let Some(store) = inner.daemon.store_runtime_by_id_mut(store_id) {
                 replay_event_wal(
-                    store_id,
+                    &store_dir,
                     store.wal_index.as_ref(),
                     &mut store.state,
                     &limits,
@@ -489,7 +496,7 @@ impl TestNode {
             let runtime = daemon.store_runtime_by_id(store_id).expect("store runtime");
             let limits = daemon.limits().clone();
             let reader = beads_daemon::testkit::repl::WalRangeReader::new(
-                store_id,
+                paths::store_dir(store_id),
                 runtime.wal_index.clone(),
                 limits.clone(),
             );

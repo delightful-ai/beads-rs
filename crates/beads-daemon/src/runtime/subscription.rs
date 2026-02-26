@@ -34,6 +34,7 @@ pub fn prepare_subscription(
     git_tx: &Sender<GitOp>,
 ) -> Result<SubscribeReply, Box<ErrorPayload>> {
     let limits = daemon.limits().clone();
+    let layout = daemon.layout().clone();
     let loaded = daemon
         .ensure_repo_fresh(repo, git_tx)
         .map_err(|err| box_error(err.into_error_payload()))?;
@@ -57,7 +58,7 @@ pub fn prepare_subscription(
     let namespace = read.namespace().clone();
     let watermarks_applied = store_runtime.watermarks_applied.clone();
     let wal_reader = WalRangeReader::new(
-        store_runtime.meta.store_id(),
+        layout.store_dir(&store_runtime.meta.store_id()),
         store_runtime.wal_index.clone(),
         limits.clone(),
     );

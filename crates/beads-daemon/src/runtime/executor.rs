@@ -134,7 +134,7 @@ impl Daemon {
             trace_id,
             actor_id,
         } = meta;
-        let store_dir = crate::daemon_layout_from_paths().store_dir(&store_id);
+        let store_dir = self.layout().store_dir(&store_id);
         let engine = MutationEngine::new(limits.clone());
         let ctx = MutationContext {
             namespace: namespace.clone(),
@@ -161,6 +161,7 @@ impl Daemon {
             policies,
             durable_watermarks_snapshot,
             applied_watermarks_snapshot,
+            layout,
         ) = {
             let store_runtime = proof.runtime();
             (
@@ -170,10 +171,11 @@ impl Daemon {
                 store_runtime.policies.clone(),
                 store_runtime.watermarks_durable.clone(),
                 store_runtime.watermarks_applied.clone(),
+                store_runtime.layout().clone(),
             )
         };
-        let roster =
-            load_replica_roster(store_id).map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
+        let roster = load_replica_roster(&layout, store_id)
+            .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
         let coordinator =
             DurabilityCoordinator::new(origin_replica_id, policies, roster, peer_acks);
         let wait_timeout = Duration::from_millis(limits.dead_ms);

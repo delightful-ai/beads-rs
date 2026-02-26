@@ -242,12 +242,11 @@ pub(super) fn write_checkpoint_tree(
 }
 
 pub fn replay_event_wal(
-    store_id: StoreId,
+    store_dir: &Path,
     wal_index: &dyn WalIndex,
     state: &mut StoreState,
     limits: &Limits,
 ) -> Result<bool, StoreRuntimeError> {
-    let store_dir = crate::daemon_layout_from_paths().store_dir(&store_id);
     let rows = wal_index.reader().load_watermarks()?;
     if rows.is_empty() {
         return Ok(false);
@@ -262,7 +261,7 @@ pub fn replay_event_wal(
         }
         let namespace = row.namespace.clone();
         if !segment_cache.contains_key(&namespace) {
-            let segments = segment_paths_for_namespace(&store_dir, wal_index, &namespace)?;
+            let segments = segment_paths_for_namespace(store_dir, wal_index, &namespace)?;
             segment_cache.insert(namespace.clone(), segments);
         }
         let segments = segment_cache.get(&namespace).ok_or_else(|| {
@@ -566,10 +565,9 @@ pub fn insert_store_for_tests(
     .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
     daemon.seed_actor_clocks(&open.runtime)?;
     daemon.stores.insert(store_id, open.runtime);
-    daemon.git_lanes.insert(
-        store_id,
-        GitLaneState::with_path(None, repo_path.to_owned()),
-    );
+    let mut lane = GitLaneState::with_path(None, repo_path.to_owned());
+    lane.mark_loaded_from_git();
+    daemon.git_lanes.insert(store_id, lane);
     daemon.store_caches.remote_to_store.insert(
         remote.clone(),
         StoreIdResolution::verified(store_id, StoreIdSource::GitMeta),

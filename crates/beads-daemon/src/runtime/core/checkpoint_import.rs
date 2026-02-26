@@ -79,7 +79,7 @@ impl Daemon {
     }
 
     fn local_roster_hash(&self, store_id: StoreId) -> Option<ContentHash> {
-        let roster = match load_replica_roster(store_id) {
+        let roster = match load_replica_roster(self.layout(), store_id) {
             Ok(Some(roster)) => roster,
             Ok(None) => return None,
             Err(err) => {

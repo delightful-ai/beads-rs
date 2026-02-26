@@ -6,7 +6,6 @@ pub use beads_macros::enum_str;
 
 #[cfg(feature = "cli")]
 pub mod cli;
-pub mod compat;
 pub mod config;
 pub mod error;
 #[cfg(feature = "model-testing")]
@@ -19,6 +18,7 @@ pub mod telemetry;
 pub mod test_harness;
 pub mod upgrade;
 
+pub use beads_daemon::compat;
 pub use error::{Effect, Error, OpError, Transience};
 pub type Result<T> = std::result::Result<T, Error>;
 

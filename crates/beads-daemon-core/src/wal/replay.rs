@@ -489,7 +489,10 @@ fn replay_index(
             if !update_all && !state.touched {
                 continue;
             }
-            if let Some(got) = state.first_pending_seq() {
+            let first_pending = state.first_pending_seq();
+            if let Some(got) = first_pending
+                && mode == ReplayMode::CatchUp
+            {
                 return Err(WalReplayError::NonContiguousSeq {
                     namespace: namespace.clone(),
                     origin,
@@ -507,11 +510,15 @@ fn replay_index(
                     seq,
                 });
             }
-            let next_seq = state.max_seq.get().checked_add(1).ok_or_else(|| {
-                WalReplayError::OriginSeqOverflow {
-                    namespace: namespace.clone(),
-                    origin,
-                }
+            let next_seq = if first_pending.is_some() {
+                // Preserve gap-fill ability during rebuild: don't advance past the contiguous tip.
+                state.contiguous_seq.get().checked_add(1)
+            } else {
+                state.max_seq.get().checked_add(1)
+            }
+            .ok_or_else(|| WalReplayError::OriginSeqOverflow {
+                namespace: namespace.clone(),
+                origin,
             })?;
             let next_seq =
                 Seq1::from_u64(next_seq).ok_or_else(|| WalReplayError::OriginSeqOverflow {
@@ -1451,6 +1458,98 @@ mod tests {
             )
             .expect_err("expected prev_sha mismatch");
         assert!(matches!(err, WalReplayError::PrevShaMismatch { .. }));
+        assert_eq!(
+            state.first_pending_seq(),
+            Some(Seq1::from_u64(2).expect("seq2"))
+        );
+    }
+
+    #[test]
+    fn origin_replay_state_ignores_duplicate_committed_seq() {
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([26u8; 16]));
+        let mut state = OriginReplayState::default();
+        let sha1 = [1u8; 32];
+        let sha2 = [2u8; 32];
+
+        state
+            .observe(
+                &namespace,
+                origin,
+                Seq1::from_u64(1).expect("seq1"),
+                sha1,
+                None,
+                8,
+            )
+            .expect("seed seq1");
+        state
+            .observe(
+                &namespace,
+                origin,
+                Seq1::from_u64(2).expect("seq2"),
+                sha2,
+                Some(sha1),
+                8,
+            )
+            .expect("seed seq2");
+        state
+            .observe(
+                &namespace,
+                origin,
+                Seq1::from_u64(2).expect("seq2"),
+                sha2,
+                Some(sha1),
+                8,
+            )
+            .expect("duplicate committed seq should be idempotent");
+
+        assert_eq!(state.contiguous_seq.get(), 2);
+        assert_eq!(state.head_sha, Some(sha2));
+        assert!(state.first_pending_seq().is_none());
+    }
+
+    #[test]
+    fn origin_replay_state_ignores_duplicate_pending_seq() {
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([27u8; 16]));
+        let mut state = OriginReplayState::default();
+        let sha1 = [1u8; 32];
+        let sha2 = [2u8; 32];
+
+        state
+            .observe(
+                &namespace,
+                origin,
+                Seq1::from_u64(2).expect("seq2"),
+                sha2,
+                Some(sha1),
+                8,
+            )
+            .expect("seed pending seq2");
+        state
+            .observe(
+                &namespace,
+                origin,
+                Seq1::from_u64(2).expect("seq2"),
+                sha2,
+                Some(sha1),
+                8,
+            )
+            .expect("duplicate pending seq should be idempotent");
+        state
+            .observe(
+                &namespace,
+                origin,
+                Seq1::from_u64(1).expect("seq1"),
+                sha1,
+                None,
+                8,
+            )
+            .expect("gap fill should flush");
+
+        assert_eq!(state.contiguous_seq.get(), 2);
+        assert_eq!(state.head_sha, Some(sha2));
+        assert!(state.first_pending_seq().is_none());
     }
 
     #[test]
@@ -1489,7 +1588,6 @@ mod tests {
     }
 }
 
-#[derive(Default)]
 struct ReplayTracker {
     origins: BTreeMap<NamespaceId, BTreeMap<ReplicaId, OriginReplayState>>,
     max_pending_per_origin: usize,
@@ -1560,7 +1658,7 @@ struct OriginReplayState {
     pending: BTreeMap<Seq1, PendingRecord>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 struct PendingRecord {
     sha: [u8; 32],
     prev_sha: Option<[u8; 32]>,
@@ -1597,6 +1695,11 @@ impl OriginReplayState {
 
         let expected = self.contiguous_seq.next();
         if seq.get() <= self.contiguous_seq.get() {
+            // Catch-up can re-read records that are already indexed; treat these as idempotent.
+            return Ok(());
+        }
+
+        if seq != expected && self.pending.len() >= max_pending_per_origin {
             return Err(WalReplayError::NonContiguousSeq {
                 namespace: namespace.clone(),
                 origin,
@@ -1605,7 +1708,10 @@ impl OriginReplayState {
             });
         }
 
-        if self.pending.len() >= max_pending_per_origin {
+        if let Some(existing) = self.pending.get(&seq) {
+            if existing.sha == sha && existing.prev_sha == prev_sha {
+                return Ok(());
+            }
             return Err(WalReplayError::NonContiguousSeq {
                 namespace: namespace.clone(),
                 origin,
@@ -1613,21 +1719,9 @@ impl OriginReplayState {
                 got: Seq0::new(seq.get()),
             });
         }
+        self.pending.insert(seq, PendingRecord { sha, prev_sha });
 
-        if self
-            .pending
-            .insert(seq, PendingRecord { sha, prev_sha })
-            .is_some()
-        {
-            return Err(WalReplayError::NonContiguousSeq {
-                namespace: namespace.clone(),
-                origin,
-                expected,
-                got: Seq0::new(seq.get()),
-            });
-        }
-
-        while let Some(next) = self.pending.remove(&self.contiguous_seq.next()) {
+        while let Some(next) = self.pending.get(&self.contiguous_seq.next()).copied() {
             let seq = self.contiguous_seq.next();
             let expected_prev = self.head_sha.unwrap_or([0u8; 32]);
             let got_prev = next.prev_sha.unwrap_or([0u8; 32]);
@@ -1654,6 +1748,7 @@ impl OriginReplayState {
                 });
             }
 
+            self.pending.remove(&seq);
             self.contiguous_seq = Seq0::new(seq.get());
             self.head_sha = Some(next.sha);
         }

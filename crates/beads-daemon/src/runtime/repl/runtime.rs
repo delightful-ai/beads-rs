@@ -178,9 +178,9 @@ pub struct WalRangeReader {
 }
 
 impl WalRangeReader {
-    pub fn new(store_id: StoreId, wal_index: Arc<dyn WalIndex>, limits: Limits) -> Self {
+    pub fn new(store_dir: PathBuf, wal_index: Arc<dyn WalIndex>, limits: Limits) -> Self {
         Self {
-            store_dir: crate::daemon_layout_from_paths().store_dir(&store_id),
+            store_dir,
             wal_index,
             limits,
         }

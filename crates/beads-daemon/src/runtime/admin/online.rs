@@ -13,6 +13,7 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
+        let layout = self.layout().clone();
         let limits = self.limits().clone();
         let last_clock_anomaly = clock_anomaly_output(self.clock().last_anomaly());
         let proof = match self.ensure_repo_fresh(repo, git_tx) {
@@ -29,10 +30,11 @@ impl Daemon {
         let store = proof.runtime();
         let store_id = store.meta.store_id();
         let replica_id = store.meta.replica_id;
+        let store_dir = layout.store_dir(&store_id);
 
         let namespaces = collect_namespaces(store);
         let now_ms = WallClock::now().0;
-        let wal_report = match build_wal_status(store, &namespaces, &limits, now_ms) {
+        let wal_report = match build_wal_status(store, &namespaces, &store_dir, &limits, now_ms) {
             Ok(wal_report) => wal_report,
             Err(err) => return Response::err_from(err),
         };
@@ -66,6 +68,7 @@ impl Daemon {
         read: ReadConsistency,
         git_tx: &Sender<GitOp>,
     ) -> Response {
+        let layout = self.layout().clone();
         let limits = self.limits().clone();
         let proof = match self.ensure_repo_fresh(repo, git_tx) {
             Ok(proof) => proof,
@@ -80,9 +83,10 @@ impl Daemon {
         }
 
         let store = proof.runtime();
+        let store_dir = layout.store_dir(&store.meta.store_id());
         let namespaces = collect_namespaces(store);
         let now_ms = WallClock::now().0;
-        if let Err(err) = build_wal_status(store, &namespaces, &limits, now_ms) {
+        if let Err(err) = build_wal_status(store, &namespaces, &store_dir, &limits, now_ms) {
             return Response::err_from(err);
         }
         drop(proof);
@@ -371,6 +375,7 @@ impl Daemon {
     }
 
     pub fn admin_reload_policies(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
+        let layout = self.layout().clone();
         let mut proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
             Err(err) => return Response::err_from(err),
@@ -378,7 +383,7 @@ impl Daemon {
         let store_id = proof.store_id();
         let store = proof.runtime_mut();
 
-        let path = crate::daemon_layout_from_paths().namespaces_path(&store_id);
+        let path = layout.namespaces_path(&store_id);
         let raw = match fs::read_to_string(&path) {
             Ok(raw) => raw,
             Err(err) => {
@@ -470,7 +475,7 @@ impl Daemon {
             return Response::err_from(err);
         }
 
-        let roster = match load_replica_roster(store_id) {
+        let roster = match load_replica_roster(self.layout(), store_id) {
             Ok(roster) => roster,
             Err(err) => return Response::err_from(OpError::StoreRuntime(Box::new(err))),
         };
@@ -532,12 +537,13 @@ impl Daemon {
 
     pub fn admin_rebuild_index(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
         let limits = self.limits().clone();
+        let layout = self.layout().clone();
         let mut proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
             Err(err) => return Response::err_from(err),
         };
         let store_id = proof.store_id();
-        let store_dir = crate::daemon_layout_from_paths().store_dir(&store_id);
+        let store_dir = layout.store_dir(&store_id);
         let store = proof.runtime_mut();
         if !store.maintenance_mode {
             return Response::err_from(OpError::MaintenanceMode {
