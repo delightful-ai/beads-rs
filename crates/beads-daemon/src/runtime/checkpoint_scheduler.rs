@@ -124,6 +124,19 @@ impl CheckpointScheduler {
         map
     }
 
+    pub fn drop_store(&mut self, store_id: StoreId) {
+        self.groups.retain(|key, _| key.store_id != store_id);
+        self.pending.retain(|key, _| key.store_id != store_id);
+
+        let mut heap = BinaryHeap::new();
+        for Reverse((deadline, key)) in self.heap.drain() {
+            if key.store_id != store_id {
+                heap.push(Reverse((deadline, key)));
+            }
+        }
+        self.heap = heap;
+    }
+
     pub(crate) fn snapshot_for_store(&self, store_id: StoreId) -> Vec<CheckpointGroupSnapshot> {
         let mut out: Vec<CheckpointGroupSnapshot> = self
             .groups
@@ -552,5 +565,30 @@ mod tests {
         scheduler.complete_success(&key_a, base, 1_700_000_000_000);
 
         assert_eq!(scheduler.drain_due(base), vec![key_b]);
+    }
+
+    #[test]
+    fn drop_store_removes_registered_groups_and_pending_entries() {
+        let store_a = StoreId::new(Uuid::from_bytes([11u8; 16]));
+        let store_b = StoreId::new(Uuid::from_bytes([12u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([13u8; 16]));
+        let mut scheduler = CheckpointScheduler::new();
+
+        scheduler.register_group(config_with_limits(store_a, replica_id));
+        scheduler.register_group(config_with_limits(store_b, replica_id));
+
+        let now = Instant::now();
+        scheduler.mark_dirty_for_namespace_at(store_a, &NamespaceId::core(), 3, now);
+        scheduler.mark_dirty_for_namespace_at(store_b, &NamespaceId::core(), 3, now);
+        assert_eq!(scheduler.queue_depth(), 2);
+
+        scheduler.drop_store(store_a);
+
+        assert!(scheduler.checkpoint_groups_for_store(store_a).is_empty());
+        assert_eq!(scheduler.checkpoint_groups_for_store(store_b).len(), 1);
+        assert_eq!(scheduler.queue_depth(), 1);
+        let due = scheduler.drain_due(now);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].store_id, store_b);
     }
 }

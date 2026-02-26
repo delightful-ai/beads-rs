@@ -101,7 +101,7 @@ impl Daemon {
                         repo_state.root_slug = fresh.root_slug;
                     }
                 }
-                repo_state.last_refresh = Some(Instant::now());
+                repo_state.mark_loaded_from_git();
 
                 repo_state.last_seen_stamp =
                     max_write_stamp(repo_state.last_seen_stamp.clone(), fresh.last_seen_stamp);

@@ -529,6 +529,87 @@ mod tests {
     }
 
     #[test]
+    fn ensure_repo_loaded_rolls_back_store_state_when_initial_load_fails() {
+        let _tmp = test_store_dir();
+        let repo_dir = TempDir::new().unwrap();
+        let repo_path = repo_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo path");
+
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let resolution = StoreIdResolution::verified(store_id, StoreIdSource::PathMap);
+        daemon
+            .store_caches
+            .path_to_remote
+            .insert(repo_path.clone(), remote.clone());
+        daemon
+            .store_caches
+            .path_to_store
+            .insert(repo_path.clone(), resolution);
+        daemon
+            .store_caches
+            .remote_to_store
+            .insert(remote.clone(), resolution);
+
+        let (git_tx, git_rx) = crossbeam::channel::bounded(2);
+        let worker = std::thread::spawn(move || {
+            match git_rx.recv().expect("load-local op") {
+                GitOp::LoadLocal { respond, .. } => respond
+                    .send(Err(SyncError::NoLocalRef("missing local ref".to_string())))
+                    .expect("respond load-local"),
+                _ => panic!("expected load-local op"),
+            }
+            match git_rx.recv().expect("load op") {
+                GitOp::Load { respond, .. } => respond
+                    .send(Err(SyncError::NoLocalRef("missing remote ref".to_string())))
+                    .expect("respond load"),
+                _ => panic!("expected load op"),
+            }
+        });
+
+        let err = daemon
+            .ensure_repo_loaded(&repo_path, &git_tx)
+            .expect_err("load should fail");
+        worker.join().expect("worker join");
+
+        assert!(matches!(err, OpError::RepoNotInitialized(path) if path == repo_path));
+        assert!(!daemon.stores.contains_key(&store_id));
+        assert!(!daemon.git_lanes.contains_key(&store_id));
+        assert!(daemon.export_pending.get(&store_id).is_none());
+        assert!(
+            daemon
+                .checkpoint_scheduler
+                .checkpoint_groups_for_store(store_id)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn export_go_compat_requires_loaded_lane() {
+        let _tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
+        if daemon.export_worker.is_none() {
+            return;
+        }
+
+        let remote = test_remote();
+        let store_id = insert_store(&mut daemon, &remote);
+
+        daemon.export_go_compat(store_id, &remote);
+        assert!(daemon.export_pending.get(&store_id).is_none());
+
+        daemon
+            .git_lanes
+            .get_mut(&store_id)
+            .expect("lane")
+            .mark_loaded_from_git();
+        daemon.export_go_compat(store_id, &remote);
+
+        assert!(daemon.export_pending.contains_key(&store_id));
+    }
+
+    #[test]
     fn wal_checkpoint_deadline_tracks_interval() {
         let _tmp = test_store_dir();
         let limits = Limits {

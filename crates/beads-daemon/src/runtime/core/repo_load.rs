@@ -32,56 +32,61 @@ impl Daemon {
             self.git_lanes.insert(store_id, GitLaneState::new());
             self.register_default_checkpoint_groups(store_id)?;
 
-            let timeout = load_timeout();
-            let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
-            git_tx
-                .send(GitOp::LoadLocal {
-                    repo: repo.to_owned(),
-                    respond: respond_tx,
-                })
-                .map_err(|_| OpError::Internal("git thread not responding"))?;
+            let load_result = (|| -> Result<(), OpError> {
+                let timeout = load_timeout();
+                let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
+                git_tx
+                    .send(GitOp::LoadLocal {
+                        repo: repo.to_owned(),
+                        respond: respond_tx,
+                    })
+                    .map_err(|_| OpError::Internal("git thread not responding"))?;
 
-            match respond_rx.recv_timeout(timeout) {
-                Ok(Ok(loaded)) => {
-                    self.apply_loaded_repo_state(store_id, &remote, repo, loaded)?;
-                }
-                Ok(Err(SyncError::NoLocalRef(_))) => {
-                    // No cached refs; attempt a bounded fetch to discover remote state.
-                    let (fetch_tx, fetch_rx) = crossbeam::channel::bounded(1);
-                    git_tx
-                        .send(GitOp::Load {
-                            repo: repo.to_owned(),
-                            respond: fetch_tx,
-                        })
-                        .map_err(|_| OpError::Internal("git thread not responding"))?;
-
-                    match fetch_rx.recv_timeout(timeout) {
-                        Ok(Ok(loaded)) => {
-                            self.apply_loaded_repo_state(store_id, &remote, repo, loaded)?;
-                        }
-                        Ok(Err(SyncError::NoLocalRef(_))) => {
-                            return Err(OpError::RepoNotInitialized(repo.to_owned()));
-                        }
-                        Ok(Err(e)) => return Err(OpError::from(e)),
-                        Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                            return Err(OpError::LoadTimeout {
+                match respond_rx.recv_timeout(timeout) {
+                    Ok(Ok(loaded)) => {
+                        self.apply_loaded_repo_state(store_id, &remote, repo, loaded)?;
+                    }
+                    Ok(Err(SyncError::NoLocalRef(_))) => {
+                        // No cached refs; attempt a bounded fetch to discover remote state.
+                        let (fetch_tx, fetch_rx) = crossbeam::channel::bounded(1);
+                        git_tx
+                            .send(GitOp::Load {
                                 repo: repo.to_owned(),
-                                timeout_secs: timeout.as_secs(),
-                                remote: remote.as_str().to_string(),
-                            });
-                        }
-                        Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                            return Err(OpError::Internal("git thread died"));
+                                respond: fetch_tx,
+                            })
+                            .map_err(|_| OpError::Internal("git thread not responding"))?;
+
+                        match fetch_rx.recv_timeout(timeout) {
+                            Ok(Ok(loaded)) => {
+                                self.apply_loaded_repo_state(store_id, &remote, repo, loaded)?;
+                            }
+                            Ok(Err(SyncError::NoLocalRef(_))) => {
+                                return Err(OpError::RepoNotInitialized(repo.to_owned()));
+                            }
+                            Ok(Err(e)) => return Err(OpError::from(e)),
+                            Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                                return Err(Self::load_timeout_error(repo, &remote, timeout));
+                            }
+                            Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                                return Err(OpError::Internal("git thread died"));
+                            }
                         }
                     }
+                    Ok(Err(e)) => return Err(OpError::from(e)),
+                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                        return Err(Self::load_timeout_error(repo, &remote, timeout));
+                    }
+                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                        return Err(OpError::Internal("git thread died"));
+                    }
                 }
-                Ok(Err(e)) => return Err(OpError::from(e)),
-                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                    return Err(OpError::Internal("git thread load-local timed out"));
-                }
-                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                    return Err(OpError::Internal("git thread died"));
-                }
+
+                Ok(())
+            })();
+
+            if let Err(err) = load_result {
+                self.rollback_failed_initial_load(store_id);
+                return Err(err);
             }
         } else if let Some(store) = self.stores.get_mut(&store_id) {
             if let Some(repo_state) = self.git_lanes.get_mut(&store_id) {
@@ -131,36 +136,41 @@ impl Daemon {
             self.git_lanes.insert(store_id, GitLaneState::new());
             self.register_default_checkpoint_groups(store_id)?;
 
-            // Blocking load from git (fetches remote first in GitWorker).
-            let timeout = load_timeout();
-            let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
-            git_tx
-                .send(GitOp::Load {
-                    repo: repo.to_owned(),
-                    respond: respond_tx,
-                })
-                .map_err(|_| OpError::Internal("git thread not responding"))?;
-
-            match respond_rx.recv_timeout(timeout) {
-                Ok(Ok(loaded)) => {
-                    self.apply_loaded_repo_state(store_id, &remote, repo, loaded)?;
-                }
-                Ok(Err(SyncError::NoLocalRef(_))) => {
-                    return Err(OpError::RepoNotInitialized(repo.to_owned()));
-                }
-                Ok(Err(e)) => {
-                    return Err(OpError::from(e));
-                }
-                Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
-                    return Err(OpError::LoadTimeout {
+            let load_result = (|| -> Result<(), OpError> {
+                // Blocking load from git (fetches remote first in GitWorker).
+                let timeout = load_timeout();
+                let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
+                git_tx
+                    .send(GitOp::Load {
                         repo: repo.to_owned(),
-                        timeout_secs: timeout.as_secs(),
-                        remote: remote.as_str().to_string(),
-                    });
+                        respond: respond_tx,
+                    })
+                    .map_err(|_| OpError::Internal("git thread not responding"))?;
+
+                match respond_rx.recv_timeout(timeout) {
+                    Ok(Ok(loaded)) => {
+                        self.apply_loaded_repo_state(store_id, &remote, repo, loaded)?;
+                    }
+                    Ok(Err(SyncError::NoLocalRef(_))) => {
+                        return Err(OpError::RepoNotInitialized(repo.to_owned()));
+                    }
+                    Ok(Err(e)) => {
+                        return Err(OpError::from(e));
+                    }
+                    Err(crossbeam::channel::RecvTimeoutError::Timeout) => {
+                        return Err(Self::load_timeout_error(repo, &remote, timeout));
+                    }
+                    Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
+                        return Err(OpError::Internal("git thread died"));
+                    }
                 }
-                Err(crossbeam::channel::RecvTimeoutError::Disconnected) => {
-                    return Err(OpError::Internal("git thread died"));
-                }
+
+                Ok(())
+            })();
+
+            if let Err(err) = load_result {
+                self.rollback_failed_initial_load(store_id);
+                return Err(err);
             }
         } else if let Some(store) = self.stores.get_mut(&store_id) {
             if let Some(repo_state) = self.git_lanes.get_mut(&store_id) {
@@ -281,5 +291,19 @@ impl Daemon {
             tracing::warn!("replication runtime init failed for {store_id}: {err}");
         }
         Ok(())
+    }
+
+    fn rollback_failed_initial_load(&mut self, store_id: StoreId) {
+        self.drop_store_state(store_id);
+        self.export_pending.remove(&store_id);
+        self.checkpoint_scheduler.drop_store(store_id);
+    }
+
+    fn load_timeout_error(repo: &Path, remote: &RemoteUrl, timeout: Duration) -> OpError {
+        OpError::LoadTimeout {
+            repo: repo.to_owned(),
+            timeout_secs: timeout.as_secs(),
+            remote: remote.as_str().to_string(),
+        }
     }
 }

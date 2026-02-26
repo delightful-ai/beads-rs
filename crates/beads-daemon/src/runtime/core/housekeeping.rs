@@ -23,7 +23,7 @@ impl Daemon {
         if self.export_worker.is_none() {
             return;
         }
-        if !self.stores.contains_key(&store_id) {
+        if !self.store_ready_for_export(store_id) {
             return;
         }
 
@@ -64,17 +64,20 @@ impl Daemon {
             let Some(store) = self.stores.get(&store_id) else {
                 continue;
             };
+            let Some(lane) = self.git_lanes.get(&store_id) else {
+                continue;
+            };
+            if !lane.is_loaded_from_git() {
+                continue;
+            }
+
             let empty_state = CanonicalState::new();
             let core_state = store
                 .state
                 .get(&NamespaceId::core())
                 .unwrap_or(&empty_state)
                 .clone();
-            let known_paths = self
-                .git_lanes
-                .get(&store_id)
-                .map(|lane| lane.known_paths.clone())
-                .unwrap_or_default();
+            let known_paths = lane.known_paths.clone();
 
             jobs.push(ExportJob {
                 remote: pending.remote,
@@ -91,6 +94,14 @@ impl Daemon {
                 }
             }
         }
+    }
+
+    fn store_ready_for_export(&self, store_id: StoreId) -> bool {
+        self.stores.contains_key(&store_id)
+            && self
+                .git_lanes
+                .get(&store_id)
+                .is_some_and(|lane| lane.is_loaded_from_git())
     }
 
     pub(in crate::runtime) fn next_wal_checkpoint_deadline(&mut self) -> Option<Instant> {
