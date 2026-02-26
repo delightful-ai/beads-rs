@@ -195,7 +195,9 @@ mod tests {
     use std::cell::RefCell;
     use uuid::Uuid;
 
-    use crate::core::{EventBytes, EventId, HeadStatus, NamespaceId, Opaque, Seq1, Sha256};
+    use crate::core::{
+        EventBytes, EventId, HeadStatus, NamespaceId, Opaque, Seq1, Sha256, SystemErrorCode,
+    };
 
     #[derive(Clone, Debug, PartialEq, Eq)]
     struct ReadCall {
@@ -406,6 +408,6 @@ mod tests {
             &Limits::default(),
         )
         .unwrap_err();
-        assert_eq!(err.code, ProtocolErrorCode::WalCorrupt.into());
+        assert_eq!(err.code, SystemErrorCode::WalCorrupt.into());
     }
 }

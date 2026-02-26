@@ -15,7 +15,7 @@ use crate::core::error::details::{
 use crate::core::{
     Applied, CliErrorCode, Durable, ErrorPayload, EventBytes, EventFrameV1, EventId,
     EventShaLookupError, Limits, NamespaceId, Opaque, ProtocolErrorCode, ReplicaId, SegmentId,
-    Seq0, Seq1, Sha256, StoreId, decode_event_body,
+    Seq0, Seq1, Sha256, StoreId, SystemErrorCode, decode_event_body,
 };
 use crate::daemon::repl::error::{ReplError, ReplErrorDetails};
 use crate::daemon::repl::{ContiguousBatch, IngestOutcome, SessionStore, WatermarkSnapshot};
@@ -391,21 +391,19 @@ impl WalRangeError {
                 segment_id,
                 offset,
                 reason,
-            } => ErrorPayload::new(ProtocolErrorCode::WalCorrupt.into(), "wal corrupt", false)
+            } => ErrorPayload::new(SystemErrorCode::WalCorrupt.into(), "wal corrupt", false)
                 .with_details(WalCorruptDetails {
                     namespace: namespace.clone(),
                     segment_id: *segment_id,
                     offset: *offset,
                     reason: reason.clone(),
                 }),
-            WalRangeError::Index(err) => ErrorPayload::new(
-                ProtocolErrorCode::IndexCorrupt.into(),
-                "index corrupt",
-                false,
-            )
-            .with_details(IndexCorruptDetails {
-                reason: err.to_string(),
-            }),
+            WalRangeError::Index(err) => {
+                ErrorPayload::new(SystemErrorCode::IndexCorrupt.into(), "index corrupt", false)
+                    .with_details(IndexCorruptDetails {
+                        reason: err.to_string(),
+                    })
+            }
         }
     }
 }
@@ -485,7 +483,7 @@ mod tests {
         }
         .as_error_payload();
 
-        assert_eq!(payload.code, ProtocolErrorCode::WalCorrupt.into());
+        assert_eq!(payload.code, SystemErrorCode::WalCorrupt.into());
         let details: WalCorruptDetails = payload.details_as().unwrap().unwrap();
         assert_eq!(details.namespace, namespace);
         assert_eq!(details.segment_id, Some(segment_id));
@@ -498,7 +496,7 @@ mod tests {
         let payload =
             WalRangeError::Index(WalIndexError::MetaMissing { key: "store_id" }).as_error_payload();
 
-        assert_eq!(payload.code, ProtocolErrorCode::IndexCorrupt.into());
+        assert_eq!(payload.code, SystemErrorCode::IndexCorrupt.into());
         let details: IndexCorruptDetails = payload.details_as().unwrap().unwrap();
         assert_eq!(details.reason, "missing meta key: store_id");
     }

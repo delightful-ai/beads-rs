@@ -24,7 +24,7 @@ use crate::core::{
     ActorId, Applied, BeadId, BeadType, ClientRequestId, DurabilityClass, DurabilityReceipt,
     Durable, EventBytes, EventId, HeadStatus, Limits, NamespaceId, NamespacePolicy, Opaque,
     Priority, ProtocolErrorCode, ReplicaDurabilityRole, ReplicaId, ReplicaRoster, Seq0, Seq1,
-    Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId, Watermark, Watermarks,
+    Sha256, StoreEpoch, StoreId, StoreIdentity, SystemErrorCode, TxnId, Watermark, Watermarks,
 };
 use crate::daemon::OpResult;
 use crate::daemon::core::{Daemon, insert_store_for_tests};
@@ -314,7 +314,7 @@ fn stream_event_decode_failure_is_wal_corrupt() {
     let Response::Err { err } = response else {
         panic!("expected corruption error");
     };
-    assert_eq!(err.code, ProtocolErrorCode::WalCorrupt.into());
+    assert_eq!(err.code, SystemErrorCode::WalCorrupt.into());
     let details = err
         .details_as::<error_details::WalCorruptDetails>()
         .unwrap()

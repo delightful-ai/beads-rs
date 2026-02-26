@@ -21,7 +21,7 @@ mod tests {
     use crate::core::{
         BeadId, CliErrorCode, DurabilityClass, DurabilityReceipt, IntoErrorPayload, Limits,
         NamespaceId, ProtocolErrorCode, ReplicaId, Seq0, Seq1, StoreEpoch, StoreId, StoreIdentity,
-        TxnId,
+        SystemErrorCode, TxnId,
     };
     use crate::daemon::ipc::{IpcError, Request, Response, decode_request_with_limits};
     use crate::daemon::ops::OpError;
@@ -73,7 +73,7 @@ mod tests {
         let store_err = StoreRuntimeError::WalReplay(Box::new(err));
         let payload = store_err.into_error_payload();
 
-        assert_eq!(payload.code, ProtocolErrorCode::WalFormatUnsupported.into());
+        assert_eq!(payload.code, SystemErrorCode::WalFormatUnsupported.into());
         let details = payload
             .details_as::<error_details::WalFormatUnsupportedDetails>()
             .unwrap()
@@ -92,7 +92,7 @@ mod tests {
         let store_err = StoreRuntimeError::WalReplay(Box::new(err));
         let payload = store_err.into_error_payload();
 
-        assert_eq!(payload.code, ProtocolErrorCode::WalCorrupt.into());
+        assert_eq!(payload.code, SystemErrorCode::WalCorrupt.into());
     }
 
     #[test]
@@ -184,7 +184,7 @@ mod tests {
 
         let payload = err.into_error_payload();
 
-        assert_eq!(payload.code, ProtocolErrorCode::PermissionDenied.into());
+        assert_eq!(payload.code, SystemErrorCode::PermissionDenied.into());
         let details = payload
             .details_as::<error_details::PermissionDeniedDetails>()
             .unwrap()

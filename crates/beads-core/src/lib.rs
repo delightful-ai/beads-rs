@@ -63,7 +63,7 @@ pub use durability::{
 pub use effect::{Effect, Transience};
 pub use error::{
     CliErrorCode, CollisionError, CoreError, ErrorCode, ErrorPayload, IntoErrorPayload,
-    InvalidDependency, InvalidId, InvalidLabel, ProtocolErrorCode, RangeError,
+    InvalidDependency, InvalidId, InvalidLabel, ProtocolErrorCode, RangeError, SystemErrorCode,
 };
 pub use event::{
     Canonical, DecodeError, EncodeError, EventBody, EventBytes, EventFrameError, EventFrameV1,

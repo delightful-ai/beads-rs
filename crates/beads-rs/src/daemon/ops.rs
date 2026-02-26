@@ -14,7 +14,7 @@ use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
     ActorId, Applied, BeadId, CliErrorCode, ClientRequestId, DurabilityClass, DurabilityReceipt,
     ErrorCode, ErrorPayload, IntoErrorPayload, InvalidId, NamespaceId, ProtocolErrorCode,
-    ReplicaId, StoreId, WallClock, Watermarks,
+    ReplicaId, StoreId, SystemErrorCode, WallClock, Watermarks,
 };
 use crate::daemon::store::runtime::StoreRuntimeError;
 use crate::daemon::wal::EventWalError;
@@ -244,7 +244,7 @@ impl OpError {
             OpError::CrossNamespaceDependency { .. } => {
                 ProtocolErrorCode::CrossNamespaceDependency.into()
             }
-            OpError::WalRecordTooLarge { .. } => ProtocolErrorCode::WalRecordTooLarge.into(),
+            OpError::WalRecordTooLarge { .. } => SystemErrorCode::WalRecordTooLarge.into(),
             OpError::EventWal(err) => err.code(),
             OpError::NotClaimedByYou => CliErrorCode::NotClaimedByYou.into(),
             OpError::DepNotFound => CliErrorCode::DepNotFound.into(),
@@ -455,7 +455,7 @@ impl IntoErrorPayload for OpError {
                 max_wal_record_bytes,
                 estimated_bytes,
             } => ErrorPayload::new(
-                ProtocolErrorCode::WalRecordTooLarge.into(),
+                SystemErrorCode::WalRecordTooLarge.into(),
                 message,
                 retryable,
             )

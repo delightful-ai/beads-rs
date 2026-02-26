@@ -13,7 +13,7 @@ use super::{RequestMessage, ServerReply};
 use crate::core::error::details as error_details;
 use crate::core::{
     CliErrorCode, ErrorPayload, EventFrameV1, EventId, Limits, ProtocolErrorCode, ReplicaId,
-    Sha256, decode_event_body,
+    Sha256, SystemErrorCode, decode_event_body,
 };
 use beads_daemon::broadcast::{BroadcastEvent, DropReason};
 
@@ -213,7 +213,7 @@ fn stream_event_response_from_parts(
         Err(err) => {
             return Response::err_from(
                 ErrorPayload::new(
-                    ProtocolErrorCode::WalCorrupt.into(),
+                    SystemErrorCode::WalCorrupt.into(),
                     "event body decode failed",
                     false,
                 )

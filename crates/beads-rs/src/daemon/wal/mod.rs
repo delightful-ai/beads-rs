@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::core::error::details as error_details;
 use crate::core::{
-    CliErrorCode, ErrorCode, ErrorPayload, IntoErrorPayload, ProtocolErrorCode, Transience,
+    CliErrorCode, ErrorCode, ErrorPayload, IntoErrorPayload, SystemErrorCode, Transience,
 };
 
 pub mod event_wal;
@@ -95,19 +95,19 @@ pub enum EventWalError {
 impl EventWalError {
     pub fn code(&self) -> ErrorCode {
         match self {
-            EventWalError::RecordTooLarge { .. } => ProtocolErrorCode::WalRecordTooLarge.into(),
+            EventWalError::RecordTooLarge { .. } => SystemErrorCode::WalRecordTooLarge.into(),
             EventWalError::SegmentHeaderUnsupportedVersion { .. } => {
-                ProtocolErrorCode::WalFormatUnsupported.into()
+                SystemErrorCode::WalFormatUnsupported.into()
             }
-            EventWalError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
+            EventWalError::Symlink { .. } => SystemErrorCode::PathSymlinkRejected.into(),
             EventWalError::Io { source, .. } => {
                 if source.kind() == std::io::ErrorKind::PermissionDenied {
-                    ProtocolErrorCode::PermissionDenied.into()
+                    SystemErrorCode::PermissionDenied.into()
                 } else {
                     CliErrorCode::IoError.into()
                 }
             }
-            _ => ProtocolErrorCode::WalCorrupt.into(),
+            _ => SystemErrorCode::WalCorrupt.into(),
         }
     }
 
@@ -136,7 +136,7 @@ impl IntoErrorPayload for EventWalError {
                 max_bytes,
                 got_bytes,
             } => ErrorPayload::new(
-                ProtocolErrorCode::WalRecordTooLarge.into(),
+                SystemErrorCode::WalRecordTooLarge.into(),
                 message,
                 retryable,
             )
@@ -145,7 +145,7 @@ impl IntoErrorPayload for EventWalError {
                 estimated_bytes: got_bytes as u64,
             }),
             EventWalError::Symlink { path } => ErrorPayload::new(
-                ProtocolErrorCode::PathSymlinkRejected.into(),
+                SystemErrorCode::PathSymlinkRejected.into(),
                 message,
                 retryable,
             )

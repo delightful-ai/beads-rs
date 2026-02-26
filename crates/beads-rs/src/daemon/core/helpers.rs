@@ -446,7 +446,7 @@ pub(super) fn event_wal_error_payload(
     offset: Option<u64>,
     err: EventWalError,
 ) -> ReplError {
-    ReplError::new(ProtocolErrorCode::WalCorrupt.into(), "wal error", true).with_details(
+    ReplError::new(SystemErrorCode::WalCorrupt.into(), "wal error", true).with_details(
         ReplErrorDetails::WalCorrupt(error_details::WalCorruptDetails {
             namespace: namespace.clone(),
             segment_id,
@@ -515,7 +515,7 @@ pub(super) fn wal_index_error_payload(err: &WalIndexError) -> ReplError {
                 got_request_sha256: hex::encode(got_request_sha256),
             },
         )),
-        _ => ReplError::new(ProtocolErrorCode::IndexCorrupt.into(), "index error", true)
+        _ => ReplError::new(SystemErrorCode::IndexCorrupt.into(), "index error", true)
             .with_details(ReplErrorDetails::IndexCorrupt(
                 error_details::IndexCorruptDetails {
                     reason: err.to_string(),

@@ -130,7 +130,7 @@ impl CoreError {
 }
 
 // =============================================================================
-// Error codes (protocol + CLI)
+// Error codes (protocol + CLI + System)
 // =============================================================================
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -169,45 +169,24 @@ pub enum ProtocolErrorCode {
     CasFailed,
     ClientRequestIdReuseMismatch,
     PayloadTooLarge,
-    WalRecordTooLarge,
     RequestTooLarge,
     OpsTooMany,
     NoteTooLarge,
     LabelsTooMany,
 
-    // Data integrity / contiguity
+    // Data integrity / contiguity (Protocol-visible)
     Corruption,
     NonCanonical,
     HashMismatch,
     PrevShaMismatch,
     GapDetected,
     Equivocation,
-    WalCorrupt,
-    WalTailTruncated,
-    SegmentHeaderMismatch,
-    WalFormatUnsupported,
-    IndexCorrupt,
-    IndexRebuildRequired,
-
-    // Checkpoint / snapshot
-    CheckpointHashMismatch,
-    CheckpointFormatUnsupported,
-    SnapshotTooLarge,
-    SnapshotCorrupt,
-    ArchiveUnsafe,
-    JsonlParseError,
 
     // Namespace / policy
     NamespaceInvalid,
     NamespaceUnknown,
     NamespacePolicyViolation,
     CrossNamespaceDependency,
-
-    // Locking / filesystem safety
-    LockHeld,
-    LockStale,
-    PathSymlinkRejected,
-    PermissionDenied,
 
     // Generic internal
     InternalError,
@@ -243,7 +222,6 @@ crate::enum_str! {
             CasFailed => ["cas_failed"],
             ClientRequestIdReuseMismatch => ["client_request_id_reuse_mismatch"],
             PayloadTooLarge => ["payload_too_large"],
-            WalRecordTooLarge => ["wal_record_too_large"],
             RequestTooLarge => ["request_too_large"],
             OpsTooMany => ["ops_too_many"],
             NoteTooLarge => ["note_too_large"],
@@ -254,10 +232,55 @@ crate::enum_str! {
             PrevShaMismatch => ["prev_sha_mismatch"],
             GapDetected => ["gap_detected"],
             Equivocation => ["equivocation"],
+            NamespaceInvalid => ["namespace_invalid"],
+            NamespaceUnknown => ["namespace_unknown"],
+            NamespacePolicyViolation => ["namespace_policy_violation"],
+            CrossNamespaceDependency => ["cross_namespace_dependency"],
+            InternalError => ["internal_error"],
+        }
+    }
+}
+
+impl ProtocolErrorCode {
+    pub fn parse(code: &str) -> Option<Self> {
+        Self::parse_str(code)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum SystemErrorCode {
+    // WAL / Storage implementation
+    WalCorrupt,
+    WalTailTruncated,
+    SegmentHeaderMismatch,
+    WalFormatUnsupported,
+    WalRecordTooLarge,
+    IndexCorrupt,
+    IndexRebuildRequired,
+    CheckpointHashMismatch,
+    CheckpointFormatUnsupported,
+    SnapshotTooLarge,
+    SnapshotCorrupt,
+    ArchiveUnsafe,
+    JsonlParseError,
+
+    // Locking / filesystem safety
+    LockHeld,
+    LockStale,
+    PathSymlinkRejected,
+    PermissionDenied,
+}
+
+crate::enum_str! {
+    impl SystemErrorCode {
+        pub fn as_str(&self) -> &'static str;
+        fn parse_str(code: &str) -> Option<Self>;
+        variants {
             WalCorrupt => ["wal_corrupt"],
             WalTailTruncated => ["wal_tail_truncated"],
             SegmentHeaderMismatch => ["segment_header_mismatch"],
             WalFormatUnsupported => ["wal_format_unsupported"],
+            WalRecordTooLarge => ["wal_record_too_large"],
             IndexCorrupt => ["index_corrupt"],
             IndexRebuildRequired => ["index_rebuild_required"],
             CheckpointHashMismatch => ["checkpoint_hash_mismatch"],
@@ -266,20 +289,15 @@ crate::enum_str! {
             SnapshotCorrupt => ["snapshot_corrupt"],
             ArchiveUnsafe => ["archive_unsafe"],
             JsonlParseError => ["jsonl_parse_error"],
-            NamespaceInvalid => ["namespace_invalid"],
-            NamespaceUnknown => ["namespace_unknown"],
-            NamespacePolicyViolation => ["namespace_policy_violation"],
-            CrossNamespaceDependency => ["cross_namespace_dependency"],
             LockHeld => ["lock_held"],
             LockStale => ["lock_stale"],
             PathSymlinkRejected => ["path_symlink_rejected"],
             PermissionDenied => ["permission_denied"],
-            InternalError => ["internal_error"],
         }
     }
 }
 
-impl ProtocolErrorCode {
+impl SystemErrorCode {
     pub fn parse(code: &str) -> Option<Self> {
         Self::parse_str(code)
     }
@@ -355,6 +373,7 @@ impl CliErrorCode {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
     Protocol(ProtocolErrorCode),
+    System(SystemErrorCode),
     Cli(CliErrorCode),
     Unknown(String),
 }
@@ -363,6 +382,7 @@ impl ErrorCode {
     pub fn as_str(&self) -> &str {
         match self {
             ErrorCode::Protocol(code) => code.as_str(),
+            ErrorCode::System(code) => code.as_str(),
             ErrorCode::Cli(code) => code.as_str(),
             ErrorCode::Unknown(code) => code.as_str(),
         }
@@ -371,6 +391,9 @@ impl ErrorCode {
     pub fn parse(code: &str) -> Self {
         if let Some(protocol) = ProtocolErrorCode::parse(code) {
             return ErrorCode::Protocol(protocol);
+        }
+        if let Some(system) = SystemErrorCode::parse(code) {
+            return ErrorCode::System(system);
         }
         if let Some(cli) = CliErrorCode::parse(code) {
             return ErrorCode::Cli(cli);
@@ -382,6 +405,10 @@ impl ErrorCode {
         matches!(self, ErrorCode::Protocol(_))
     }
 
+    pub fn is_system(&self) -> bool {
+        matches!(self, ErrorCode::System(_))
+    }
+
     pub fn is_cli(&self) -> bool {
         matches!(self, ErrorCode::Cli(_))
     }
@@ -390,6 +417,12 @@ impl ErrorCode {
 impl From<ProtocolErrorCode> for ErrorCode {
     fn from(code: ProtocolErrorCode) -> Self {
         ErrorCode::Protocol(code)
+    }
+}
+
+impl From<SystemErrorCode> for ErrorCode {
+    fn from(code: SystemErrorCode) -> Self {
+        ErrorCode::System(code)
     }
 }
 
@@ -1307,9 +1340,9 @@ mod tests {
 
     #[test]
     fn error_code_serializes_to_string_values() {
-        let protocol = ErrorCode::from(ProtocolErrorCode::WalCorrupt);
+        let system = ErrorCode::from(SystemErrorCode::WalCorrupt);
         let cli = ErrorCode::from(CliErrorCode::InvalidTransition);
-        assert_eq!(serde_json::to_string(&protocol).unwrap(), "\"wal_corrupt\"");
+        assert_eq!(serde_json::to_string(&system).unwrap(), "\"wal_corrupt\"");
         assert_eq!(
             serde_json::to_string(&cli).unwrap(),
             "\"invalid_transition\""
