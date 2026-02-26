@@ -26,6 +26,10 @@ impl<R: Read> FrameReader<R> {
         }
     }
 
+    /// Reads the next record frame.
+    ///
+    /// Returns `Ok(None)` only for clean EOF before any header bytes are read.
+    /// Partial/truncated headers or bodies are treated as corruption errors.
     pub fn read_next(&mut self) -> EventWalResult<Option<UnverifiedRecord>> {
         let mut header = [0u8; FRAME_HEADER_LEN];
         let mut read = 0usize;

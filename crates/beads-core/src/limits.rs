@@ -361,6 +361,10 @@ impl<'a> LimitsPolicy<'a> {
         self.limits.max_wal_record_bytes
     }
 
+    pub fn max_repl_gap_events(&self) -> usize {
+        self.limits.max_repl_gap_events
+    }
+
     pub fn wal_record_payload(
         &self,
         payload_len: usize,

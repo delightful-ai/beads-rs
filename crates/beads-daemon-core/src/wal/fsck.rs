@@ -19,6 +19,8 @@ use crate::wal::{
 };
 
 const QUARANTINE_DIR_NAME: &str = "quarantine";
+const MAX_CHECKPOINT_CURRENT_BYTES: u64 = 1024;
+const MAX_CHECKPOINT_CACHE_JSON_BYTES: u64 = 8 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct FsckOptions {
@@ -454,7 +456,9 @@ fn scan_segment(
                 builder.repairs.push(FsckRepair {
                     kind: FsckRepairKind::TruncateTail,
                     path: Some(segment.path.clone()),
-                    detail: format!("truncated segment tail to offset {offset}"),
+                    detail: format!(
+                        "truncated segment tail to offset {offset}; discarded corrupted suffix"
+                    ),
                 });
             }
             break;
@@ -499,7 +503,9 @@ fn scan_segment(
                     builder.repairs.push(FsckRepair {
                         kind: FsckRepairKind::TruncateTail,
                         path: Some(segment.path.clone()),
-                        detail: format!("truncated segment tail to offset {offset}"),
+                        detail: format!(
+                            "truncated segment tail to offset {offset}; discarded corrupted suffix"
+                        ),
                     });
                 } else {
                     drop(file);
@@ -536,7 +542,9 @@ fn scan_segment(
                 builder.repairs.push(FsckRepair {
                     kind: FsckRepairKind::TruncateTail,
                     path: Some(segment.path.clone()),
-                    detail: format!("truncated segment tail to offset {offset}"),
+                    detail: format!(
+                        "truncated segment tail to offset {offset}; discarded corrupted suffix"
+                    ),
                 });
             }
             break;
@@ -576,7 +584,9 @@ fn scan_segment(
                     builder.repairs.push(FsckRepair {
                         kind: FsckRepairKind::TruncateTail,
                         path: Some(segment.path.clone()),
-                        detail: format!("truncated segment tail to offset {offset}"),
+                        detail: format!(
+                            "truncated segment tail to offset {offset}; discarded corrupted suffix"
+                        ),
                     });
                 } else {
                     drop(file);
@@ -621,7 +631,7 @@ fn scan_segment(
                         builder.repairs.push(FsckRepair {
                             kind: FsckRepairKind::TruncateTail,
                             path: Some(segment.path.clone()),
-                            detail: format!("truncated segment tail to offset {offset}"),
+                            detail: format!("truncated segment tail to offset {offset}; discarded corrupted suffix"),
                         });
                     } else {
                         drop(file);
@@ -668,7 +678,7 @@ fn scan_segment(
                         builder.repairs.push(FsckRepair {
                             kind: FsckRepairKind::TruncateTail,
                             path: Some(segment.path.clone()),
-                            detail: format!("truncated segment tail to offset {offset}"),
+                            detail: format!("truncated segment tail to offset {offset}; discarded corrupted suffix"),
                         });
                     } else {
                         drop(file);
@@ -714,7 +724,7 @@ fn scan_segment(
                         builder.repairs.push(FsckRepair {
                             kind: FsckRepairKind::TruncateTail,
                             path: Some(segment.path.clone()),
-                            detail: format!("truncated segment tail to offset {offset}"),
+                            detail: format!("truncated segment tail to offset {offset}; discarded corrupted suffix"),
                         });
                     } else {
                         drop(file);
@@ -1477,6 +1487,16 @@ fn check_checkpoint_cache(store_dir: &Path, builder: &mut FsckReportBuilder) {
                 continue;
             }
         };
+        if file_type.is_symlink() {
+            record_checkpoint_cache_issue(
+                builder,
+                FsckStatus::Fail,
+                FsckSeverity::Medium,
+                Some(group_path.clone()),
+                "checkpoint cache group entry must not be a symlink".to_string(),
+            );
+            continue;
+        }
         if !file_type.is_dir() {
             continue;
         }
@@ -1504,7 +1524,21 @@ fn check_checkpoint_cache(store_dir: &Path, builder: &mut FsckReportBuilder) {
             continue;
         }
 
-        let current_raw = match fs::read_to_string(&current_path) {
+        let current_bytes =
+            match read_regular_file_bounded(&current_path, MAX_CHECKPOINT_CURRENT_BYTES) {
+                Ok(bytes) => bytes,
+                Err(reason) => {
+                    record_checkpoint_cache_issue(
+                        builder,
+                        FsckStatus::Fail,
+                        FsckSeverity::Medium,
+                        Some(current_path.clone()),
+                        reason,
+                    );
+                    continue;
+                }
+            };
+        let current_raw = match std::str::from_utf8(&current_bytes) {
             Ok(raw) => raw,
             Err(err) => {
                 record_checkpoint_cache_issue(
@@ -1512,7 +1546,7 @@ fn check_checkpoint_cache(store_dir: &Path, builder: &mut FsckReportBuilder) {
                     FsckStatus::Fail,
                     FsckSeverity::Medium,
                     Some(current_path.clone()),
-                    format!("failed to read checkpoint CURRENT pointer: {err}"),
+                    format!("checkpoint CURRENT pointer is not valid UTF-8: {err}"),
                 );
                 continue;
             }
@@ -1568,15 +1602,15 @@ fn check_checkpoint_cache(store_dir: &Path, builder: &mut FsckReportBuilder) {
 
         for file_name in ["meta.json", "manifest.json"] {
             let path = checkpoint_dir.join(file_name);
-            let bytes = match fs::read(&path) {
+            let bytes = match read_regular_file_bounded(&path, MAX_CHECKPOINT_CACHE_JSON_BYTES) {
                 Ok(bytes) => bytes,
-                Err(err) => {
+                Err(reason) => {
                     record_checkpoint_cache_issue(
                         builder,
                         FsckStatus::Fail,
                         FsckSeverity::Medium,
                         Some(path.clone()),
-                        format!("checkpoint cache file missing or unreadable: {err}"),
+                        reason,
                     );
                     continue;
                 }
@@ -1593,6 +1627,25 @@ fn check_checkpoint_cache(store_dir: &Path, builder: &mut FsckReportBuilder) {
             }
         }
     }
+}
+
+fn read_regular_file_bounded(path: &Path, max_bytes: u64) -> Result<Vec<u8>, String> {
+    let meta = fs::symlink_metadata(path)
+        .map_err(|err| format!("checkpoint cache file missing or unreadable: {err}"))?;
+    if meta.file_type().is_symlink() {
+        return Err("checkpoint cache file must not be a symlink".to_string());
+    }
+    if !meta.is_file() {
+        return Err("checkpoint cache file must be a regular file".to_string());
+    }
+    if meta.len() > max_bytes {
+        return Err(format!(
+            "checkpoint cache file exceeds max size ({})",
+            max_bytes
+        ));
+    }
+
+    fs::read(path).map_err(|err| format!("checkpoint cache file missing or unreadable: {err}"))
 }
 
 fn record_checkpoint_cache_issue(

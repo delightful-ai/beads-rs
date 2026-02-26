@@ -111,6 +111,34 @@ fn fsck_repair_truncates_mid_file_corruption_to_preserve_prefix() {
 }
 
 #[test]
+fn fsck_reports_invalid_checkpoint_cache_files() {
+    let temp = TempWalDir::new();
+    let cache_group = temp.store_dir().join("checkpoint_cache").join("core");
+    fs::create_dir_all(&cache_group).expect("create checkpoint cache group");
+    fs::write(cache_group.join("CURRENT"), "a".repeat(2048)).expect("write oversized current");
+
+    let report = fsck_store_dir(
+        temp.store_dir(),
+        temp.meta(),
+        FsckOptions::new(false, Limits::default()),
+    )
+    .expect("fsck store dir");
+
+    let checkpoint_check = report
+        .checks
+        .iter()
+        .find(|check| check.id == FsckCheckId::CheckpointCache)
+        .expect("checkpoint cache check");
+    assert_eq!(checkpoint_check.status, FsckStatus::Fail);
+    assert!(
+        checkpoint_check
+            .evidence
+            .iter()
+            .any(|e| e.code == FsckEvidenceCode::CheckpointCacheInvalid)
+    );
+}
+
+#[test]
 fn fsck_reports_header_mismatch() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();

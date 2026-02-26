@@ -362,7 +362,7 @@ fn replay_index(
     let wal_dir = store_dir.join("wal");
     let max_record_bytes = limits.policy().max_wal_record_bytes();
 
-    let mut tracker = ReplayTracker::new();
+    let mut tracker = ReplayTracker::new(limits.policy().max_repl_gap_events().max(1));
     if mode == ReplayMode::CatchUp {
         let rows = index.reader().load_watermarks()?;
         tracker.seed_from_watermarks(rows)?;
@@ -1355,6 +1355,7 @@ mod tests {
                 Seq1::from_u64(2).expect("seq2"),
                 sha2,
                 Some(sha1),
+                8,
             )
             .expect("record buffered until gap fills");
         assert_eq!(state.contiguous_seq, Seq0::ZERO);
@@ -1370,12 +1371,53 @@ mod tests {
                 Seq1::from_u64(1).expect("seq1"),
                 sha1,
                 None,
+                8,
             )
             .expect("gap filled");
 
         assert_eq!(state.contiguous_seq.get(), 2);
         assert_eq!(state.head_sha, Some(sha2));
         assert!(state.first_pending_seq().is_none());
+    }
+
+    #[test]
+    fn origin_replay_state_rejects_unbounded_pending_gap_buffers() {
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([25u8; 16]));
+        let mut state = OriginReplayState::default();
+
+        state
+            .observe(
+                &namespace,
+                origin,
+                Seq1::from_u64(3).expect("seq3"),
+                [3u8; 32],
+                Some([2u8; 32]),
+                2,
+            )
+            .expect("first pending seq");
+        state
+            .observe(
+                &namespace,
+                origin,
+                Seq1::from_u64(4).expect("seq4"),
+                [4u8; 32],
+                Some([3u8; 32]),
+                2,
+            )
+            .expect("second pending seq");
+
+        let err = state
+            .observe(
+                &namespace,
+                origin,
+                Seq1::from_u64(5).expect("seq5"),
+                [5u8; 32],
+                Some([4u8; 32]),
+                2,
+            )
+            .expect_err("pending gap buffer should cap");
+        assert!(matches!(err, WalReplayError::NonContiguousSeq { .. }));
     }
 
     #[test]
@@ -1394,6 +1436,7 @@ mod tests {
                 Seq1::from_u64(2).expect("seq2"),
                 sha2,
                 Some(wrong_prev),
+                8,
             )
             .expect("record buffered");
 
@@ -1404,6 +1447,7 @@ mod tests {
                 Seq1::from_u64(1).expect("seq1"),
                 sha1,
                 None,
+                8,
             )
             .expect_err("expected prev_sha mismatch");
         assert!(matches!(err, WalReplayError::PrevShaMismatch { .. }));
@@ -1448,11 +1492,15 @@ mod tests {
 #[derive(Default)]
 struct ReplayTracker {
     origins: BTreeMap<NamespaceId, BTreeMap<ReplicaId, OriginReplayState>>,
+    max_pending_per_origin: usize,
 }
 
 impl ReplayTracker {
-    fn new() -> Self {
-        Self::default()
+    fn new(max_pending_per_origin: usize) -> Self {
+        Self {
+            origins: BTreeMap::new(),
+            max_pending_per_origin,
+        }
     }
 
     fn seed_from_watermarks(&mut self, rows: Vec<WatermarkRow>) -> Result<(), WalReplayError> {
@@ -1492,7 +1540,14 @@ impl ReplayTracker {
             .or_default()
             .entry(origin)
             .or_default();
-        entry.observe(namespace, origin, seq, sha, prev_sha)
+        entry.observe(
+            namespace,
+            origin,
+            seq,
+            sha,
+            prev_sha,
+            self.max_pending_per_origin,
+        )
     }
 }
 
@@ -1535,12 +1590,22 @@ impl OriginReplayState {
         seq: Seq1,
         sha: [u8; 32],
         prev_sha: Option<[u8; 32]>,
+        max_pending_per_origin: usize,
     ) -> Result<(), WalReplayError> {
         self.max_seq = Seq0::new(self.max_seq.get().max(seq.get()));
         self.touched = true;
 
         let expected = self.contiguous_seq.next();
         if seq.get() <= self.contiguous_seq.get() {
+            return Err(WalReplayError::NonContiguousSeq {
+                namespace: namespace.clone(),
+                origin,
+                expected,
+                got: Seq0::new(seq.get()),
+            });
+        }
+
+        if self.pending.len() >= max_pending_per_origin {
             return Err(WalReplayError::NonContiguousSeq {
                 namespace: namespace.clone(),
                 origin,

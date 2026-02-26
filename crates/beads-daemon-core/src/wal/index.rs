@@ -399,7 +399,7 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                     origin: eid.origin_replica_id,
                     seq: eid.origin_seq.get(),
                     reason: format!(
-                        "duplicate event id with mismatched fields: {}",
+                        "duplicate event id with mismatched fields: {}; run `bd store fsck --repair` and rebuild wal index",
                         mismatches.join(", ")
                     ),
                 });
