@@ -132,12 +132,13 @@ impl GitLaneState {
     }
 
     /// Create a new GitLaneState with root slug and initial clone path.
+    ///
+    /// This only seeds path metadata; callers must explicitly call
+    /// `mark_loaded_from_git()` after a successful git load/refresh.
     pub fn with_path(root_slug: Option<BeadSlug>, path: PathBuf) -> Self {
         let mut s = Self::new();
         s.root_slug = root_slug;
         s.known_paths.insert(path);
-        s.last_refresh = Some(Instant::now());
-        s.loaded_from_git = true;
         s
     }
 
@@ -240,6 +241,15 @@ mod tests {
         assert!(!state.refresh_in_progress);
         assert!(!state.loaded_from_git);
         assert_eq!(state.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn with_path_starts_unloaded_until_git_load_succeeds() {
+        let path = PathBuf::from("/tmp/repo");
+        let state = GitLaneState::with_path(None, path.clone());
+        assert!(state.known_paths.contains(&path));
+        assert!(!state.is_loaded_from_git());
+        assert!(state.last_refresh.is_none());
     }
 
     #[test]

@@ -552,6 +552,8 @@ mod tests {
             .remote_to_store
             .insert(remote.clone(), resolution);
 
+        daemon.scheduler.schedule(remote.clone());
+
         let (git_tx, git_rx) = crossbeam::channel::bounded(2);
         let worker = std::thread::spawn(move || {
             match git_rx.recv().expect("load-local op") {
@@ -577,6 +579,7 @@ mod tests {
         assert!(!daemon.stores.contains_key(&store_id));
         assert!(!daemon.git_lanes.contains_key(&store_id));
         assert!(daemon.export_pending.get(&store_id).is_none());
+        assert!(!daemon.scheduler.is_pending(&remote));
         assert!(
             daemon
                 .checkpoint_scheduler

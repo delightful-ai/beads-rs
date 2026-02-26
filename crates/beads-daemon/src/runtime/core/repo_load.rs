@@ -250,6 +250,7 @@ impl Daemon {
             .and_then(|stamp| detect_clock_skew(now_wall_ms, stamp.wall_ms));
 
         let mut repo_state = GitLaneState::with_path(root_slug, repo.to_owned());
+        repo_state.mark_loaded_from_git();
         repo_state.last_seen_stamp = last_seen_stamp;
         repo_state.last_clock_skew = clock_skew;
         repo_state.last_fetch_error = loaded.fetch_error.map(|message| FetchErrorRecord {
@@ -294,6 +295,8 @@ impl Daemon {
     }
 
     fn rollback_failed_initial_load(&mut self, store_id: StoreId) {
+        // Keep store-caches warm to avoid repeating remote/store-id discovery work
+        // on immediate retry; only runtime state/schedulers are rolled back.
         self.drop_store_state(store_id);
         self.export_pending.remove(&store_id);
         self.checkpoint_scheduler.drop_store(store_id);
