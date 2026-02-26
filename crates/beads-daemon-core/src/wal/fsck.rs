@@ -385,6 +385,7 @@ pub fn fsck_store_dir(
         &segments_by_id,
         &mut builder,
     );
+    check_checkpoint_cache(store_dir, &mut builder);
 
     Ok(builder.finish())
 }
@@ -472,6 +473,7 @@ fn scan_segment(
 
         let frame_len = FRAME_HEADER_LEN as u64 + length as u64;
         if magic != FRAME_MAGIC || length == 0 || length as usize > max_record_bytes {
+            let can_truncate = offset > segment.header_len;
             builder.record_issue(
                 FsckCheckId::SegmentFrames,
                 FsckStatus::Fail,
@@ -485,17 +487,30 @@ fn scan_segment(
                     seq: None,
                     offset: Some(offset),
                 },
-                Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+                Some(if can_truncate {
+                    "run `bd store fsck --repair` to truncate corrupted suffix"
+                } else {
+                    "run `bd store fsck --repair` to quarantine corrupted segments"
+                }),
             );
             if repair {
-                drop(file);
-                let quarantined_path = quarantine_segment(&segment.path)?;
-                builder.repairs.push(FsckRepair {
-                    kind: FsckRepairKind::QuarantineSegment,
-                    path: Some(quarantined_path),
-                    detail: "quarantined segment with invalid frame header".to_string(),
-                });
-                quarantined = true;
+                if can_truncate {
+                    truncate_tail(&mut file, &segment.path, offset)?;
+                    builder.repairs.push(FsckRepair {
+                        kind: FsckRepairKind::TruncateTail,
+                        path: Some(segment.path.clone()),
+                        detail: format!("truncated segment tail to offset {offset}"),
+                    });
+                } else {
+                    drop(file);
+                    let quarantined_path = quarantine_segment(&segment.path)?;
+                    builder.repairs.push(FsckRepair {
+                        kind: FsckRepairKind::QuarantineSegment,
+                        path: Some(quarantined_path),
+                        detail: "quarantined segment with invalid frame header".to_string(),
+                    });
+                    quarantined = true;
+                }
             }
             break;
         }
@@ -535,7 +550,7 @@ fn scan_segment(
 
         let actual_crc = crc32c::crc32c(&body);
         if actual_crc != expected_crc {
-            let is_tail = offset.saturating_add(frame_len) == segment.file_len;
+            let can_truncate = offset > segment.header_len;
             builder.record_issue(
                 FsckCheckId::SegmentFrames,
                 FsckStatus::Fail,
@@ -549,14 +564,14 @@ fn scan_segment(
                     seq: None,
                     offset: Some(offset),
                 },
-                Some(if is_tail {
-                    "run `bd store fsck --repair` to truncate tail corruption"
+                Some(if can_truncate {
+                    "run `bd store fsck --repair` to truncate corrupted suffix"
                 } else {
                     "run `bd store fsck --repair` to quarantine corrupted segments"
                 }),
             );
             if repair {
-                if is_tail {
+                if can_truncate {
                     truncate_tail(&mut file, &segment.path, offset)?;
                     builder.repairs.push(FsckRepair {
                         kind: FsckRepairKind::TruncateTail,
@@ -569,7 +584,7 @@ fn scan_segment(
                     builder.repairs.push(FsckRepair {
                         kind: FsckRepairKind::QuarantineSegment,
                         path: Some(quarantined_path),
-                        detail: "quarantined segment with mid-file CRC mismatch".to_string(),
+                        detail: "quarantined segment with corrupted first frame".to_string(),
                     });
                     quarantined = true;
                 }
@@ -580,6 +595,7 @@ fn scan_segment(
         let record = match UnverifiedRecord::decode_body(&body) {
             Ok(record) => record,
             Err(err) => {
+                let can_truncate = offset > segment.header_len;
                 builder.record_issue(
                     FsckCheckId::SegmentFrames,
                     FsckStatus::Fail,
@@ -593,17 +609,30 @@ fn scan_segment(
                         seq: None,
                         offset: Some(offset),
                     },
-                    Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+                    Some(if can_truncate {
+                        "run `bd store fsck --repair` to truncate corrupted suffix"
+                    } else {
+                        "run `bd store fsck --repair` to quarantine corrupted segments"
+                    }),
                 );
                 if repair {
-                    drop(file);
-                    let quarantined_path = quarantine_segment(&segment.path)?;
-                    builder.repairs.push(FsckRepair {
-                        kind: FsckRepairKind::QuarantineSegment,
-                        path: Some(quarantined_path),
-                        detail: "quarantined segment with undecodable record".to_string(),
-                    });
-                    quarantined = true;
+                    if can_truncate {
+                        truncate_tail(&mut file, &segment.path, offset)?;
+                        builder.repairs.push(FsckRepair {
+                            kind: FsckRepairKind::TruncateTail,
+                            path: Some(segment.path.clone()),
+                            detail: format!("truncated segment tail to offset {offset}"),
+                        });
+                    } else {
+                        drop(file);
+                        let quarantined_path = quarantine_segment(&segment.path)?;
+                        builder.repairs.push(FsckRepair {
+                            kind: FsckRepairKind::QuarantineSegment,
+                            path: Some(quarantined_path),
+                            detail: "quarantined segment with undecodable record".to_string(),
+                        });
+                        quarantined = true;
+                    }
                 }
                 break;
             }
@@ -613,6 +642,7 @@ fn scan_segment(
         let (_, event_body) = match decode_event_body(record.payload_bytes(), limits) {
             Ok(decoded) => decoded,
             Err(err) => {
+                let can_truncate = offset > segment.header_len;
                 builder.record_issue(
                     FsckCheckId::SegmentFrames,
                     FsckStatus::Fail,
@@ -626,17 +656,30 @@ fn scan_segment(
                         seq: Some(header.origin_seq.get()),
                         offset: Some(offset),
                     },
-                    Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+                    Some(if can_truncate {
+                        "run `bd store fsck --repair` to truncate corrupted suffix"
+                    } else {
+                        "run `bd store fsck --repair` to quarantine corrupted segments"
+                    }),
                 );
                 if repair {
-                    drop(file);
-                    let quarantined_path = quarantine_segment(&segment.path)?;
-                    builder.repairs.push(FsckRepair {
-                        kind: FsckRepairKind::QuarantineSegment,
-                        path: Some(quarantined_path),
-                        detail: "quarantined segment with undecodable event body".to_string(),
-                    });
-                    quarantined = true;
+                    if can_truncate {
+                        truncate_tail(&mut file, &segment.path, offset)?;
+                        builder.repairs.push(FsckRepair {
+                            kind: FsckRepairKind::TruncateTail,
+                            path: Some(segment.path.clone()),
+                            detail: format!("truncated segment tail to offset {offset}"),
+                        });
+                    } else {
+                        drop(file);
+                        let quarantined_path = quarantine_segment(&segment.path)?;
+                        builder.repairs.push(FsckRepair {
+                            kind: FsckRepairKind::QuarantineSegment,
+                            path: Some(quarantined_path),
+                            detail: "quarantined segment with undecodable event body".to_string(),
+                        });
+                        quarantined = true;
+                    }
                 }
                 break;
             }
@@ -645,6 +688,7 @@ fn scan_segment(
         match verify {
             Ok(_) => {}
             Err(RecordVerifyError::HeaderMismatch(err)) => {
+                let can_truncate = offset > segment.header_len;
                 builder.record_issue(
                     FsckCheckId::RecordHashes,
                     FsckStatus::Fail,
@@ -658,17 +702,30 @@ fn scan_segment(
                         seq: Some(header.origin_seq.get()),
                         offset: Some(offset),
                     },
-                    Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+                    Some(if can_truncate {
+                        "run `bd store fsck --repair` to truncate corrupted suffix"
+                    } else {
+                        "run `bd store fsck --repair` to quarantine corrupted segments"
+                    }),
                 );
                 if repair {
-                    drop(file);
-                    let quarantined_path = quarantine_segment(&segment.path)?;
-                    builder.repairs.push(FsckRepair {
-                        kind: FsckRepairKind::QuarantineSegment,
-                        path: Some(quarantined_path),
-                        detail: "quarantined segment with header/body mismatch".to_string(),
-                    });
-                    quarantined = true;
+                    if can_truncate {
+                        truncate_tail(&mut file, &segment.path, offset)?;
+                        builder.repairs.push(FsckRepair {
+                            kind: FsckRepairKind::TruncateTail,
+                            path: Some(segment.path.clone()),
+                            detail: format!("truncated segment tail to offset {offset}"),
+                        });
+                    } else {
+                        drop(file);
+                        let quarantined_path = quarantine_segment(&segment.path)?;
+                        builder.repairs.push(FsckRepair {
+                            kind: FsckRepairKind::QuarantineSegment,
+                            path: Some(quarantined_path),
+                            detail: "quarantined segment with header/body mismatch".to_string(),
+                        });
+                        quarantined = true;
+                    }
                 }
                 break;
             }
@@ -1337,6 +1394,229 @@ fn check_index_offsets(
             );
         }
     }
+}
+
+fn check_checkpoint_cache(store_dir: &Path, builder: &mut FsckReportBuilder) {
+    let cache_root = store_dir.join("checkpoint_cache");
+    match fs::symlink_metadata(&cache_root) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                record_checkpoint_cache_issue(
+                    builder,
+                    FsckStatus::Fail,
+                    FsckSeverity::Medium,
+                    Some(cache_root.clone()),
+                    "checkpoint cache root is a symlink".to_string(),
+                );
+                return;
+            }
+            if !meta.is_dir() {
+                record_checkpoint_cache_issue(
+                    builder,
+                    FsckStatus::Fail,
+                    FsckSeverity::Medium,
+                    Some(cache_root.clone()),
+                    "checkpoint cache root exists but is not a directory".to_string(),
+                );
+                return;
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return,
+        Err(err) => {
+            record_checkpoint_cache_issue(
+                builder,
+                FsckStatus::Fail,
+                FsckSeverity::Medium,
+                Some(cache_root.clone()),
+                format!("failed to read checkpoint cache root: {err}"),
+            );
+            return;
+        }
+    }
+
+    let groups = match fs::read_dir(&cache_root) {
+        Ok(groups) => groups,
+        Err(err) => {
+            record_checkpoint_cache_issue(
+                builder,
+                FsckStatus::Fail,
+                FsckSeverity::Medium,
+                Some(cache_root.clone()),
+                format!("failed to list checkpoint cache groups: {err}"),
+            );
+            return;
+        }
+    };
+
+    for entry in groups {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => {
+                record_checkpoint_cache_issue(
+                    builder,
+                    FsckStatus::Fail,
+                    FsckSeverity::Medium,
+                    Some(cache_root.clone()),
+                    format!("failed to read checkpoint cache group entry: {err}"),
+                );
+                continue;
+            }
+        };
+
+        let group_path = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(err) => {
+                record_checkpoint_cache_issue(
+                    builder,
+                    FsckStatus::Fail,
+                    FsckSeverity::Medium,
+                    Some(group_path.clone()),
+                    format!("failed to stat checkpoint cache group entry: {err}"),
+                );
+                continue;
+            }
+        };
+        if !file_type.is_dir() {
+            continue;
+        }
+
+        if let Err(err) = reject_symlink(&group_path) {
+            record_checkpoint_cache_issue(
+                builder,
+                FsckStatus::Fail,
+                FsckSeverity::Medium,
+                Some(group_path.clone()),
+                format!("checkpoint cache group path invalid: {err}"),
+            );
+            continue;
+        }
+
+        let current_path = group_path.join("CURRENT");
+        if !current_path.exists() {
+            record_checkpoint_cache_issue(
+                builder,
+                FsckStatus::Warn,
+                FsckSeverity::Low,
+                Some(current_path),
+                "checkpoint cache group missing CURRENT pointer".to_string(),
+            );
+            continue;
+        }
+
+        let current_raw = match fs::read_to_string(&current_path) {
+            Ok(raw) => raw,
+            Err(err) => {
+                record_checkpoint_cache_issue(
+                    builder,
+                    FsckStatus::Fail,
+                    FsckSeverity::Medium,
+                    Some(current_path.clone()),
+                    format!("failed to read checkpoint CURRENT pointer: {err}"),
+                );
+                continue;
+            }
+        };
+
+        let checkpoint_id = current_raw.trim();
+        if checkpoint_id.len() != 64 || checkpoint_id.chars().any(|ch| !ch.is_ascii_hexdigit()) {
+            record_checkpoint_cache_issue(
+                builder,
+                FsckStatus::Fail,
+                FsckSeverity::Medium,
+                Some(current_path.clone()),
+                "checkpoint CURRENT pointer is not a valid 64-char hex digest".to_string(),
+            );
+            continue;
+        }
+
+        let checkpoint_dir = group_path.join(checkpoint_id);
+        match fs::symlink_metadata(&checkpoint_dir) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    record_checkpoint_cache_issue(
+                        builder,
+                        FsckStatus::Fail,
+                        FsckSeverity::Medium,
+                        Some(checkpoint_dir.clone()),
+                        "checkpoint cache entry is a symlink".to_string(),
+                    );
+                    continue;
+                }
+                if !meta.is_dir() {
+                    record_checkpoint_cache_issue(
+                        builder,
+                        FsckStatus::Fail,
+                        FsckSeverity::Medium,
+                        Some(checkpoint_dir.clone()),
+                        "checkpoint cache entry is not a directory".to_string(),
+                    );
+                    continue;
+                }
+            }
+            Err(err) => {
+                record_checkpoint_cache_issue(
+                    builder,
+                    FsckStatus::Fail,
+                    FsckSeverity::Medium,
+                    Some(checkpoint_dir.clone()),
+                    format!("checkpoint cache entry missing: {err}"),
+                );
+                continue;
+            }
+        }
+
+        for file_name in ["meta.json", "manifest.json"] {
+            let path = checkpoint_dir.join(file_name);
+            let bytes = match fs::read(&path) {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    record_checkpoint_cache_issue(
+                        builder,
+                        FsckStatus::Fail,
+                        FsckSeverity::Medium,
+                        Some(path.clone()),
+                        format!("checkpoint cache file missing or unreadable: {err}"),
+                    );
+                    continue;
+                }
+            };
+
+            if let Err(err) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+                record_checkpoint_cache_issue(
+                    builder,
+                    FsckStatus::Fail,
+                    FsckSeverity::Medium,
+                    Some(path.clone()),
+                    format!("checkpoint cache file is not valid JSON: {err}"),
+                );
+            }
+        }
+    }
+}
+
+fn record_checkpoint_cache_issue(
+    builder: &mut FsckReportBuilder,
+    status: FsckStatus,
+    severity: FsckSeverity,
+    path: Option<PathBuf>,
+    message: String,
+) {
+    builder.record_issue(
+        FsckCheckId::CheckpointCache,
+        status,
+        severity,
+        FsckEvidence {
+            code: FsckEvidenceCode::CheckpointCacheInvalid,
+            message,
+            path,
+            namespace: None,
+            origin: None,
+            seq: None,
+            offset: None,
+        },
+        Some("delete or repair invalid checkpoint cache entry and re-run fsck"),
+    );
 }
 
 fn truncate_tail(file: &mut std::fs::File, path: &Path, len: u64) -> Result<(), FsckError> {

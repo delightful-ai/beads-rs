@@ -72,7 +72,7 @@ fn fsck_repair_truncates_tail() {
 }
 
 #[test]
-fn fsck_repair_quarantines_mid_file_corruption() {
+fn fsck_repair_truncates_mid_file_corruption_to_preserve_prefix() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
@@ -81,7 +81,7 @@ fn fsck_repair_quarantines_mid_file_corruption() {
         .write_segment(&namespace, 1_700_000_000_000, &records)
         .expect("write segment");
 
-    corrupt_frame_body(&segment, 0).expect("corrupt frame");
+    corrupt_frame_body(&segment, 1).expect("corrupt frame");
 
     let report = fsck_store_dir(
         temp.store_dir(),
@@ -91,14 +91,16 @@ fn fsck_repair_quarantines_mid_file_corruption() {
     .expect("fsck store dir");
 
     assert!(!report.summary.safe_to_accept_writes);
-    let quarantine = report
-        .repairs
-        .iter()
-        .find(|repair| repair.kind == FsckRepairKind::QuarantineSegment)
-        .expect("quarantine repair");
-    let new_path = quarantine.path.as_ref().expect("quarantine path");
-    assert!(!segment.path.exists());
-    assert!(new_path.exists());
+    assert!(
+        report
+            .repairs
+            .iter()
+            .any(|repair| repair.kind == FsckRepairKind::TruncateTail)
+    );
+    assert!(segment.path.exists());
+
+    let meta = fs::metadata(&segment.path).expect("segment metadata");
+    assert_eq!(meta.len(), segment.frame_offset(1));
 
     let frames_check = report
         .checks
