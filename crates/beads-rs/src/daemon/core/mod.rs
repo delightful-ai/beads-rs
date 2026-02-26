@@ -86,8 +86,9 @@ use crate::core::{
     ActorId, Applied, ApplyError, CanonicalState, CliErrorCode, ClientRequestId, ContentHash,
     DurabilityClass, EventId, EventKindV1, HeadStatus, Limits, NamespaceId, NamespacePolicy,
     ProtocolErrorCode, ReplicaId, SegmentId, Seq0, Seq1, Sha256, StoreId, StoreIdentity,
-    StoreState, TraceId, ValidatedEventBody, WallClock, Watermark, WatermarkError, Watermarks,
-    WriteStamp, apply_event, decode_event_body, encode_event_body_canonical, hash_event_body,
+    StoreState, SystemErrorCode, TraceId, ValidatedEventBody, WallClock, Watermark, WatermarkError,
+    Watermarks, WriteStamp, apply_event, decode_event_body, encode_event_body_canonical,
+    hash_event_body,
 };
 use crate::git::SyncError;
 use crate::git::checkpoint::{

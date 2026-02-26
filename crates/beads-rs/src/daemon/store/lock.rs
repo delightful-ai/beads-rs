@@ -9,7 +9,8 @@ use thiserror::Error;
 
 use crate::core::error::details as error_details;
 use crate::core::{
-    ErrorCode, ErrorPayload, IntoErrorPayload, ProtocolErrorCode, ReplicaId, StoreId, Transience,
+    ErrorCode, ErrorPayload, IntoErrorPayload, ProtocolErrorCode, ReplicaId, StoreId,
+    SystemErrorCode, Transience,
 };
 use crate::paths;
 
@@ -283,12 +284,12 @@ pub enum StoreLockError {
 impl StoreLockError {
     pub fn code(&self) -> ErrorCode {
         match self {
-            StoreLockError::Held { .. } => ProtocolErrorCode::LockHeld.into(),
-            StoreLockError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
+            StoreLockError::Held { .. } => SystemErrorCode::LockHeld.into(),
+            StoreLockError::Symlink { .. } => SystemErrorCode::PathSymlinkRejected.into(),
             StoreLockError::MetadataCorrupt { .. } => ProtocolErrorCode::Corruption.into(),
             StoreLockError::Io { source, .. } => {
                 if source.kind() == io::ErrorKind::PermissionDenied {
-                    ProtocolErrorCode::PermissionDenied.into()
+                    SystemErrorCode::PermissionDenied.into()
                 } else {
                     ProtocolErrorCode::InternalError.into()
                 }
@@ -329,7 +330,7 @@ impl IntoErrorPayload for StoreLockError {
                         )
                     })
                     .unwrap_or((None, None, None, None));
-                ErrorPayload::new(ProtocolErrorCode::LockHeld.into(), message, retryable)
+                ErrorPayload::new(SystemErrorCode::LockHeld.into(), message, retryable)
                     .with_details(error_details::LockHeldDetails {
                         store_id,
                         holder_pid,
@@ -339,7 +340,7 @@ impl IntoErrorPayload for StoreLockError {
                     })
             }
             StoreLockError::Symlink { path } => ErrorPayload::new(
-                ProtocolErrorCode::PathSymlinkRejected.into(),
+                SystemErrorCode::PathSymlinkRejected.into(),
                 message,
                 retryable,
             )
@@ -358,7 +359,7 @@ impl IntoErrorPayload for StoreLockError {
                 source,
             } => match source.kind() {
                 io::ErrorKind::PermissionDenied => ErrorPayload::new(
-                    ProtocolErrorCode::PermissionDenied.into(),
+                    SystemErrorCode::PermissionDenied.into(),
                     message,
                     retryable,
                 )

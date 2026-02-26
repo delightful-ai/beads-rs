@@ -9,7 +9,7 @@ use crate::core::error::details as error_details;
 use crate::core::{
     ActorId, Applied, CliErrorCode, ClientRequestId, Durable, ErrorCode, ErrorPayload, EventId,
     HeadStatus, IntoErrorPayload, NamespaceId, ProtocolErrorCode, ReplicaId, SegmentId, Seq0, Seq1,
-    StoreId, Transience, TxnId, Watermark,
+    StoreId, SystemErrorCode, Transience, TxnId, Watermark,
 };
 pub use crate::core::{ReplicaDurabilityRole, ReplicaDurabilityRoleError};
 
@@ -102,17 +102,17 @@ impl WalIndexError {
     pub fn code(&self) -> ErrorCode {
         match self {
             WalIndexError::SchemaVersionMismatch { .. } => {
-                ProtocolErrorCode::IndexRebuildRequired.into()
+                SystemErrorCode::IndexRebuildRequired.into()
             }
             WalIndexError::Equivocation { .. } => ProtocolErrorCode::Equivocation.into(),
             WalIndexError::ClientRequestIdReuseMismatch { .. } => {
                 ProtocolErrorCode::ClientRequestIdReuseMismatch.into()
             }
-            WalIndexError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
+            WalIndexError::Symlink { .. } => SystemErrorCode::PathSymlinkRejected.into(),
             WalIndexError::MetaMismatch { key, .. } => match *key {
                 "store_id" => ProtocolErrorCode::WrongStore.into(),
                 "store_epoch" => ProtocolErrorCode::StoreEpochMismatch.into(),
-                _ => ProtocolErrorCode::IndexCorrupt.into(),
+                _ => SystemErrorCode::IndexCorrupt.into(),
             },
             WalIndexError::MetaMissing { .. }
             | WalIndexError::EventIdDecode(_)
@@ -124,8 +124,8 @@ impl WalIndexError {
             | WalIndexError::CborDecode(_)
             | WalIndexError::CborEncode(_)
             | WalIndexError::ConcurrentWrite { .. }
-            | WalIndexError::OriginSeqOverflow { .. } => ProtocolErrorCode::IndexCorrupt.into(),
-            WalIndexError::Sql { .. } => ProtocolErrorCode::IndexCorrupt.into(),
+            | WalIndexError::OriginSeqOverflow { .. } => SystemErrorCode::IndexCorrupt.into(),
+            WalIndexError::Sql { .. } => SystemErrorCode::IndexCorrupt.into(),
             WalIndexError::Io { .. } => CliErrorCode::IoError.into(),
         }
     }
@@ -150,7 +150,7 @@ impl WalIndexError {
         let code = self.code();
         match self {
             WalIndexError::Symlink { path } => ErrorPayload::new(
-                ProtocolErrorCode::PathSymlinkRejected.into(),
+                SystemErrorCode::PathSymlinkRejected.into(),
                 message,
                 retryable,
             )
@@ -158,7 +158,7 @@ impl WalIndexError {
                 path: path.display().to_string(),
             }),
             WalIndexError::SchemaVersionMismatch { expected, got } => ErrorPayload::new(
-                ProtocolErrorCode::IndexRebuildRequired.into(),
+                SystemErrorCode::IndexRebuildRequired.into(),
                 message,
                 retryable,
             )
@@ -215,7 +215,7 @@ impl WalIndexError {
                         })
                 } else {
                     let reason = message.clone();
-                    ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
+                    ErrorPayload::new(SystemErrorCode::IndexCorrupt.into(), message, retryable)
                         .with_details(error_details::IndexCorruptDetails { reason })
                 }
             }
@@ -240,7 +240,7 @@ impl WalIndexError {
                     })
                 } else {
                     let reason = message.clone();
-                    ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
+                    ErrorPayload::new(SystemErrorCode::IndexCorrupt.into(), message, retryable)
                         .with_details(error_details::IndexCorruptDetails { reason })
                 }
             }
@@ -257,7 +257,7 @@ impl WalIndexError {
             | WalIndexError::ConcurrentWrite { .. }
             | WalIndexError::OriginSeqOverflow { .. }
             | WalIndexError::Sql { .. } => ErrorPayload::new(
-                ProtocolErrorCode::IndexCorrupt.into(),
+                SystemErrorCode::IndexCorrupt.into(),
                 message.clone(),
                 retryable,
             )

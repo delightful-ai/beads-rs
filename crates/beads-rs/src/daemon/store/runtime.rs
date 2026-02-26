@@ -18,8 +18,8 @@ use crate::core::{
     ActorId, Applied, ApplyOutcome, CliErrorCode, ContentHash, Durable, ErrorCode, ErrorPayload,
     HeadStatus, IntoErrorPayload, Limits, NamespaceId, NamespacePolicies, NamespacePolicy,
     ProtocolErrorCode, ReplicaId, ReplicaRoster, ReplicaRosterError, SegmentId, StoreEpoch,
-    StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, StoreState, Transience, WatermarkError,
-    Watermarks, WriteStamp,
+    StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, StoreState, SystemErrorCode, Transience,
+    WatermarkError, Watermarks, WriteStamp,
 };
 use crate::daemon::repl::PeerAckTable;
 use crate::daemon::store::lock::{StoreLock, StoreLockError};
@@ -162,7 +162,7 @@ impl StoreRuntime {
         let mut last_wal_tail_truncated = None;
         for truncation in &replay_stats.tail_truncations {
             let payload = ErrorPayload::new(
-                ProtocolErrorCode::WalTailTruncated.into(),
+                SystemErrorCode::WalTailTruncated.into(),
                 "wal tail truncated",
                 true,
             )
@@ -624,11 +624,11 @@ impl StoreRuntimeError {
     pub fn code(&self) -> ErrorCode {
         match self {
             StoreRuntimeError::Lock(lock_err) => lock_err.code(),
-            StoreRuntimeError::MetaSymlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
+            StoreRuntimeError::MetaSymlink { .. } => SystemErrorCode::PathSymlinkRejected.into(),
             StoreRuntimeError::MetaRead { source, .. }
             | StoreRuntimeError::MetaWrite { source, .. } => {
                 if source.kind() == io::ErrorKind::PermissionDenied {
-                    ProtocolErrorCode::PermissionDenied.into()
+                    SystemErrorCode::PermissionDenied.into()
                 } else {
                     ProtocolErrorCode::InternalError.into()
                 }
@@ -640,11 +640,11 @@ impl StoreRuntimeError {
             }
             StoreRuntimeError::NamespacePoliciesSymlink { .. }
             | StoreRuntimeError::ReplicaRosterSymlink { .. } => {
-                ProtocolErrorCode::PathSymlinkRejected.into()
+                SystemErrorCode::PathSymlinkRejected.into()
             }
             StoreRuntimeError::NamespacePoliciesRead { source, .. } => {
                 if source.kind() == io::ErrorKind::PermissionDenied {
-                    ProtocolErrorCode::PermissionDenied.into()
+                    SystemErrorCode::PermissionDenied.into()
                 } else {
                     CliErrorCode::ValidationFailed.into()
                 }
@@ -654,18 +654,18 @@ impl StoreRuntimeError {
             }
             StoreRuntimeError::ReplicaRosterRead { source, .. } => {
                 if source.kind() == io::ErrorKind::PermissionDenied {
-                    ProtocolErrorCode::PermissionDenied.into()
+                    SystemErrorCode::PermissionDenied.into()
                 } else {
                     CliErrorCode::ValidationFailed.into()
                 }
             }
             StoreRuntimeError::ReplicaRosterParse { .. } => CliErrorCode::ValidationFailed.into(),
             StoreRuntimeError::StoreConfigSymlink { .. } => {
-                ProtocolErrorCode::PathSymlinkRejected.into()
+                SystemErrorCode::PathSymlinkRejected.into()
             }
             StoreRuntimeError::StoreConfigRead { source, .. } => {
                 if source.kind() == io::ErrorKind::PermissionDenied {
-                    ProtocolErrorCode::PermissionDenied.into()
+                    SystemErrorCode::PermissionDenied.into()
                 } else {
                     CliErrorCode::ValidationFailed.into()
                 }
@@ -676,14 +676,14 @@ impl StoreRuntimeError {
             }
             StoreRuntimeError::StoreConfigWrite { source, .. } => {
                 if source.kind() == io::ErrorKind::PermissionDenied {
-                    ProtocolErrorCode::PermissionDenied.into()
+                    SystemErrorCode::PermissionDenied.into()
                 } else {
                     ProtocolErrorCode::InternalError.into()
                 }
             }
             StoreRuntimeError::WalIndex(err) => err.code(),
             StoreRuntimeError::WalReplay(err) => err.code(),
-            StoreRuntimeError::WatermarkInvalid { .. } => ProtocolErrorCode::IndexCorrupt.into(),
+            StoreRuntimeError::WatermarkInvalid { .. } => SystemErrorCode::IndexCorrupt.into(),
         }
     }
 
@@ -745,7 +745,7 @@ impl IntoErrorPayload for StoreRuntimeError {
         match self {
             StoreRuntimeError::Lock(err) => err.into_error_payload(),
             StoreRuntimeError::MetaSymlink { path } => ErrorPayload::new(
-                ProtocolErrorCode::PathSymlinkRejected.into(),
+                SystemErrorCode::PathSymlinkRejected.into(),
                 message,
                 retryable,
             )
@@ -754,7 +754,7 @@ impl IntoErrorPayload for StoreRuntimeError {
             }),
             StoreRuntimeError::MetaRead { path, source } => match source.kind() {
                 io::ErrorKind::PermissionDenied => ErrorPayload::new(
-                    ProtocolErrorCode::PermissionDenied.into(),
+                    SystemErrorCode::PermissionDenied.into(),
                     message,
                     retryable,
                 )
@@ -785,7 +785,7 @@ impl IntoErrorPayload for StoreRuntimeError {
             .with_details(error_details::StoreMetaVersionMismatchDetails { expected, got }),
             StoreRuntimeError::MetaWrite { path, source } => match source.kind() {
                 io::ErrorKind::PermissionDenied => ErrorPayload::new(
-                    ProtocolErrorCode::PermissionDenied.into(),
+                    SystemErrorCode::PermissionDenied.into(),
                     message,
                     retryable,
                 )
@@ -797,7 +797,7 @@ impl IntoErrorPayload for StoreRuntimeError {
             },
             StoreRuntimeError::NamespacePoliciesSymlink { path }
             | StoreRuntimeError::ReplicaRosterSymlink { path } => ErrorPayload::new(
-                ProtocolErrorCode::PathSymlinkRejected.into(),
+                SystemErrorCode::PathSymlinkRejected.into(),
                 message,
                 retryable,
             )
@@ -806,7 +806,7 @@ impl IntoErrorPayload for StoreRuntimeError {
             }),
             StoreRuntimeError::NamespacePoliciesRead { path, source } => match source.kind() {
                 io::ErrorKind::PermissionDenied => ErrorPayload::new(
-                    ProtocolErrorCode::PermissionDenied.into(),
+                    SystemErrorCode::PermissionDenied.into(),
                     message,
                     retryable,
                 )
@@ -829,7 +829,7 @@ impl IntoErrorPayload for StoreRuntimeError {
             }
             StoreRuntimeError::ReplicaRosterRead { path, source } => match source.kind() {
                 io::ErrorKind::PermissionDenied => ErrorPayload::new(
-                    ProtocolErrorCode::PermissionDenied.into(),
+                    SystemErrorCode::PermissionDenied.into(),
                     message,
                     retryable,
                 )
@@ -851,7 +851,7 @@ impl IntoErrorPayload for StoreRuntimeError {
                     })
             }
             StoreRuntimeError::StoreConfigSymlink { path } => ErrorPayload::new(
-                ProtocolErrorCode::PathSymlinkRejected.into(),
+                SystemErrorCode::PathSymlinkRejected.into(),
                 message,
                 retryable,
             )
@@ -860,7 +860,7 @@ impl IntoErrorPayload for StoreRuntimeError {
             }),
             StoreRuntimeError::StoreConfigRead { path, source } => match source.kind() {
                 io::ErrorKind::PermissionDenied => ErrorPayload::new(
-                    ProtocolErrorCode::PermissionDenied.into(),
+                    SystemErrorCode::PermissionDenied.into(),
                     message,
                     retryable,
                 )
@@ -886,7 +886,7 @@ impl IntoErrorPayload for StoreRuntimeError {
             }
             StoreRuntimeError::StoreConfigWrite { path, source } => match source.kind() {
                 io::ErrorKind::PermissionDenied => ErrorPayload::new(
-                    ProtocolErrorCode::PermissionDenied.into(),
+                    SystemErrorCode::PermissionDenied.into(),
                     message,
                     retryable,
                 )
@@ -901,7 +901,7 @@ impl IntoErrorPayload for StoreRuntimeError {
                 namespace,
                 origin,
                 source,
-            } => ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
+            } => ErrorPayload::new(SystemErrorCode::IndexCorrupt.into(), message, retryable)
                 .with_details(error_details::IndexCorruptDetails {
                     reason: format!("{kind} watermark for {namespace} {origin}: {source}"),
                 }),
