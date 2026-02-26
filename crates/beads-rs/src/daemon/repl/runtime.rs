@@ -398,14 +398,12 @@ impl WalRangeError {
                     offset: *offset,
                     reason: reason.clone(),
                 }),
-            WalRangeError::Index(err) => ErrorPayload::new(
-                SystemErrorCode::IndexCorrupt.into(),
-                "index corrupt",
-                false,
-            )
-            .with_details(IndexCorruptDetails {
-                reason: err.to_string(),
-            }),
+            WalRangeError::Index(err) => {
+                ErrorPayload::new(SystemErrorCode::IndexCorrupt.into(), "index corrupt", false)
+                    .with_details(IndexCorruptDetails {
+                        reason: err.to_string(),
+                    })
+            }
         }
     }
 }

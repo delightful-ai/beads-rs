@@ -358,15 +358,13 @@ impl IntoErrorPayload for StoreLockError {
                 operation,
                 source,
             } => match source.kind() {
-                io::ErrorKind::PermissionDenied => ErrorPayload::new(
-                    SystemErrorCode::PermissionDenied.into(),
-                    message,
-                    retryable,
-                )
-                .with_details(error_details::PermissionDeniedDetails {
-                    path: path.display().to_string(),
-                    operation: lock_permission_operation(operation),
-                }),
+                io::ErrorKind::PermissionDenied => {
+                    ErrorPayload::new(SystemErrorCode::PermissionDenied.into(), message, retryable)
+                        .with_details(error_details::PermissionDeniedDetails {
+                            path: path.display().to_string(),
+                            operation: lock_permission_operation(operation),
+                        })
+                }
                 _ => ErrorPayload::new(ProtocolErrorCode::InternalError.into(), message, retryable),
             },
         }

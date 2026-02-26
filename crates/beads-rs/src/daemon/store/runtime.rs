@@ -753,15 +753,13 @@ impl IntoErrorPayload for StoreRuntimeError {
                 path: path.display().to_string(),
             }),
             StoreRuntimeError::MetaRead { path, source } => match source.kind() {
-                io::ErrorKind::PermissionDenied => ErrorPayload::new(
-                    SystemErrorCode::PermissionDenied.into(),
-                    message,
-                    retryable,
-                )
-                .with_details(error_details::PermissionDeniedDetails {
-                    path: path.display().to_string(),
-                    operation: error_details::PermissionOperation::Read,
-                }),
+                io::ErrorKind::PermissionDenied => {
+                    ErrorPayload::new(SystemErrorCode::PermissionDenied.into(), message, retryable)
+                        .with_details(error_details::PermissionDeniedDetails {
+                            path: path.display().to_string(),
+                            operation: error_details::PermissionOperation::Read,
+                        })
+                }
                 _ => ErrorPayload::new(ProtocolErrorCode::InternalError.into(), message, retryable),
             },
             StoreRuntimeError::MetaParse { source, .. } => {
@@ -784,15 +782,13 @@ impl IntoErrorPayload for StoreRuntimeError {
             )
             .with_details(error_details::StoreMetaVersionMismatchDetails { expected, got }),
             StoreRuntimeError::MetaWrite { path, source } => match source.kind() {
-                io::ErrorKind::PermissionDenied => ErrorPayload::new(
-                    SystemErrorCode::PermissionDenied.into(),
-                    message,
-                    retryable,
-                )
-                .with_details(error_details::PermissionDeniedDetails {
-                    path: path.display().to_string(),
-                    operation: error_details::PermissionOperation::Write,
-                }),
+                io::ErrorKind::PermissionDenied => {
+                    ErrorPayload::new(SystemErrorCode::PermissionDenied.into(), message, retryable)
+                        .with_details(error_details::PermissionDeniedDetails {
+                            path: path.display().to_string(),
+                            operation: error_details::PermissionOperation::Write,
+                        })
+                }
                 _ => ErrorPayload::new(ProtocolErrorCode::InternalError.into(), message, retryable),
             },
             StoreRuntimeError::NamespacePoliciesSymlink { path }
@@ -805,15 +801,13 @@ impl IntoErrorPayload for StoreRuntimeError {
                 path: path.display().to_string(),
             }),
             StoreRuntimeError::NamespacePoliciesRead { path, source } => match source.kind() {
-                io::ErrorKind::PermissionDenied => ErrorPayload::new(
-                    SystemErrorCode::PermissionDenied.into(),
-                    message,
-                    retryable,
-                )
-                .with_details(error_details::PermissionDeniedDetails {
-                    path: path.display().to_string(),
-                    operation: error_details::PermissionOperation::Read,
-                }),
+                io::ErrorKind::PermissionDenied => {
+                    ErrorPayload::new(SystemErrorCode::PermissionDenied.into(), message, retryable)
+                        .with_details(error_details::PermissionDeniedDetails {
+                            path: path.display().to_string(),
+                            operation: error_details::PermissionOperation::Read,
+                        })
+                }
                 _ => ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable)
                     .with_details(error_details::ValidationFailedDetails {
                         field: "namespaces".to_string(),
@@ -828,15 +822,13 @@ impl IntoErrorPayload for StoreRuntimeError {
                     })
             }
             StoreRuntimeError::ReplicaRosterRead { path, source } => match source.kind() {
-                io::ErrorKind::PermissionDenied => ErrorPayload::new(
-                    SystemErrorCode::PermissionDenied.into(),
-                    message,
-                    retryable,
-                )
-                .with_details(error_details::PermissionDeniedDetails {
-                    path: path.display().to_string(),
-                    operation: error_details::PermissionOperation::Read,
-                }),
+                io::ErrorKind::PermissionDenied => {
+                    ErrorPayload::new(SystemErrorCode::PermissionDenied.into(), message, retryable)
+                        .with_details(error_details::PermissionDeniedDetails {
+                            path: path.display().to_string(),
+                            operation: error_details::PermissionOperation::Read,
+                        })
+                }
                 _ => ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable)
                     .with_details(error_details::ValidationFailedDetails {
                         field: "replicas".to_string(),
@@ -859,15 +851,13 @@ impl IntoErrorPayload for StoreRuntimeError {
                 path: path.display().to_string(),
             }),
             StoreRuntimeError::StoreConfigRead { path, source } => match source.kind() {
-                io::ErrorKind::PermissionDenied => ErrorPayload::new(
-                    SystemErrorCode::PermissionDenied.into(),
-                    message,
-                    retryable,
-                )
-                .with_details(error_details::PermissionDeniedDetails {
-                    path: path.display().to_string(),
-                    operation: error_details::PermissionOperation::Read,
-                }),
+                io::ErrorKind::PermissionDenied => {
+                    ErrorPayload::new(SystemErrorCode::PermissionDenied.into(), message, retryable)
+                        .with_details(error_details::PermissionDeniedDetails {
+                            path: path.display().to_string(),
+                            operation: error_details::PermissionOperation::Read,
+                        })
+                }
                 _ => ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable)
                     .with_details(error_details::ValidationFailedDetails {
                         field: "store_config".to_string(),
@@ -885,15 +875,13 @@ impl IntoErrorPayload for StoreRuntimeError {
                 ErrorPayload::new(ProtocolErrorCode::InternalError.into(), message, retryable)
             }
             StoreRuntimeError::StoreConfigWrite { path, source } => match source.kind() {
-                io::ErrorKind::PermissionDenied => ErrorPayload::new(
-                    SystemErrorCode::PermissionDenied.into(),
-                    message,
-                    retryable,
-                )
-                .with_details(error_details::PermissionDeniedDetails {
-                    path: path.display().to_string(),
-                    operation: error_details::PermissionOperation::Write,
-                }),
+                io::ErrorKind::PermissionDenied => {
+                    ErrorPayload::new(SystemErrorCode::PermissionDenied.into(), message, retryable)
+                        .with_details(error_details::PermissionDeniedDetails {
+                            path: path.display().to_string(),
+                            operation: error_details::PermissionOperation::Write,
+                        })
+                }
                 _ => ErrorPayload::new(ProtocolErrorCode::InternalError.into(), message, retryable),
             },
             StoreRuntimeError::WatermarkInvalid {
