@@ -35,7 +35,12 @@ impl<R: Read> FrameReader<R> {
                 .read(&mut header[read..])
                 .map_err(|source| EventWalError::Io { path: None, source })?;
             if n == 0 {
-                return Ok(None);
+                if read == 0 {
+                    return Ok(None);
+                }
+                return Err(EventWalError::FrameLengthInvalid {
+                    reason: "unexpected EOF while reading frame header".to_string(),
+                });
             }
             read += n;
         }
@@ -67,7 +72,9 @@ impl<R: Read> FrameReader<R> {
                 .read(&mut body[read_body..])
                 .map_err(|source| EventWalError::Io { path: None, source })?;
             if n == 0 {
-                return Ok(None);
+                return Err(EventWalError::FrameLengthInvalid {
+                    reason: "unexpected EOF while reading frame body".to_string(),
+                });
             }
             read_body += n;
         }
@@ -211,5 +218,27 @@ mod tests {
         let mut reader = FrameReader::new(Cursor::new(frame), 1024);
         let err = reader.read_next().unwrap_err();
         assert!(matches!(err, EventWalError::FrameCrcMismatch { .. }));
+    }
+
+    #[test]
+    fn frame_reader_truncated_header_errors() {
+        let record = sample_record();
+        let frame = encode_frame(&record, 1024).unwrap();
+        let truncated = frame[..(FRAME_HEADER_LEN - 1)].to_vec();
+
+        let mut reader = FrameReader::new(Cursor::new(truncated), 1024);
+        let err = reader.read_next().unwrap_err();
+        assert!(matches!(err, EventWalError::FrameLengthInvalid { .. }));
+    }
+
+    #[test]
+    fn frame_reader_truncated_body_errors() {
+        let record = sample_record();
+        let frame = encode_frame(&record, 1024).unwrap();
+        let truncated = frame[..(frame.len() - 1)].to_vec();
+
+        let mut reader = FrameReader::new(Cursor::new(truncated), 1024);
+        let err = reader.read_next().unwrap_err();
+        assert!(matches!(err, EventWalError::FrameLengthInvalid { .. }));
     }
 }

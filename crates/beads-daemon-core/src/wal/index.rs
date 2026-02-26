@@ -301,25 +301,107 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         };
         if inserted == 0 {
             let mut stmt = self.conn.prepare_cached(
-                "SELECT sha FROM events WHERE namespace = ?1 AND origin_replica_id = ?2 AND origin_seq = ?3",
+                "SELECT sha, prev_sha, segment_id, segment_offset, len, event_time_ms, txn_id, client_request_id \
+                 FROM events WHERE namespace = ?1 AND origin_replica_id = ?2 AND origin_seq = ?3",
             ).map_err(map_sqlite_error)?;
-            let existing: Option<Vec<u8>> = stmt
+            let existing: Option<(
+                Vec<u8>,
+                Option<Vec<u8>>,
+                Vec<u8>,
+                i64,
+                i64,
+                i64,
+                Vec<u8>,
+                Option<Vec<u8>>,
+            )> = stmt
                 .query_row(params![namespace, origin_blob, eid_seq], |row| {
-                    row.get::<_, Vec<u8>>(0)
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                        row.get(7)?,
+                    ))
                 })
                 .optional()
                 .map_err(map_sqlite_error)?;
-            if let Some(existing) = existing {
-                let existing_sha = blob_32(existing)?;
-                if existing_sha == sha {
+            if let Some((
+                existing_sha,
+                existing_prev_sha,
+                existing_segment_id,
+                existing_offset,
+                existing_len,
+                existing_event_time_ms,
+                existing_txn_id,
+                existing_client_request_id,
+            )) = existing
+            {
+                let existing_sha = blob_32(existing_sha)?;
+                if existing_sha != sha {
+                    return Err(WalIndexError::Equivocation {
+                        namespace: ns.clone(),
+                        origin: eid.origin_replica_id,
+                        seq: eid.origin_seq.get(),
+                        existing_sha256: existing_sha,
+                        new_sha256: sha,
+                    });
+                }
+
+                let existing_prev_sha = existing_prev_sha.map(blob_32).transpose()?;
+                let existing_segment_id = SegmentId::new(blob_uuid(existing_segment_id)?);
+                let existing_offset = u64::try_from(existing_offset).map_err(|_| {
+                    WalIndexError::EventIdDecode("segment_offset out of range".to_string())
+                })?;
+                let existing_len = u32::try_from(existing_len)
+                    .map_err(|_| WalIndexError::EventIdDecode("len out of range".to_string()))?;
+                let existing_event_time_ms =
+                    u64::try_from(existing_event_time_ms).map_err(|_| {
+                        WalIndexError::EventIdDecode("event_time_ms out of range".to_string())
+                    })?;
+                let existing_txn_id = TxnId::new(blob_uuid(existing_txn_id)?);
+                let existing_client_request_id = existing_client_request_id
+                    .map(blob_uuid)
+                    .transpose()?
+                    .map(ClientRequestId::new);
+
+                let mut mismatches = Vec::new();
+                if existing_prev_sha != prev_sha {
+                    mismatches.push("prev_sha");
+                }
+                if existing_segment_id != segment_id {
+                    mismatches.push("segment_id");
+                }
+                if existing_offset != offset {
+                    mismatches.push("segment_offset");
+                }
+                if existing_len != len {
+                    mismatches.push("len");
+                }
+                if existing_event_time_ms != event_time_ms {
+                    mismatches.push("event_time_ms");
+                }
+                if existing_txn_id != txn_id {
+                    mismatches.push("txn_id");
+                }
+                if existing_client_request_id != client_request_id {
+                    mismatches.push("client_request_id");
+                }
+
+                if mismatches.is_empty() {
                     return Ok(());
                 }
-                return Err(WalIndexError::Equivocation {
+
+                return Err(WalIndexError::EventConflict {
                     namespace: ns.clone(),
                     origin: eid.origin_replica_id,
                     seq: eid.origin_seq.get(),
-                    existing_sha256: existing_sha,
-                    new_sha256: sha,
+                    reason: format!(
+                        "duplicate event id with mismatched fields: {}",
+                        mismatches.join(", ")
+                    ),
                 });
             }
             return Err(WalIndexError::EventIdDecode(
@@ -1956,6 +2038,43 @@ mod tests {
 
         let reader = index.reader();
         assert_eq!(reader.lookup_event_sha(&ns, &event_id).unwrap(), Some(sha));
+    }
+
+    #[test]
+    fn sqlite_index_record_event_conflict_errors_when_metadata_differs() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let origin = meta.replica_id;
+        let mut txn = index.writer().begin_txn().unwrap();
+        let origin_seq = txn.next_origin_seq(&ns, &origin).unwrap();
+        let event_id = EventId::new(origin, ns.clone(), origin_seq);
+        let txn_id = TxnId::new(Uuid::from_bytes([2u8; 16]));
+        let sha = [9u8; 32];
+        let segment_id = SegmentId::new(Uuid::from_bytes([4u8; 16]));
+
+        txn.record_event(
+            &ns, &event_id, sha, None, segment_id, 128, 64, 1_700_000, txn_id, None,
+        )
+        .unwrap();
+
+        let err = txn
+            .record_event(
+                &ns,
+                &event_id,
+                sha,
+                Some([1u8; 32]),
+                segment_id,
+                128,
+                64,
+                1_700_000,
+                txn_id,
+                None,
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, WalIndexError::EventConflict { .. }));
     }
 
     #[test]

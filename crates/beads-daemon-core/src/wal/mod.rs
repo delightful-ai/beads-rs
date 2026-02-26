@@ -122,6 +122,13 @@ pub enum WalIndexError {
         existing_sha256: [u8; 32],
         new_sha256: [u8; 32],
     },
+    #[error("event conflict for {namespace} {origin} seq {seq}: {reason}")]
+    EventConflict {
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        seq: u64,
+        reason: String,
+    },
     #[error("client_request_id reuse mismatch for {namespace} {origin} {client_request_id}")]
     ClientRequestIdReuseMismatch {
         namespace: NamespaceId,
@@ -147,6 +154,7 @@ impl WalIndexError {
                 ProtocolErrorCode::IndexRebuildRequired.into()
             }
             WalIndexError::Equivocation { .. } => ProtocolErrorCode::Equivocation.into(),
+            WalIndexError::EventConflict { .. } => ProtocolErrorCode::IndexCorrupt.into(),
             WalIndexError::ClientRequestIdReuseMismatch { .. } => {
                 ProtocolErrorCode::ClientRequestIdReuseMismatch.into()
             }
@@ -182,6 +190,7 @@ impl WalIndexError {
             } => Transience::Permanent,
             WalIndexError::MetaMismatch { .. } => Transience::Retryable,
             WalIndexError::Equivocation { .. }
+            | WalIndexError::EventConflict { .. }
             | WalIndexError::ClientRequestIdReuseMismatch { .. } => Transience::Permanent,
             WalIndexError::ConcurrentWrite { .. } => Transience::Retryable,
             _ => Transience::Retryable,
@@ -241,6 +250,10 @@ impl WalIndexError {
                 expected_request_sha256: hex::encode(expected_request_sha256),
                 got_request_sha256: hex::encode(got_request_sha256),
             }),
+            WalIndexError::EventConflict { reason, .. } => {
+                ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
+                    .with_details(error_details::IndexCorruptDetails { reason })
+            }
             WalIndexError::MetaMismatch {
                 key: "store_id",
                 expected,
