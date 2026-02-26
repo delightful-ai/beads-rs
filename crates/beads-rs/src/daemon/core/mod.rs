@@ -1681,4 +1681,100 @@ mod tests {
         let reference = now - (CLOCK_SKEW_WARN_MS - 1);
         assert!(detect_clock_skew(now, reference).is_none());
     }
+
+    /// Regression test for 2026-02-25 data loss:
+    /// After a failed git load, the store must NOT remain in daemon.stores.
+    /// If it did, subsequent commands would skip loading and operate on empty state,
+    /// then export that empty state to issues.jsonl — wiping visible data.
+    #[test]
+    fn ensure_repo_loaded_rollback_on_git_load_error() {
+        use crate::git::error::{SyncError, WireError};
+
+        let _tmp = test_store_dir();
+        let repo_dir = TempDir::new().unwrap();
+
+        // Create a git repo with an origin remote so store resolution succeeds.
+        let repo = Repository::init(repo_dir.path()).unwrap();
+        let bare_dir = repo_dir.path().join("bare-remote");
+        Repository::init_bare(&bare_dir).unwrap();
+        repo.remote("origin", bare_dir.to_str().unwrap()).unwrap();
+
+        let mut daemon = Daemon::new(test_actor());
+        let (git_tx, git_rx) = crossbeam::channel::bounded::<GitOp>(1);
+
+        // Spawn a thread that will respond to the LoadLocal with a wire error
+        // (simulating the "meta.json missing checksum fields" failure).
+        let responder = std::thread::spawn(move || {
+            let op = git_rx.recv().unwrap();
+            match op {
+                GitOp::LoadLocal { respond, .. } => {
+                    respond
+                        .send(Err(SyncError::Wire(WireError::InvalidValue(
+                            "meta.json missing checksum fields".into(),
+                        ))))
+                        .unwrap();
+                }
+                other => panic!(
+                    "expected LoadLocal, got {:?}",
+                    std::mem::discriminant(&other)
+                ),
+            }
+        });
+
+        // The load should fail.
+        let err = daemon
+            .ensure_repo_loaded(repo_dir.path(), &git_tx)
+            .unwrap_err();
+        assert!(
+            matches!(err, OpError::Sync(_)),
+            "expected sync error, got: {err:?}"
+        );
+
+        responder.join().unwrap();
+
+        // CRITICAL ASSERTION: The store must NOT remain in daemon.stores.
+        // Before the fix, this was the root cause — the store stayed cached
+        // with empty state, and subsequent commands used that empty state.
+        let resolved = daemon.store_caches.resolve_store(repo_dir.path()).unwrap();
+        let store_id = resolved.store_id();
+        assert!(
+            !daemon.stores.contains_key(&store_id),
+            "store must be removed from daemon.stores after failed load"
+        );
+        assert!(
+            !daemon.git_lanes.contains_key(&store_id),
+            "git lane must be removed from daemon.git_lanes after failed load"
+        );
+    }
+
+    /// Regression test for 2026-02-25 data loss (defense-in-depth):
+    /// Export must not be scheduled when the store's lane has loaded_ok = false.
+    #[test]
+    fn export_go_compat_blocked_when_not_loaded_ok() {
+        let _tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = insert_store(&mut daemon, &remote);
+
+        // insert_store uses GitLaneState::new() which sets loaded_ok = false.
+        assert!(
+            !daemon.git_lanes[&store_id].loaded_ok,
+            "precondition: lane should not be loaded_ok"
+        );
+
+        // Try to schedule export — should be rejected because loaded_ok is false.
+        daemon.export_go_compat(store_id, &remote);
+        assert!(
+            !daemon.export_pending.contains_key(&store_id),
+            "export must NOT be scheduled when loaded_ok is false"
+        );
+
+        // Now set loaded_ok = true and try again — should be accepted.
+        daemon.git_lanes.get_mut(&store_id).unwrap().loaded_ok = true;
+        daemon.export_go_compat(store_id, &remote);
+        assert!(
+            daemon.export_pending.contains_key(&store_id),
+            "export MUST be scheduled when loaded_ok is true"
+        );
+    }
 }
