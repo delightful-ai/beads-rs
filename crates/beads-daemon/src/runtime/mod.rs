@@ -49,8 +49,3 @@ pub use ipc::{IpcClient, IpcError, Request, Response, ResponsePayload};
 pub use ops::OpError;
 pub use query::Query;
 pub use run::run_daemon;
-
-pub use store::lock::{
-    StoreLock, StoreLockError, StoreLockMeta, StoreLockOperation, read_lock_meta,
-};
-pub use store::runtime::{StoreRuntime, StoreRuntimeError};

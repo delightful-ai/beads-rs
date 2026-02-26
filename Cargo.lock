@@ -318,7 +318,6 @@ version = "0.2.0-alpha"
 dependencies = [
  "beads-core",
  "beads-daemon-core",
- "beads-rs",
  "libfuzzer-sys",
  "libz-sys",
 ]

@@ -12,9 +12,8 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
-beads-rs = { path = "../beads-rs" }
 beads-core = { path = "../beads-core" }
-beads-daemon-core = { path = "../beads-daemon-core" }
+beads-daemon-core = { path = "../beads-daemon-core", features = ["wal-fs"] }
 libz-sys = { version = "1.1", features = ["static"] }
 
 [[bin]]
