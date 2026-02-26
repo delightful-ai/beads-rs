@@ -83,6 +83,27 @@ impl ReplicationServerHandle {
 
     pub fn shutdown(self) {
         self.shutdown.store(true, Ordering::Relaxed);
+        // Connect to the listener to unblock the accept call.
+        // If the listener is bound to a wildcard address (0.0.0.0), connect to loopback.
+        let addr = if self.local_addr.ip().is_unspecified() {
+            if self.local_addr.is_ipv4() {
+                SocketAddr::new(
+                    std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+                    self.local_addr.port(),
+                )
+            } else {
+                SocketAddr::new(
+                    std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+                    self.local_addr.port(),
+                )
+            }
+        } else {
+            self.local_addr
+        };
+
+        if let Err(err) = TcpStream::connect(addr) {
+            tracing::warn!("shutdown wake-up connection failed: {err}");
+        }
         let _ = self.join.join();
     }
 }
@@ -251,8 +272,8 @@ where
     );
     let _guard = span.enter();
 
-    if let Err(err) = listener.set_nonblocking(true) {
-        tracing::error!("replication server failed to set nonblocking: {err}");
+    if let Err(err) = listener.set_nonblocking(false) {
+        tracing::error!("replication server failed to set blocking: {err}");
         return;
     }
 
@@ -263,6 +284,10 @@ where
 
         match listener.accept() {
             Ok((stream, _)) => {
+                if runtime.shutdown.load(Ordering::Relaxed) {
+                    break;
+                }
+
                 if let Err(err) = stream.set_nonblocking(false) {
                     tracing::warn!("replication inbound stream failed to set blocking: {err}");
                 }
@@ -283,12 +308,9 @@ where
                     send_overloaded(stream, &runtime.limits);
                 }
             }
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                thread::sleep(Duration::from_millis(25));
-            }
             Err(err) => {
                 tracing::warn!("replication accept error: {err}");
-                thread::sleep(Duration::from_millis(25));
+                thread::sleep(Duration::from_millis(50));
             }
         }
     }
@@ -1534,6 +1556,24 @@ mod tests {
             other => panic!("unexpected response: {other:?}"),
         }
 
+        handle.shutdown();
+    }
+
+    #[test]
+    fn shutdown_terminates_idle_server() {
+        let limits = test_limits();
+        let identity = test_identity();
+        let local_replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
+        let config = base_config(
+            "127.0.0.1:0".to_string(),
+            identity,
+            local_replica,
+            limits.clone(),
+        );
+        let server = ReplicationServer::new(SharedSessionStore::new(TestStore), config);
+        let handle = server.start().expect("start");
+
+        // Immediately shutdown without connecting
         handle.shutdown();
     }
 }
