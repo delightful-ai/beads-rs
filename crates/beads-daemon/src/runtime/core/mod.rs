@@ -56,7 +56,7 @@ use super::store::runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster
 use super::store::{ResolvedStore, StoreCaches};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof, SegmentRow, VerifiedRecord,
-    WalAppend, WalIndex, WalIndexError, WalIndexTxnProvider, WalReplayError, open_segment_reader,
+    WalAppend, WalIndex, WalIndexError, WalReplayError, open_segment_reader,
 };
 use crate::broadcast::BroadcastEvent;
 use crate::config::{
@@ -1719,6 +1719,90 @@ mod tests {
             .expect("sealed segment metadata")
             .len();
         assert_eq!(sealed.final_len(), Some(sealed_len));
+    }
+
+    #[test]
+    fn repl_ingest_atomic_commit_failpoint_rolls_back_event_and_watermark() {
+        let tmp = TempStoreDir::new();
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([31u8; 16]));
+        let store_id = StoreId::new(Uuid::from_bytes([32u8; 16]));
+        let store = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+        let now_ms = 1_700_000_000_000u64;
+        let event = verified_event_for_seq(store, &namespace, origin, 1, None);
+        let canonical_sha = hash_event_body(&event.bytes).0;
+
+        let mut daemon = Daemon::new_with_limits(test_actor(), Limits::default());
+        let remote = test_remote();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo path");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let failpoint = crate::runtime::test_hooks::set_atomic_commit_fail_stage_for_tests(
+            "wal_repl_ingest_before_atomic_commit",
+        );
+        let failed_batch = ContiguousBatch::try_new(vec![event.clone()]).expect("contiguous batch");
+        let err = daemon
+            .ingest_remote_batch(store_id, failed_batch, now_ms)
+            .expect_err("failpoint should abort ingest");
+        drop(failpoint);
+        assert!(!err.message.is_empty(), "expected indexed error payload");
+
+        let event_id = event_id_for(origin, namespace.clone(), Seq1::from_u64(1).expect("seq"));
+        let store_runtime = daemon.stores.get(&store_id).expect("store runtime");
+        let reader = store_runtime.wal_index.reader();
+        assert_eq!(
+            reader
+                .lookup_event_sha(&namespace, &event_id)
+                .expect("lookup event sha"),
+            None
+        );
+        let watermark = reader
+            .load_watermarks()
+            .expect("load watermarks")
+            .into_iter()
+            .find(|row| row.namespace == namespace && row.origin == origin);
+        assert!(
+            watermark.is_none(),
+            "watermark must not advance on rollback"
+        );
+        assert_eq!(
+            reader
+                .max_origin_seq(&namespace, &origin)
+                .expect("max origin seq")
+                .get(),
+            0
+        );
+
+        let retry_batch = ContiguousBatch::try_new(vec![event]).expect("contiguous batch");
+        daemon
+            .ingest_remote_batch(store_id, retry_batch, now_ms)
+            .expect("retry ingest should commit");
+
+        let store_runtime = daemon.stores.get(&store_id).expect("store runtime");
+        let reader = store_runtime.wal_index.reader();
+        let indexed_sha = reader
+            .lookup_event_sha(&namespace, &event_id)
+            .expect("lookup event sha")
+            .expect("event row");
+        assert_eq!(indexed_sha, canonical_sha);
+        let watermark = reader
+            .load_watermarks()
+            .expect("load watermarks")
+            .into_iter()
+            .find(|row| row.namespace == namespace && row.origin == origin)
+            .expect("watermark row");
+        assert_eq!(watermark.applied_seq(), 1);
+        assert_eq!(watermark.durable_seq(), 1);
+        assert_eq!(watermark.applied_head_sha(), Some(canonical_sha));
+        assert_eq!(watermark.durable_head_sha(), Some(canonical_sha));
+        assert_eq!(
+            reader
+                .max_origin_seq(&namespace, &origin)
+                .expect("max origin seq")
+                .get(),
+            1
+        );
     }
 
     #[test]

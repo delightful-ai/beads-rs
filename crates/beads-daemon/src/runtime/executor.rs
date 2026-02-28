@@ -31,16 +31,17 @@ use super::store::runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster
 use super::wal::{
     ClientRequestEventIds, EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof,
     SegmentRow, VerifiedRecord, WalAppend, WalAppendDurabilityEffect, WalCursorOffset, WalIndex,
-    WalIndexError, WalIndexTxn, WalIndexTxnProvider, WalReplayError, open_segment_reader,
+    WalIndexError, WalIndexTxn, WalReplayError, open_segment_reader,
 };
+use super::wal_atomic_commit::{AtomicWalCommitPath, AtomicWalDurabilityTxn, tip_watermark_pair};
 use crate::broadcast::BroadcastEvent;
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
     ActorId, Applied, BeadId, CanonicalState, Dot, DurabilityClass, DurabilityReceipt, Durable,
     EventBytes, EventId, EventKindV1, HeadStatus, Limits, NamespaceId, NoteId, ReplicaId, Seq1,
     Sha256, Stamp, StoreIdentity, TxnDeltaV1, TxnOpV1, ValidatedEventBody, WallClock, Watermark,
-    WatermarkError, WatermarkPair, Watermarks, WirePatch, WriteStamp, apply_event,
-    decode_event_body, hash_event_body,
+    WatermarkError, Watermarks, WirePatch, WriteStamp, apply_event, decode_event_body,
+    hash_event_body,
 };
 use crate::runtime::metrics;
 use crate::runtime::wal::frame::FRAME_HEADER_LEN;
@@ -246,7 +247,13 @@ impl Daemon {
         }?;
         let (draft, planning_effects) = planned.acknowledge_durability();
 
-        let mut txn = wal_index.begin_wal_txn().map_err(wal_index_to_op)?;
+        let mut atomic_txn = AtomicWalDurabilityTxn::begin(
+            wal_index.as_ref(),
+            namespace.clone(),
+            origin_replica_id,
+            AtomicWalCommitPath::Mutation,
+        )
+        .map_err(wal_index_to_op)?;
         let LocalAppendPlan {
             origin_seq,
             prev_sha,
@@ -258,7 +265,7 @@ impl Daemon {
             namespace.clone(),
             origin_replica_id,
             durable_watermark,
-            &mut *txn,
+            atomic_txn.index_mut(),
         )?;
 
         let span = tracing::info_span!(
@@ -282,6 +289,8 @@ impl Daemon {
 
         let sha = hash_event_body(&sequenced.event_bytes);
         let sha_bytes = sha.0;
+        let commit_watermarks =
+            tip_watermark_pair(origin_seq, sha_bytes).map_err(wal_index_to_op)?;
         let request_proof = sequenced
             .client_request_id
             .map(|client_request_id| RequestProof::Client {
@@ -361,55 +370,61 @@ impl Daemon {
             EventBytes::from(sequenced.event_bytes.clone()),
         );
         let event_ids = ClientRequestEventIds::single(event_id.clone());
-        txn.upsert_segment(&segment_row).map_err(wal_index_to_op)?;
-        if let Some(sealed) = append.sealed.as_ref() {
-            let sealed_row = SegmentRow::sealed(
-                namespace.clone(),
-                sealed.segment_id,
-                segment_rel_path(&store_dir, &sealed.path),
-                sealed.created_at_ms,
-                WalCursorOffset::new(sealed.final_len),
-                sealed.final_len,
-            );
-            txn.upsert_segment(&sealed_row).map_err(wal_index_to_op)?;
-        }
-        txn.record_event(
-            &namespace,
-            &event_id,
-            sha_bytes,
-            prev_sha,
-            append.segment_id,
-            append.offset,
-            append.len,
-            now_ms,
-            sequenced.event_body.txn_id,
-            ctx.client_request_id,
-        )
-        .map_err(wal_index_to_op)?;
-        if let Some(client_request_id) = ctx.client_request_id {
-            txn.upsert_client_request(
+        {
+            let txn = atomic_txn.index_mut();
+            txn.upsert_segment(&segment_row).map_err(wal_index_to_op)?;
+            if let Some(sealed) = append.sealed.as_ref() {
+                let sealed_row = SegmentRow::sealed(
+                    namespace.clone(),
+                    sealed.segment_id,
+                    segment_rel_path(&store_dir, &sealed.path),
+                    sealed.created_at_ms,
+                    WalCursorOffset::new(sealed.final_len),
+                    sealed.final_len,
+                );
+                txn.upsert_segment(&sealed_row).map_err(wal_index_to_op)?;
+            }
+            txn.record_event(
                 &namespace,
-                &origin_replica_id,
-                client_request_id,
-                sequenced.request_sha256,
-                sequenced.event_body.txn_id,
-                &event_ids,
+                &event_id,
+                sha_bytes,
+                prev_sha,
+                append.segment_id,
+                append.offset,
+                append.len,
                 now_ms,
+                sequenced.event_body.txn_id,
+                ctx.client_request_id,
             )
             .map_err(wal_index_to_op)?;
+            if let Some(client_request_id) = ctx.client_request_id {
+                txn.upsert_client_request(
+                    &namespace,
+                    &origin_replica_id,
+                    client_request_id,
+                    sequenced.request_sha256,
+                    sequenced.event_body.txn_id,
+                    &event_ids,
+                    now_ms,
+                )
+                .map_err(wal_index_to_op)?;
+            }
         }
         let EventKindV1::TxnV1(txn_body) = &sequenced.event_body.kind;
         let hlc_max = &txn_body.hlc_max;
-        txn.update_hlc(&HlcRow {
-            actor_id: hlc_max.actor_id.clone(),
-            last_physical_ms: hlc_max.physical_ms,
-            last_logical: hlc_max.logical,
-        })
-        .map_err(wal_index_to_op)?;
-        crate::runtime::test_hooks::maybe_pause("wal_before_index_commit");
-        txn.commit().map_err(wal_index_to_op)?;
+        atomic_txn
+            .index_mut()
+            .update_hlc(&HlcRow {
+                actor_id: hlc_max.actor_id.clone(),
+                last_physical_ms: hlc_max.physical_ms,
+                last_logical: hlc_max.logical,
+            })
+            .map_err(wal_index_to_op)?;
+        atomic_txn
+            .commit_with_watermarks(commit_watermarks)
+            .map_err(wal_index_to_op)?;
 
-        let (durable_watermarks, applied_watermarks, applied, durable) = {
+        let (durable_watermarks, applied_watermarks) = {
             let apply_start = Instant::now();
             let outcome = {
                 let state = Self::namespace_state_mut(&mut proof, namespace.clone());
@@ -460,35 +475,11 @@ impl Daemon {
                     })
                 })?;
 
-            let applied = store_runtime
-                .watermarks_applied
-                .get(&namespace, &origin_replica_id)
-                .copied()
-                .unwrap_or_else(Watermark::genesis);
-            let durable = store_runtime
-                .watermarks_durable
-                .get(&namespace, &origin_replica_id)
-                .copied()
-                .unwrap_or_else(Watermark::genesis);
-
             (
                 store_runtime.watermarks_durable.clone(),
                 store_runtime.watermarks_applied.clone(),
-                applied,
-                durable,
             )
         };
-
-        let mut watermark_txn = wal_index.begin_wal_txn().map_err(wal_index_to_op)?;
-        let watermarks = WatermarkPair::new(applied, durable).map_err(|err| {
-            OpError::from(StoreRuntimeError::WalIndex(
-                WalIndexError::WatermarkRowDecode(err.to_string()),
-            ))
-        })?;
-        watermark_txn
-            .update_watermark(&namespace, &origin_replica_id, watermarks)
-            .map_err(wal_index_to_op)?;
-        watermark_txn.commit().map_err(wal_index_to_op)?;
 
         let result = op_result_from_delta(&parsed_request, &txn_body.delta)?;
         let receipt = DurabilityReceipt::local_fsync(
@@ -783,6 +774,7 @@ impl Daemon {
 mod tests {
     use super::*;
     use std::collections::BTreeMap;
+    use std::path::Path;
     use std::sync::Mutex;
     use std::sync::{
         Arc,
@@ -794,15 +786,15 @@ mod tests {
 
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadType, CanonicalState, Claim, ClientRequestId,
-        DurabilityReceipt, Labels, Lww, NamespaceId, NoteAppendV1, NoteId, Priority, Stamp,
-        StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnId, TxnOpV1,
-        WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp,
+        DurabilityReceipt, EventId, Labels, Lww, NamespaceId, NoteAppendV1, NoteId, Priority, Seq1,
+        Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnId,
+        TxnOpV1, WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp,
     };
     use crate::remote::RemoteUrl;
     use crate::runtime::Clock;
     use crate::runtime::Daemon;
     use crate::runtime::core::{HandleOutcome, insert_store_for_tests};
-    use crate::runtime::ipc::{MutationMeta, Request};
+    use crate::runtime::ipc::{CreatePayload, MutationCtx, MutationMeta, Request, ResponsePayload};
     use crate::runtime::wal::{
         IndexDurabilityMode, SegmentConfig, SegmentWriter, SqliteWalIndex, rebuild_index,
     };
@@ -818,6 +810,77 @@ mod tests {
 
     fn actor_id(id: &str) -> ActorId {
         ActorId::new(id).unwrap()
+    }
+
+    fn create_request(repo: &Path, id: &str, title: &str) -> Request {
+        Request::Create {
+            ctx: MutationCtx::new(repo.to_path_buf(), MutationMeta::default()),
+            payload: CreatePayload {
+                id: Some(BeadId::parse(id).expect("valid bead id")),
+                parent: None,
+                title: title.to_string(),
+                bead_type: BeadType::Task,
+                priority: Priority::MEDIUM,
+                description: None,
+                design: None,
+                acceptance_criteria: None,
+                assignee: None,
+                external_ref: None,
+                estimated_minutes: None,
+                labels: Vec::new(),
+                dependencies: Vec::new(),
+            },
+        }
+    }
+
+    fn open_index_for_store(store_id: StoreId) -> (SqliteWalIndex, StoreMeta) {
+        let store_dir = crate::paths::store_dir(store_id);
+        let meta_path = crate::paths::store_meta_path(store_id);
+        let meta: StoreMeta =
+            serde_json::from_str(&std::fs::read_to_string(meta_path).expect("read store meta"))
+                .expect("parse store meta");
+        let index = SqliteWalIndex::open(&store_dir, &meta, IndexDurabilityMode::Cache)
+            .expect("open wal index");
+        (index, meta)
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct WalIndexSnapshot {
+        event_sha: Option<[u8; 32]>,
+        durable_seq: Option<u64>,
+        durable_head: Option<[u8; 32]>,
+        max_origin_seq: u64,
+    }
+
+    fn wal_index_snapshot(
+        index: &SqliteWalIndex,
+        namespace: &NamespaceId,
+        origin: ReplicaId,
+        seq: Seq1,
+    ) -> WalIndexSnapshot {
+        let reader = index.reader();
+        let event_id = EventId::new(origin, namespace.clone(), seq);
+        let event_sha = reader
+            .lookup_event_sha(namespace, &event_id)
+            .expect("lookup event sha");
+        let watermark = reader
+            .load_watermarks()
+            .expect("load watermarks")
+            .into_iter()
+            .find(|row| row.namespace == *namespace && row.origin == origin);
+        let (durable_seq, durable_head) = watermark
+            .map(|row| (Some(row.durable_seq()), row.durable_head_sha()))
+            .unwrap_or((None, None));
+        let max_origin_seq = reader
+            .max_origin_seq(namespace, &origin)
+            .expect("max origin seq")
+            .get();
+        WalIndexSnapshot {
+            event_sha,
+            durable_seq,
+            durable_head,
+            max_origin_seq,
+        }
     }
 
     fn make_state_with_bead(id: &str, actor: &ActorId) -> CanonicalState {
@@ -1069,6 +1132,77 @@ mod tests {
                 "mutation span missing {key}: {fields:?}"
             );
         }
+    }
+
+    #[test]
+    fn mutation_atomic_commit_failpoint_rolls_back_event_and_watermark() {
+        let tmp = TempDir::new().expect("temp dir");
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let _override = crate::paths::override_data_dir_for_tests(Some(data_dir));
+
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo path");
+
+        let mut daemon = Daemon::new(actor_id("atomic@test"));
+        let store_id = StoreId::new(Uuid::from_bytes([31u8; 16]));
+        let remote = RemoteUrl::new("example.com/test/repo");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+        let (index, meta) = open_index_for_store(store_id);
+        let namespace = NamespaceId::core();
+        let origin = meta.replica_id;
+        let seq = Seq1::from_u64(1).expect("nonzero seq");
+        let (git_tx, _git_rx) = crossbeam::channel::unbounded();
+
+        let failpoint = crate::runtime::test_hooks::set_atomic_commit_fail_stage_for_tests(
+            "wal_mutation_before_atomic_commit",
+        );
+        let failed = daemon.handle_request(
+            create_request(
+                &repo_path,
+                "bd-atomic-rollback",
+                "atomic rollback should fail first",
+            ),
+            &git_tx,
+        );
+        drop(failpoint);
+        match failed {
+            HandleOutcome::Response(crate::runtime::ipc::Response::Err { .. }) => {}
+            other => panic!("expected failed mutation response, got {other:?}"),
+        }
+
+        let before = wal_index_snapshot(&index, &namespace, origin, seq);
+        assert_eq!(
+            before,
+            WalIndexSnapshot {
+                event_sha: None,
+                durable_seq: None,
+                durable_head: None,
+                max_origin_seq: 0,
+            }
+        );
+
+        let retried = daemon.handle_request(
+            create_request(
+                &repo_path,
+                "bd-atomic-rollback",
+                "atomic rollback should succeed on retry",
+            ),
+            &git_tx,
+        );
+        let HandleOutcome::Response(crate::runtime::ipc::Response::Ok { ok }) = retried else {
+            panic!("expected successful mutation response");
+        };
+        assert!(
+            matches!(ok, ResponsePayload::Op(_)),
+            "expected op response payload"
+        );
+
+        let after = wal_index_snapshot(&index, &namespace, origin, seq);
+        assert_eq!(after.max_origin_seq, 1);
+        assert_eq!(after.durable_seq, Some(1));
+        let event_sha = after.event_sha.expect("event row present");
+        assert_eq!(after.durable_head, Some(event_sha));
     }
 
     #[test]

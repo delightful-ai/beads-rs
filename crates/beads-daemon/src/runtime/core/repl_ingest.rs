@@ -1,5 +1,8 @@
 use super::*;
 use crate::daemon::wal::WalCursorOffset;
+use crate::runtime::wal_atomic_commit::{
+    AtomicWalCommitPath, AtomicWalDurabilityTxn, tip_watermark_pair,
+};
 
 impl Daemon {
     pub(super) fn ingest_remote_batch(
@@ -47,11 +50,16 @@ impl Daemon {
         let store_dir = self.layout.store_dir(&store_id);
 
         let wal_index = Arc::clone(&store.wal_index);
-        let mut txn = wal_index
-            .begin_wal_txn()
-            .map_err(|err| wal_index_error_payload(&err))?;
+        let mut atomic_txn = AtomicWalDurabilityTxn::begin(
+            wal_index.as_ref(),
+            namespace.clone(),
+            origin,
+            AtomicWalCommitPath::ReplIngest,
+        )
+        .map_err(|err| wal_index_error_payload(&err))?;
 
         let mut canonical_shas = Vec::with_capacity(batch.len());
+        let mut batch_tip: Option<(Seq1, [u8; 32])> = None;
         for event in batch.events() {
             let payload = encode_event_body_canonical(event.body.as_ref()).map_err(|_| {
                 ReplError::new(
@@ -62,6 +70,7 @@ impl Daemon {
             })?;
             let sha = hash_event_body(&payload).0;
             canonical_shas.push(sha);
+            batch_tip = Some((event.body.origin_seq, sha));
             let record = VerifiedRecord::new(
                 RecordHeader {
                     origin_replica_id: origin,
@@ -126,7 +135,9 @@ impl Daemon {
                 last_indexed_offset,
             );
 
-            txn.upsert_segment(&segment_row)
+            atomic_txn
+                .index_mut()
+                .upsert_segment(&segment_row)
                 .map_err(|err| wal_index_error_payload(&err))?;
             if let Some(sealed) = append.sealed.as_ref() {
                 let sealed_row = SegmentRow::sealed(
@@ -137,33 +148,46 @@ impl Daemon {
                     WalCursorOffset::new(sealed.final_len),
                     sealed.final_len,
                 );
-                txn.upsert_segment(&sealed_row)
+                atomic_txn
+                    .index_mut()
+                    .upsert_segment(&sealed_row)
                     .map_err(|err| wal_index_error_payload(&err))?;
             }
-            txn.record_event(
-                &namespace,
-                &event_id_for(origin, namespace.clone(), event.body.origin_seq),
-                sha,
-                event.prev.prev.map(|sha| sha.0),
-                append.segment_id,
-                append.offset,
-                append.len,
-                event.body.event_time_ms,
-                event.body.txn_id,
-                event.body.client_request_id,
-            )
-            .map_err(|err| wal_index_error_payload(&err))?;
+            atomic_txn
+                .index_mut()
+                .record_event(
+                    &namespace,
+                    &event_id_for(origin, namespace.clone(), event.body.origin_seq),
+                    sha,
+                    event.prev.prev.map(|sha| sha.0),
+                    append.segment_id,
+                    append.offset,
+                    append.len,
+                    event.body.event_time_ms,
+                    event.body.txn_id,
+                    event.body.client_request_id,
+                )
+                .map_err(|err| wal_index_error_payload(&err))?;
 
             let EventKindV1::TxnV1(txn_body) = &event.body.kind;
-            txn.update_hlc(&HlcRow {
-                actor_id: txn_body.hlc_max.actor_id.clone(),
-                last_physical_ms: txn_body.hlc_max.physical_ms,
-                last_logical: txn_body.hlc_max.logical,
-            })
-            .map_err(|err| wal_index_error_payload(&err))?;
+            atomic_txn
+                .index_mut()
+                .update_hlc(&HlcRow {
+                    actor_id: txn_body.hlc_max.actor_id.clone(),
+                    last_physical_ms: txn_body.hlc_max.physical_ms,
+                    last_logical: txn_body.hlc_max.logical,
+                })
+                .map_err(|err| wal_index_error_payload(&err))?;
         }
 
-        txn.commit().map_err(|err| wal_index_error_payload(&err))?;
+        let (tip_seq, tip_sha) = batch_tip.ok_or_else(|| {
+            ReplError::new(CliErrorCode::Internal.into(), "empty repl batch", false)
+        })?;
+        let commit_watermarks =
+            tip_watermark_pair(tip_seq, tip_sha).map_err(|err| wal_index_error_payload(&err))?;
+        atomic_txn
+            .commit_with_watermarks(commit_watermarks)
+            .map_err(|err| wal_index_error_payload(&err))?;
 
         let (remote, max_stamp, durable, applied) = {
             let mut max_stamp = git_lane.last_seen_stamp.clone();
@@ -244,19 +268,6 @@ impl Daemon {
         }
         self.mark_checkpoint_dirty(store_id, &namespace, batch.len() as u64);
         self.schedule_sync(remote);
-
-        let mut watermark_txn = wal_index
-            .begin_wal_txn()
-            .map_err(|err| wal_index_error_payload(&err))?;
-        let watermarks = crate::core::WatermarkPair::new(applied, durable).map_err(|err| {
-            wal_index_error_payload(&WalIndexError::WatermarkRowDecode(err.to_string()))
-        })?;
-        watermark_txn
-            .update_watermark(&namespace, &origin, watermarks)
-            .map_err(|err| wal_index_error_payload(&err))?;
-        watermark_txn
-            .commit()
-            .map_err(|err| wal_index_error_payload(&err))?;
 
         Ok(IngestOutcome { durable, applied })
     }

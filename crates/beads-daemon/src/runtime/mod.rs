@@ -34,6 +34,7 @@ pub mod store;
 pub mod subscription;
 pub mod test_hooks;
 pub mod wal;
+mod wal_atomic_commit;
 
 pub use core::{Daemon, LoadedStore};
 

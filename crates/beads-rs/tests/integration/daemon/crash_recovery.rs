@@ -10,7 +10,8 @@ use std::time::{Duration, Instant};
 use crate::fixtures::realtime::RealtimeFixture;
 use crate::fixtures::store_lock::unlock_store;
 use beads_api::QueryResult;
-use beads_core::{BeadId, BeadType, NamespaceId, Priority, StoreId, StoreMeta};
+use beads_core::{BeadId, BeadType, EventId, NamespaceId, Priority, Seq1, StoreId, StoreMeta};
+use beads_daemon::testkit::wal::{IndexDurabilityMode, SqliteWalIndex, WalIndex};
 use beads_surface::ipc::{
     CreatePayload, IpcClient, MutationCtx, MutationMeta, Request, Response, ResponsePayload,
 };
@@ -232,13 +233,13 @@ fn crash_recovery_rebuilds_index_after_fsync_before_commit() {
     let fixture = RealtimeFixture::new();
     let hang_dir = fixture.runtime_dir().join("hang");
     fs::create_dir_all(&hang_dir).expect("create hang dir");
-    start_daemon_with_hang(&fixture, "wal_before_index_commit", &hang_dir);
+    start_daemon_with_hang(&fixture, "wal_mutation_before_atomic_commit", &hang_dir);
 
     let request = create_request(fixture.repo_path(), "bd-crash-index", "crash index");
     let client = IpcClient::for_runtime_dir(fixture.runtime_dir()).with_autostart(false);
     let handle = thread::spawn(move || client.send_request(&request));
 
-    let marker = marker_path(&hang_dir, "wal_before_index_commit");
+    let marker = marker_path(&hang_dir, "wal_mutation_before_atomic_commit");
     assert!(
         wait_for_marker(&marker, Duration::from_secs(5)),
         "wal hang marker missing"
@@ -248,6 +249,38 @@ fn crash_recovery_rebuilds_index_after_fsync_before_commit() {
     let _ = handle.join();
 
     let store_id = store_id_from_data_dir(fixture.data_dir());
+    let store_dir = store_dir_from_data_dir(fixture.data_dir());
+    let store_meta = store_meta_from_data_dir(fixture.data_dir());
+    let namespace = NamespaceId::core();
+    let origin = store_meta.replica_id;
+    let event_id = EventId::new(
+        origin,
+        namespace.clone(),
+        Seq1::from_u64(1).expect("nonzero seq"),
+    );
+
+    let index = SqliteWalIndex::open(&store_dir, &store_meta, IndexDurabilityMode::Cache)
+        .expect("open wal index before restart");
+    let reader = index.reader();
+    assert_eq!(
+        reader
+            .lookup_event_sha(&namespace, &event_id)
+            .expect("lookup event sha before restart"),
+        None,
+        "event row must be absent before atomic commit",
+    );
+    let watermark_before = reader
+        .load_watermarks()
+        .expect("load watermarks before restart")
+        .into_iter()
+        .find(|row| row.namespace == namespace && row.origin == origin);
+    if let Some(row) = watermark_before {
+        assert_eq!(row.applied_seq(), 0, "baseline applied seq");
+        assert_eq!(row.durable_seq(), 0, "baseline durable seq");
+        assert_eq!(row.applied_head_sha(), None, "baseline applied head");
+        assert_eq!(row.durable_head_sha(), None, "baseline durable head");
+    }
+
     unlock_store(fixture.data_dir(), store_id).expect("unlock store");
 
     let output = fixture
@@ -264,4 +297,22 @@ fn crash_recovery_rebuilds_index_after_fsync_before_commit() {
         }
         other => panic!("unexpected show payload: {other:?}"),
     }
+
+    let index = SqliteWalIndex::open(&store_dir, &store_meta, IndexDurabilityMode::Cache)
+        .expect("open wal index after recovery");
+    let reader = index.reader();
+    let event_sha = reader
+        .lookup_event_sha(&namespace, &event_id)
+        .expect("lookup event sha after restart")
+        .expect("event row should exist after recovery");
+    let watermark = reader
+        .load_watermarks()
+        .expect("load watermarks after restart")
+        .into_iter()
+        .find(|row| row.namespace == namespace && row.origin == origin)
+        .expect("watermark row should exist after recovery");
+    assert_eq!(watermark.applied_seq(), 1);
+    assert_eq!(watermark.durable_seq(), 1);
+    assert_eq!(watermark.applied_head_sha(), Some(event_sha));
+    assert_eq!(watermark.durable_head_sha(), Some(event_sha));
 }

@@ -6,8 +6,8 @@
 - workspace: current_workspace
 - close_scope: p0_children_only
 - clean_every_closed_beads: 4
-- closed_count: 8
-- current_bead: bd-azyx
+- closed_count: 9
+- current_bead: bd-9hym
 
 ## Bead Ledger
 | order | bead | stage | planner_id | sanity_id | implementer_id | reviewer_id | plan_file | jj_change | verify_status | close_status | last_update_utc |
@@ -20,7 +20,7 @@
 | 6 | bd-r39f | closed | 019ca2a4-6825-7051-a153-3c1d4811b34c | 019ca2ab-6f48-74d3-9b75-97090d82e5cd | 019ca2ae-7bff-7200-8051-fc693ba36bb4 | 019ca2b6-3f92-7b92-bc23-2c9d89d24774 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-r39f-implementation.md | vzksmmsu | pass | closed | 2026-02-28T05:30:17Z |
 | 7 | bd-jzxt | closed | 019ca2ba-6730-7742-b148-8b9c2ce63edc | 019ca2c2-a138-7842-9a42-bcbe81a07aa5 | 019ca2c6-be88-77f3-9a9f-31e4c0d58c00 | 019ca2d0-c37f-7952-8cc0-672ec401ccec | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-jzxt-implementation.md | uzrynnqr | pass | closed | 2026-02-28T06:02:41Z |
 | 8 | bd-642h | closed | 019ca2e5-391d-71b0-9f6b-065c84f18303 | 019ca2e8-daaf-77e1-b9fc-85f51e267c86 | 019ca2ea-599d-7362-be52-0c32494033c8 | 019ca2fc-2cdf-7e01-83ae-5509a51c1e79 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-642h-implementation.md | ykpvymtw | pass | closed | 2026-02-28T06:47:48Z |
-| 9 | bd-azyx | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-azyx-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
+| 9 | bd-azyx | closed | 019ca30e-f35f-7ba1-a137-57f64ab4e14b | 019ca312-7d8e-7781-82d8-bb8ec08bf096 | 019ca313-f49f-7fe0-9248-e08ce8b7ddf0 | 019ca320-707b-70f0-b383-80bbab627304 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-azyx-implementation.md | lrsnwvov | pass | closed | 2026-02-28T07:26:58Z |
 | 10 | bd-9hym | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-9hym-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 | 11 | bd-swt5 | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-swt5-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 | 12 | bd-8x41 | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-8x41-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
@@ -119,3 +119,15 @@ planned | sanity_failed | sanity_passed | implementing | review_failed | review_
 | 2026-02-28T06:47:48Z | bd-642h | close_confirmed | ok | bd close executed and bd show reports status=closed; closed_count=8 |
 | 2026-02-28T06:47:48Z | bd-642h | subagents_closed | ok | planner/sanity/implementer/reviewer agents closed after review and verification |
 | 2026-02-28T06:47:48Z | campaign | maintenance | ok | cadence hit (8 closed): ran cargo clean && cargo check |
+| 2026-02-28T06:48:11Z | bd-azyx | bead_claimed | ok | bd claim succeeded; jj new created lrsnwvov (bd-azyx: start) |
+| 2026-02-28T06:57:21Z | bd-azyx | planner_completed | ok | plan written to docs/plans/2026-02-28-bd-azyx-implementation.md |
+| 2026-02-28T07:02:57Z | bd-azyx | sanity_completed | fail | adjust test-hook feature wiring + slow-test command + multiline split-path grep checks |
+| 2026-02-28T07:06:48Z | bd-azyx | planner_completed | ok | revised plan written with test-hook wiring and corrected slow-test verification commands |
+| 2026-02-28T07:08:20Z | bd-azyx | sanity_completed | pass | revised plan accepted with corrected crash-test wiring and verification commands |
+| 2026-02-28T07:08:43Z | bd-azyx | implementer_started | ok | worker agent spawned for atomic event+watermark durability commit cutover |
+| 2026-02-28T07:21:59Z | bd-azyx | implementer_completed | ok | code landed on lrsnwvov with atomic commit wrapper, callsite cutover, and rollback/crash proofs |
+| 2026-02-28T07:22:22Z | bd-azyx | reviewer_started | ok | reviewer agent spawned for bd-azyx correctness/spec audit |
+| 2026-02-28T07:26:11Z | bd-azyx | reviewer_completed | pass | reviewer found no blocking correctness issues for atomic commit durability cutover |
+| 2026-02-28T07:26:58Z | bd-azyx | verification_completed | pass | controller reran fmt+dylint+clippy(-D warnings)+test successfully |
+| 2026-02-28T07:26:58Z | bd-azyx | close_confirmed | ok | bd close executed and bd show reports status=closed; closed_count=9 |
+| 2026-02-28T07:26:58Z | bd-azyx | subagents_closed | ok | planner/sanity/implementer/reviewer agents closed after review and verification |
