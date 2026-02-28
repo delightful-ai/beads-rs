@@ -27,6 +27,8 @@ use super::{ClientRequestEventIds, HlcRow, SegmentRow, WalIndex, WalIndexError, 
 #[cfg(test)]
 use crate::core::sha256_bytes;
 #[cfg(test)]
+use std::cell::Cell;
+#[cfg(test)]
 use std::io::Write;
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -48,6 +50,32 @@ pub struct TailTruncation {
 pub enum ReplayMode {
     Rebuild,
     CatchUp,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ReplayAtomicCommitStage {
+    AfterRowsBeforeFrontier,
+    AfterFrontierBeforeCommit,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CRASH_STAGE: Cell<Option<ReplayAtomicCommitStage>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+fn set_test_crash_stage(stage: Option<ReplayAtomicCommitStage>) {
+    TEST_CRASH_STAGE.with(|cell| cell.set(stage));
+}
+
+#[cfg(test)]
+fn maybe_inject_test_crash(stage: ReplayAtomicCommitStage) -> Result<(), WalReplayError> {
+    let should_crash = TEST_CRASH_STAGE.with(|cell| cell.get() == Some(stage));
+    if should_crash {
+        return Err(WalReplayError::InjectedAtomicCatchUpCrash { stage });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -171,6 +199,9 @@ pub enum WalReplayError {
         #[source]
         source: EncodeError,
     },
+    #[cfg(test)]
+    #[error("injected atomic catch-up crash at {stage:?}")]
+    InjectedAtomicCatchUpCrash { stage: ReplayAtomicCommitStage },
 }
 
 impl WalReplayError {
@@ -204,6 +235,8 @@ impl WalReplayError {
             WalReplayError::IndexOffsetInvalid { .. }
             | WalReplayError::OriginSeqOverflow { .. } => ProtocolErrorCode::IndexCorrupt.into(),
             WalReplayError::Index(err) => err.code(),
+            #[cfg(test)]
+            WalReplayError::InjectedAtomicCatchUpCrash { .. } => CliErrorCode::IoError.into(),
         }
     }
 
@@ -482,6 +515,11 @@ fn replay_index(
         }
     }
 
+    #[cfg(test)]
+    if mode == ReplayMode::CatchUp {
+        maybe_inject_test_crash(ReplayAtomicCommitStage::AfterRowsBeforeFrontier)?;
+    }
+
     let mut txn = index.writer().begin_txn()?;
     let update_all = mode == ReplayMode::Rebuild;
     for (namespace, origins) in tracker.origins {
@@ -568,6 +606,11 @@ fn replay_index(
             txn.update_watermark(&namespace, &origin, watermarks)?;
             txn.set_next_origin_seq(&namespace, &origin, next_seq)?;
         }
+    }
+
+    #[cfg(test)]
+    if mode == ReplayMode::CatchUp {
+        maybe_inject_test_crash(ReplayAtomicCommitStage::AfterFrontierBeforeCommit)?;
     }
     txn.commit()?;
 
@@ -1171,14 +1214,14 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        ActorId, EventBody, EventKindV1, HlcMax, Limits, NamespaceId, ReplicaId, SegmentId, Seq1,
-        StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1,
-        encode_event_body_canonical,
+        ActorId, EventBody, EventKindV1, HlcMax, Limits, NamespaceId, ReplicaId, SegmentId, Seq0,
+        Seq1, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId,
+        TxnV1, encode_event_body_canonical,
     };
     use crate::wal::SegmentConfig;
     use crate::wal::record::{RecordHeader, RequestProof};
     use crate::wal::segment::SegmentWriter;
-    use crate::wal::{IndexDurabilityMode, SqliteWalIndex};
+    use crate::wal::{IndexDurabilityMode, IndexedRangeItem, SqliteWalIndex, WatermarkRow};
 
     fn test_meta(store_id: StoreId, store_epoch: StoreEpoch) -> StoreMeta {
         let identity = StoreIdentity::new(store_id, store_epoch);
@@ -1215,6 +1258,248 @@ mod tests {
                     logical: 1,
                 },
             }),
+        }
+    }
+
+    struct CatchUpAtomicFixture {
+        temp: TempDir,
+        meta: StoreMeta,
+        index: SqliteWalIndex,
+        limits: Limits,
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        touched_segment_id: SegmentId,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct ReplayStateSnapshot {
+        rows: Vec<IndexedRangeItem>,
+        frontier: Option<WatermarkRow>,
+        next_origin_seq: Seq1,
+        segment_offsets: BTreeMap<SegmentId, u64>,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn make_replay_record(
+        store: StoreIdentity,
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        seq: Seq1,
+        prev_sha256: Option<[u8; 32]>,
+        event_time_ms: u64,
+        txn_byte: u8,
+        limits: &Limits,
+    ) -> VerifiedRecord {
+        let body = EventBody {
+            envelope_v: 1,
+            store,
+            namespace,
+            origin_replica_id: origin,
+            origin_seq: seq,
+            event_time_ms,
+            txn_id: TxnId::new(Uuid::from_bytes([txn_byte; 16])),
+            client_request_id: None,
+            trace_id: None,
+            kind: EventKindV1::TxnV1(TxnV1 {
+                delta: TxnDeltaV1::new(),
+                hlc_max: HlcMax {
+                    actor_id: ActorId::new("alice".to_string()).unwrap(),
+                    physical_ms: event_time_ms,
+                    logical: 1,
+                },
+            }),
+        };
+        let body = body.into_validated(limits).expect("validated");
+        let payload = encode_event_body_canonical(body.as_ref()).expect("payload");
+        let sha256 = sha256_bytes(payload.as_ref()).0;
+        let header = RecordHeader {
+            origin_replica_id: origin,
+            origin_seq: seq,
+            event_time_ms,
+            txn_id: TxnId::new(Uuid::from_bytes([txn_byte; 16])),
+            request_proof: RequestProof::None,
+            sha256,
+            prev_sha256,
+        };
+        VerifiedRecord::new(header, payload, body).expect("verified record")
+    }
+
+    fn append_record(
+        writer: &mut SegmentWriter,
+        store: StoreIdentity,
+        namespace: &NamespaceId,
+        origin: ReplicaId,
+        seq: Seq1,
+        prev_sha256: Option<[u8; 32]>,
+        event_time_ms: u64,
+        txn_byte: u8,
+        limits: &Limits,
+    ) -> [u8; 32] {
+        let record = make_replay_record(
+            store,
+            namespace.clone(),
+            origin,
+            seq,
+            prev_sha256,
+            event_time_ms,
+            txn_byte,
+            limits,
+        );
+        let sha256 = record.header().sha256;
+        writer
+            .append(&record, event_time_ms)
+            .expect("append replay record");
+        sha256
+    }
+
+    fn seed_catch_up_atomic_fixture() -> CatchUpAtomicFixture {
+        let temp = TempDir::new().unwrap();
+        let store_id = StoreId::new(Uuid::from_bytes([41u8; 16]));
+        let store_epoch = StoreEpoch::new(1);
+        let meta = test_meta(store_id, store_epoch);
+        let limits = Limits::default();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([42u8; 16]));
+        let store = StoreIdentity::new(store_id, store_epoch);
+
+        let mut writer = SegmentWriter::open(
+            temp.path(),
+            &meta,
+            &namespace,
+            10,
+            SegmentConfig::from_limits(&limits),
+        )
+        .unwrap();
+
+        let sha1 = append_record(
+            &mut writer,
+            store,
+            &namespace,
+            origin,
+            Seq1::from_u64(1).expect("seq1"),
+            None,
+            11,
+            1,
+            &limits,
+        );
+        let sha2 = append_record(
+            &mut writer,
+            store,
+            &namespace,
+            origin,
+            Seq1::from_u64(2).expect("seq2"),
+            Some(sha1),
+            12,
+            2,
+            &limits,
+        );
+        let touched_segment_id = writer.current_segment_id();
+
+        rebuild_index(temp.path(), &meta, &index, &limits).expect("seed rebuild");
+
+        append_record(
+            &mut writer,
+            store,
+            &namespace,
+            origin,
+            Seq1::from_u64(3).expect("seq3"),
+            Some(sha2),
+            13,
+            3,
+            &limits,
+        );
+
+        CatchUpAtomicFixture {
+            temp,
+            meta,
+            index,
+            limits,
+            namespace,
+            origin,
+            touched_segment_id,
+        }
+    }
+
+    fn capture_snapshot(
+        index: &dyn WalIndex,
+        namespace: &NamespaceId,
+        origin: ReplicaId,
+    ) -> ReplayStateSnapshot {
+        let rows = index
+            .reader()
+            .iter_from(namespace, &origin, Seq0::ZERO, 1_000_000)
+            .expect("iter rows");
+        let frontier = index
+            .reader()
+            .load_watermarks()
+            .expect("load watermarks")
+            .into_iter()
+            .find(|row| row.namespace == *namespace && row.origin == origin);
+        let next_origin_seq = {
+            let mut txn = index.writer().begin_txn().expect("begin txn");
+            let next = txn
+                .next_origin_seq(namespace, &origin)
+                .expect("next origin seq");
+            txn.rollback().expect("rollback probe");
+            next
+        };
+        let segment_offsets = index
+            .reader()
+            .list_segments(namespace)
+            .expect("list segments")
+            .into_iter()
+            .map(|row| (row.segment_id(), row.last_indexed_offset()))
+            .collect();
+        ReplayStateSnapshot {
+            rows,
+            frontier,
+            next_origin_seq,
+            segment_offsets,
+        }
+    }
+
+    fn assert_recovered_after_retry(fixture: &CatchUpAtomicFixture, pre: &ReplayStateSnapshot) {
+        let post = capture_snapshot(&fixture.index, &fixture.namespace, fixture.origin);
+        assert!(
+            post.rows
+                .iter()
+                .any(|row| row.event_id.origin_seq == Seq1::from_u64(3).expect("seq3")),
+            "seq 3 should appear after retry"
+        );
+        let frontier = post.frontier.expect("frontier row after retry");
+        assert_eq!(frontier.applied_seq(), 3);
+        assert_eq!(frontier.durable_seq(), 3);
+        assert_eq!(post.next_origin_seq.get(), 4);
+
+        let pre_offset = pre
+            .segment_offsets
+            .get(&fixture.touched_segment_id)
+            .copied()
+            .expect("pre touched segment offset");
+        let post_offset = post
+            .segment_offsets
+            .get(&fixture.touched_segment_id)
+            .copied()
+            .expect("post touched segment offset");
+        assert!(
+            post_offset > pre_offset,
+            "touched segment last_indexed_offset should advance"
+        );
+    }
+
+    struct CrashStageGuard;
+
+    impl CrashStageGuard {
+        fn install(stage: ReplayAtomicCommitStage) -> Self {
+            set_test_crash_stage(Some(stage));
+            Self
+        }
+    }
+
+    impl Drop for CrashStageGuard {
+        fn drop(&mut self) {
+            set_test_crash_stage(None);
         }
     }
 
@@ -1348,6 +1633,72 @@ mod tests {
             }
             other => panic!("expected RecordShaMismatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn catch_up_atomic_crash_after_rows_before_frontier_rolls_back_all() {
+        let fixture = seed_catch_up_atomic_fixture();
+        let pre = capture_snapshot(&fixture.index, &fixture.namespace, fixture.origin);
+        assert_eq!(pre.rows.len(), 2);
+        assert_eq!(pre.next_origin_seq.get(), 3);
+
+        {
+            let _guard = CrashStageGuard::install(ReplayAtomicCommitStage::AfterRowsBeforeFrontier);
+            let err = catch_up_index(fixture.temp.path(), &fixture.meta, &fixture.index, &fixture.limits)
+                .expect_err("injected crash should fail catch-up");
+            assert!(matches!(
+                err,
+                WalReplayError::InjectedAtomicCatchUpCrash {
+                    stage: ReplayAtomicCommitStage::AfterRowsBeforeFrontier
+                }
+            ));
+
+            let post_crash = capture_snapshot(&fixture.index, &fixture.namespace, fixture.origin);
+            assert_eq!(post_crash, pre);
+        }
+
+        catch_up_index(fixture.temp.path(), &fixture.meta, &fixture.index, &fixture.limits)
+            .expect("retry catch-up should succeed");
+        assert_recovered_after_retry(&fixture, &pre);
+    }
+
+    #[test]
+    fn catch_up_atomic_crash_after_frontier_before_commit_rolls_back_all() {
+        let fixture = seed_catch_up_atomic_fixture();
+        let pre = capture_snapshot(&fixture.index, &fixture.namespace, fixture.origin);
+        assert_eq!(pre.rows.len(), 2);
+        assert_eq!(pre.next_origin_seq.get(), 3);
+
+        {
+            let _guard = CrashStageGuard::install(ReplayAtomicCommitStage::AfterFrontierBeforeCommit);
+            let err = catch_up_index(fixture.temp.path(), &fixture.meta, &fixture.index, &fixture.limits)
+                .expect_err("injected crash should fail catch-up");
+            assert!(matches!(
+                err,
+                WalReplayError::InjectedAtomicCatchUpCrash {
+                    stage: ReplayAtomicCommitStage::AfterFrontierBeforeCommit
+                }
+            ));
+
+            let post_crash = capture_snapshot(&fixture.index, &fixture.namespace, fixture.origin);
+            assert_eq!(post_crash, pre);
+        }
+
+        catch_up_index(fixture.temp.path(), &fixture.meta, &fixture.index, &fixture.limits)
+            .expect("retry catch-up should succeed");
+        assert_recovered_after_retry(&fixture, &pre);
+    }
+
+    #[test]
+    fn catch_up_atomic_success_commits_rows_segments_and_frontier_together() {
+        let fixture = seed_catch_up_atomic_fixture();
+        let pre = capture_snapshot(&fixture.index, &fixture.namespace, fixture.origin);
+        assert_eq!(pre.rows.len(), 2);
+        assert_eq!(pre.next_origin_seq.get(), 3);
+
+        catch_up_index(fixture.temp.path(), &fixture.meta, &fixture.index, &fixture.limits)
+            .expect("catch-up should succeed");
+        assert_recovered_after_retry(&fixture, &pre);
     }
 
     #[test]

@@ -13,7 +13,7 @@
 | order | bead | stage | planner_id | sanity_id | implementer_id | reviewer_id | plan_file | jj_change | verify_status | close_status | last_update_utc |
 |------:|------|-------|------------|-----------|----------------|-------------|-----------|-----------|---------------|--------------|-----------------|
 | 1 | bd-2g9q | closed | 019ca229-9ab1-7ed0-aa18-802e825a77f2 | 019ca22e-7b3e-7792-9504-409e00b8f951 | 019ca234-6785-7bf3-8acf-c015fac3624e | 019ca243-520c-7c40-bb59-2e1fd20e1417 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-2g9q-implementation.md | ysnrnrwz | pass | closed | 2026-02-28T03:27:04Z |
-| 2 | bd-ooe2 | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-ooe2-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
+| 2 | bd-ooe2 | implementing | 019ca253-b508-78c0-acdb-c64083ec32b4 | 019ca256-2f48-7ae1-a236-8b800b0ca482 | 019ca257-2780-7462-8099-4804f625aad0 |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-ooe2-implementation.md | lksynrwv | pending | open | 2026-02-28T03:42:28Z |
 | 3 | bd-a3hl | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-a3hl-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 | 4 | bd-ub8m | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-ub8m-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 | 5 | bd-q6o7 | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-q6o7-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
@@ -43,3 +43,9 @@ planned | sanity_failed | sanity_passed | implementing | review_failed | review_
 | 2026-02-28T03:26:33Z | bd-2g9q | reviewer_completed | pass | reviewer found no blocking correctness issues; full gate commands reported passing |
 | 2026-02-28T03:27:04Z | bd-2g9q | verification_completed | pass | controller ran fmt+dylint+clippy(-D warnings)+test successfully |
 | 2026-02-28T03:27:04Z | bd-2g9q | close_confirmed | ok | bd show reports status=closed; closed_count incremented to 1 |
+| 2026-02-28T03:27:39Z | bd-ooe2 | bead_claimed | ok | bd claim succeeded; jj new created lksynrwv (bd-ooe2: start) |
+| 2026-02-28T03:35:00Z | bd-ooe2 | planner_completed | ok | plan written to docs/plans/2026-02-28-bd-ooe2-implementation.md |
+| 2026-02-28T03:38:30Z | bd-ooe2 | sanity_completed | fail | add segment-offset rollback assertions and post-crash retry recovery assertions |
+| 2026-02-28T03:41:10Z | bd-ooe2 | planner_completed | ok | revised plan adds segment-offset rollback + post-crash retry assertions |
+| 2026-02-28T03:42:09Z | bd-ooe2 | sanity_completed | pass | revised plan accepted with rollback+retry atomicity proof requirements |
+| 2026-02-28T03:42:28Z | bd-ooe2 | implementer_started | ok | worker agent spawned for replay atomic catch-up refactor |
