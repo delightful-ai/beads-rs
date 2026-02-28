@@ -169,7 +169,9 @@ fn fsck_repair_quarantines_only_when_no_valid_prefix_exists() {
                 original_segment_path,
                 quarantined_path,
                 cause,
-            } if *original_segment_path == segment.path && *cause == FsckEvidenceCode::SegmentHeaderInvalid => {
+            } if *original_segment_path == segment.path
+                && *cause == FsckEvidenceCode::SegmentHeaderInvalid =>
+            {
                 Some(quarantined_path.clone())
             }
             _ => None,
@@ -179,7 +181,10 @@ fn fsck_repair_quarantines_only_when_no_valid_prefix_exists() {
     assert!(!segment.path.exists());
     assert!(quarantined_path.exists());
     assert_eq!(
-        quarantined_path.parent().expect("quarantine parent").file_name(),
+        quarantined_path
+            .parent()
+            .expect("quarantine parent")
+            .file_name(),
         Some(std::ffi::OsStr::new("quarantine"))
     );
 }

@@ -247,8 +247,8 @@ fn write_stdout(text: &str) -> crate::Result<()> {
 mod tests {
     use super::*;
     use beads_api::{
-        FsckCheck, FsckCheckId, FsckEvidence, FsckEvidenceCode, FsckRepair, FsckRisk,
-        FsckSeverity, FsckStats, FsckSummary,
+        FsckCheck, FsckCheckId, FsckEvidence, FsckEvidenceCode, FsckRepair, FsckRisk, FsckSeverity,
+        FsckStats, FsckSummary,
     };
     use beads_core::{NamespaceId, ReplicaId};
     use std::path::PathBuf;

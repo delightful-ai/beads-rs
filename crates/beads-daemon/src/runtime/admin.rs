@@ -354,12 +354,14 @@ mod tests {
 
     #[test]
     fn fsck_repair_to_api_maps_all_variants() {
-        let salvage = fsck_repair_to_api(crate::runtime::wal::fsck::FsckRepair::PrefixSalvageTruncate {
-            segment_path: PathBuf::from("/tmp/wal/core/a.wal"),
-            truncate_to_offset: 64,
-            discarded_suffix_bytes: 32,
-            cause: crate::runtime::wal::fsck::FsckEvidenceCode::FrameCrcMismatch,
-        });
+        let salvage = fsck_repair_to_api(
+            crate::runtime::wal::fsck::FsckRepair::PrefixSalvageTruncate {
+                segment_path: PathBuf::from("/tmp/wal/core/a.wal"),
+                truncate_to_offset: 64,
+                discarded_suffix_bytes: 32,
+                cause: crate::runtime::wal::fsck::FsckEvidenceCode::FrameCrcMismatch,
+            },
+        );
         assert!(matches!(
             salvage,
             FsckRepair::PrefixSalvageTruncate {

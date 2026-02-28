@@ -6,8 +6,8 @@
 - workspace: current_workspace
 - close_scope: p0_children_only
 - clean_every_closed_beads: 4
-- closed_count: 5
-- current_bead: bd-r39f
+- closed_count: 6
+- current_bead: bd-jzxt
 
 ## Bead Ledger
 | order | bead | stage | planner_id | sanity_id | implementer_id | reviewer_id | plan_file | jj_change | verify_status | close_status | last_update_utc |
@@ -17,7 +17,7 @@
 | 3 | bd-a3hl | closed | 019ca264-6693-7833-974a-7a498c2be3d0 | 019ca269-0cbd-7480-bfe0-223fcca93357 | 019ca26b-2851-7383-b54f-9f05ba71dc88 | 019ca272-bb45-79a2-b27b-0aa622ed8cd0 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-a3hl-implementation.md | kyqkwxro | pass | closed | 2026-02-28T04:17:06Z |
 | 4 | bd-ub8m | closed | 019ca277-7825-79c0-9d6a-0729659f3dcd | 019ca27b-e24a-7641-9cbd-7f569a9b5b04 | 019ca27e-7e8e-7ac1-8e18-2719d610ef52 | 019ca286-984e-7052-870d-6d504f4d468e | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-ub8m-implementation.md | oxoskrvp | pass | closed | 2026-02-28T04:40:13Z |
 | 5 | bd-q6o7 | closed | 019ca28c-e0bc-7173-93cf-9e9a5d69907d | 019ca290-f64e-7ec3-af8b-e40b506a35ab | 019ca293-884f-7f60-a890-28b762a5e691 | 019ca29d-b3e6-77a0-8c04-b8156f49dc79 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-q6o7-implementation.md | rnoyzppv | pass | closed | 2026-02-28T05:06:11Z |
-| 6 | bd-r39f | implementing | 019ca2a4-6825-7051-a153-3c1d4811b34c | 019ca2ab-6f48-74d3-9b75-97090d82e5cd | 019ca2ae-7bff-7200-8051-fc693ba36bb4 |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-r39f-implementation.md | kzrxyxtk | pending | open | 2026-02-28T05:17:54Z |
+| 6 | bd-r39f | closed | 019ca2a4-6825-7051-a153-3c1d4811b34c | 019ca2ab-6f48-74d3-9b75-97090d82e5cd | 019ca2ae-7bff-7200-8051-fc693ba36bb4 | 019ca2b6-3f92-7b92-bc23-2c9d89d24774 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-r39f-implementation.md | vzksmmsu | pass | closed | 2026-02-28T05:30:17Z |
 | 7 | bd-jzxt | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-jzxt-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 | 8 | bd-642h | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-642h-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 | 9 | bd-azyx | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-azyx-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
@@ -88,3 +88,9 @@ planned | sanity_failed | sanity_passed | implementing | review_failed | review_
 | 2026-02-28T05:14:17Z | bd-r39f | planner_completed | ok | plan written to docs/plans/2026-02-28-bd-r39f-implementation.md |
 | 2026-02-28T05:17:36Z | bd-r39f | sanity_completed | pass | plan validated for hard-cutover typed fsck repair semantics and boundary constraints |
 | 2026-02-28T05:17:54Z | bd-r39f | implementer_started | ok | worker agent spawned for fsck prefix-salvage hard-cutover implementation |
+| 2026-02-28T05:26:22Z | bd-r39f | implementer_completed | ok | code landed on e74ef13e+vzksmmsu with typed fsck repair cutover and tests |
+| 2026-02-28T05:26:22Z | bd-r39f | reviewer_started | ok | reviewer agent spawned for bd-r39f correctness/spec audit |
+| 2026-02-28T05:29:43Z | bd-r39f | reviewer_completed | pass | reviewer found no blocking correctness issues; hard-cutover compliance verified |
+| 2026-02-28T05:30:17Z | bd-r39f | verification_completed | pass | controller reran fmt+dylint+clippy(-D warnings)+test successfully |
+| 2026-02-28T05:30:17Z | bd-r39f | close_confirmed | ok | bd close executed and bd show reports status=closed; closed_count=6 |
+| 2026-02-28T05:30:17Z | bd-r39f | subagents_closed | ok | planner/sanity/implementer/reviewer agents closed after review and verification |
