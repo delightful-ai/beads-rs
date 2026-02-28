@@ -506,22 +506,26 @@ impl Daemon {
             Err(err) => return Response::err_from(err),
         };
         let store_id = proof.store_id();
-        let store = proof.runtime_mut();
-
-        let (old_replica_id, new_replica_id) = match store.rotate_replica_id() {
-            Ok(ids) => ids,
+        let rotation = match proof.runtime_mut().rotate_replica_id() {
+            Ok(rotation) => rotation,
             Err(err) => return Response::err_from(OpError::StoreRuntime(Box::new(err))),
         };
         tracing::warn!(
             store_id = %store_id,
-            old_replica_id = %old_replica_id,
-            new_replica_id = %new_replica_id,
+            old_replica_id = %rotation.old_replica_id,
+            new_replica_id = %rotation.new_replica_id,
+            runtime_version = ?rotation.runtime_version,
             "replica_id rotated"
         );
+        drop(proof);
+
+        if let Err(err) = self.reload_replication_runtime(store_id) {
+            return Response::err_from(err);
+        }
 
         let output = AdminRotateReplicaIdOutput {
-            old_replica_id,
-            new_replica_id,
+            old_replica_id: rotation.old_replica_id,
+            new_replica_id: rotation.new_replica_id,
         };
         Response::ok(ResponsePayload::query(QueryResult::AdminRotateReplicaId(
             output,

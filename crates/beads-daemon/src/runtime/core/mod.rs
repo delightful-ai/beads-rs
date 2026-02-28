@@ -54,7 +54,9 @@ use super::repl::{
 };
 #[cfg(any(test, feature = "test-harness"))]
 use super::store::discovery::{StoreIdResolution, StoreIdSource};
-use super::store::runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
+use super::store::runtime::{
+    ReplicationRuntimeVersion, StoreRuntime, StoreRuntimeError, load_replica_roster,
+};
 use super::store::{ResolvedStore, StoreCaches};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof, SegmentRow, VerifiedRecord,
@@ -179,11 +181,16 @@ pub struct Daemon {
 }
 
 pub(crate) struct ReplicationHandles {
+    runtime_version: ReplicationRuntimeVersion,
     manager: Option<ReplicationManagerHandle>,
     server: Option<ReplicationServerHandle>,
 }
 
 impl ReplicationHandles {
+    fn runtime_version(&self) -> ReplicationRuntimeVersion {
+        self.runtime_version
+    }
+
     fn shutdown(self) {
         if let Some(handle) = self.manager {
             handle.shutdown();
@@ -546,6 +553,15 @@ mod tests {
         daemon
             .session_token_for_store(store_id)
             .expect("store session token")
+    }
+
+    fn bound_repl_runtime_version(daemon: &Daemon, store_id: StoreId) -> ReplicationRuntimeVersion {
+        daemon
+            .store_sessions
+            .get(&store_id)
+            .and_then(StoreSession::repl_handles)
+            .map(ReplicationHandles::runtime_version)
+            .expect("replication runtime handles")
     }
 
     #[test]
@@ -1271,6 +1287,12 @@ mod tests {
             .expect("reload store");
         let token_v2 = session_token(&daemon, store_id);
         assert_ne!(token_v1, token_v2);
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("bind replication runtime");
+        let runtime_version = bound_repl_runtime_version(&daemon, store_id);
 
         {
             let mut loaded = daemon.loaded_store(store_id, remote.clone());
@@ -1319,6 +1341,7 @@ mod tests {
         let (stale_tx, stale_rx) = crossbeam::channel::bounded(1);
         daemon.handle_repl_ingest(ReplIngestRequest {
             session: token_v1,
+            runtime_version,
             batch: batch.clone(),
             now_ms,
             respond: stale_tx,
@@ -1332,6 +1355,7 @@ mod tests {
         let (fresh_tx, fresh_rx) = crossbeam::channel::bounded(1);
         daemon.handle_repl_ingest(ReplIngestRequest {
             session: token_v2,
+            runtime_version,
             batch,
             now_ms,
             respond: fresh_tx,
@@ -1346,6 +1370,166 @@ mod tests {
             .get(&namespace)
             .expect("namespace state");
         assert!(state.get_live(&bead_id).is_some());
+    }
+
+    #[test]
+    fn ensure_replication_runtime_rebinds_when_binding_version_changes() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("initial bind");
+        let runtime_version_v1 = bound_repl_runtime_version(&daemon, store_id);
+
+        let rotation = daemon
+            .store_sessions
+            .get_mut(&store_id)
+            .expect("store session")
+            .runtime_mut()
+            .rotate_replica_id()
+            .expect("rotate replica id");
+        assert!(rotation.runtime_version > runtime_version_v1);
+
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("rebind replication runtime");
+        let runtime_version_v2 = bound_repl_runtime_version(&daemon, store_id);
+        assert_eq!(runtime_version_v2, rotation.runtime_version);
+    }
+
+    #[test]
+    fn replica_id_rotation_invalidates_old_replication_runtime_and_requires_rebind_before_ingest() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("initial bind");
+        let runtime_version_v1 = bound_repl_runtime_version(&daemon, store_id);
+
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([91u8; 16]));
+        let store = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+        let bead_id = BeadId::parse("bd-rotate-repl").expect("bead id");
+        let mut patch_v1 = WireBeadPatch::new(bead_id.clone());
+        patch_v1.title = Some("replicated v1".to_string());
+        let mut delta_v1 = TxnDeltaV1::new();
+        delta_v1
+            .insert(TxnOpV1::BeadUpsert(Box::new(patch_v1)))
+            .expect("delta insert");
+        let event_v1 = verified_event_with_delta(store, &namespace, origin, 1, None, delta_v1);
+        let mut patch_v2 = WireBeadPatch::new(bead_id.clone());
+        patch_v2.title = Some("replicated v2".to_string());
+        let mut delta_v2 = TxnDeltaV1::new();
+        delta_v2
+            .insert(TxnOpV1::BeadUpsert(Box::new(patch_v2)))
+            .expect("delta insert");
+        let event_v2 = verified_event_with_delta(
+            store,
+            &namespace,
+            origin,
+            2,
+            Some(event_v1.sha256.clone()),
+            delta_v2,
+        );
+        let batch_v1 = ContiguousBatch::try_new(vec![event_v1]).expect("batch v1");
+        let batch_v2 = ContiguousBatch::try_new(vec![event_v2]).expect("batch v2");
+        let now_ms = 1_700_000_000_000u64;
+        let token = session_token(&daemon, store_id);
+
+        let (initial_tx, initial_rx) = crossbeam::channel::bounded(1);
+        daemon.handle_repl_ingest(ReplIngestRequest {
+            session: token,
+            runtime_version: runtime_version_v1,
+            batch: batch_v1,
+            now_ms,
+            respond: initial_tx,
+        });
+        assert!(initial_rx.recv().expect("initial ingest response").is_ok());
+
+        let rotation = daemon
+            .store_sessions
+            .get_mut(&store_id)
+            .expect("store session")
+            .runtime_mut()
+            .rotate_replica_id()
+            .expect("rotate replica id");
+        let stale_handles = daemon
+            .store_sessions
+            .get_mut(&store_id)
+            .and_then(StoreSession::take_repl_handles)
+            .expect("bound handles");
+        stale_handles.shutdown();
+        assert!(
+            daemon
+                .store_sessions
+                .get(&store_id)
+                .and_then(StoreSession::repl_handles)
+                .is_none()
+        );
+
+        let (stale_v1_tx, stale_v1_rx) = crossbeam::channel::bounded(1);
+        daemon.handle_repl_ingest(ReplIngestRequest {
+            session: token,
+            runtime_version: runtime_version_v1,
+            batch: batch_v2.clone(),
+            now_ms,
+            respond: stale_v1_tx,
+        });
+        let stale_v1 = stale_v1_rx
+            .recv()
+            .expect("stale v1 response")
+            .expect_err("stale v1 should fail");
+
+        let (stale_v2_tx, stale_v2_rx) = crossbeam::channel::bounded(1);
+        daemon.handle_repl_ingest(ReplIngestRequest {
+            session: token,
+            runtime_version: rotation.runtime_version,
+            batch: batch_v2.clone(),
+            now_ms,
+            respond: stale_v2_tx,
+        });
+        let stale_v2 = stale_v2_rx
+            .recv()
+            .expect("stale v2 response")
+            .expect_err("stale v2 should fail");
+        assert!(stale_v1.retryable);
+        assert!(stale_v2.retryable);
+        assert_eq!(stale_v1.code, stale_v2.code);
+        assert_eq!(stale_v1.message, stale_v2.message);
+
+        daemon
+            .reload_replication_runtime(store_id)
+            .expect("explicit rebind");
+        assert_eq!(
+            bound_repl_runtime_version(&daemon, store_id),
+            rotation.runtime_version
+        );
+
+        let (rebound_tx, rebound_rx) = crossbeam::channel::bounded(1);
+        daemon.handle_repl_ingest(ReplIngestRequest {
+            session: token,
+            runtime_version: rotation.runtime_version,
+            batch: batch_v2,
+            now_ms,
+            respond: rebound_tx,
+        });
+        assert!(rebound_rx.recv().expect("rebound response").is_ok());
     }
 
     #[test]
@@ -1887,6 +2071,12 @@ mod tests {
         let repo_path = tmp.data_dir().join("repo");
         std::fs::create_dir_all(&repo_path).unwrap();
         insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("bind replication runtime");
+        let runtime_version = bound_repl_runtime_version(&daemon, store_id);
 
         {
             let runtime = daemon
@@ -1903,6 +2093,7 @@ mod tests {
         let batch = ContiguousBatch::try_new(vec![event]).expect("contiguous batch");
         daemon.handle_repl_ingest(ReplIngestRequest {
             session: session_token(&daemon, store_id),
+            runtime_version,
             batch,
             now_ms,
             respond: respond_tx,

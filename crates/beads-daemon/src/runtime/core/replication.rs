@@ -14,6 +14,8 @@ use crate::runtime::repl::{
 use crate::runtime::store::runtime::load_replica_roster;
 use crate::runtime::wal::WalIndex;
 
+const REPL_RUNTIME_RETRY_AFTER_MS: u64 = 100;
+
 impl Daemon {
     fn replication_peers(&self) -> Vec<PeerConfig> {
         self.replication
@@ -29,12 +31,16 @@ impl Daemon {
     }
 
     pub(super) fn ensure_replication_runtime(&mut self, store_id: StoreId) -> Result<(), OpError> {
-        if self
-            .store_sessions
-            .get(&store_id)
-            .and_then(StoreSession::repl_handles)
-            .is_some()
-        {
+        if let Some(session) = self.store_sessions.get_mut(&store_id) {
+            let current_runtime_version = session.runtime().replication_runtime_version();
+            if let Some(handles) = session.take_repl_handles() {
+                if handles.runtime_version() == current_runtime_version {
+                    session.set_repl_handles(handles);
+                    return Ok(());
+                }
+                handles.shutdown();
+            }
+        } else {
             return Ok(());
         }
 
@@ -47,6 +53,7 @@ impl Daemon {
             return Ok(());
         };
         let store = session.runtime();
+        let runtime_version = store.replication_runtime_version();
 
         let wal_index: Arc<dyn WalIndex> = store.wal_index.clone();
         let wal_reader = Some(WalRangeReader::new(
@@ -54,8 +61,12 @@ impl Daemon {
             wal_index.clone(),
             self.limits.clone(),
         ));
-        let session_store =
-            SharedSessionStore::new(ReplSessionStore::new(session.token(), wal_index, ingest_tx));
+        let session_store = SharedSessionStore::new(ReplSessionStore::new(
+            session.token(),
+            runtime_version,
+            wal_index,
+            ingest_tx,
+        ));
 
         let roster = load_replica_roster(self.layout(), store_id)
             .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
@@ -105,6 +116,7 @@ impl Daemon {
 
         if let Some(session) = self.store_sessions.get_mut(&store_id) {
             session.set_repl_handles(ReplicationHandles {
+                runtime_version,
                 manager: Some(manager_handle),
                 server: server_handle,
             });
@@ -124,16 +136,19 @@ impl Daemon {
         }
 
         let store_id = request.session.store_id();
-        let (store_epoch, local_replica_id) = self
+        let (store_epoch, local_replica_id, bound_runtime_version) = self
             .store_sessions
             .get(&store_id)
             .map(|session| {
                 (
                     Some(session.runtime().meta.identity.store_epoch),
                     Some(session.runtime().meta.replica_id),
+                    session
+                        .repl_handles()
+                        .map(ReplicationHandles::runtime_version),
                 )
             })
-            .unwrap_or((None, None));
+            .unwrap_or((None, None, None));
         let first_event = request.batch.first_event();
         let origin_seq = Some(first_event.body.origin_seq.get());
         let txn_id = Some(first_event.body.txn_id);
@@ -152,9 +167,22 @@ impl Daemon {
             txn_id = ?txn_id,
             client_request_id = ?client_request_id,
             trace_id = ?trace_id,
+            request_runtime_version = ?request.runtime_version,
+            bound_runtime_version = ?bound_runtime_version,
             batch_len = request.batch.len()
         );
         let _guard = span.enter();
+
+        let Some(bound_runtime_version) = bound_runtime_version else {
+            let error = Self::replication_runtime_missing_binding_error();
+            let _ = request.respond.send(Err(error));
+            return;
+        };
+        if request.runtime_version != bound_runtime_version {
+            let error = Self::replication_runtime_stale_binding_error();
+            let _ = request.respond.send(Err(error));
+            return;
+        }
 
         if self.shutting_down {
             let error = ReplError::new(
@@ -255,5 +283,37 @@ impl Daemon {
         let runtime = crate::config::daemon_runtime_from_config(&config);
         self.replication = runtime.replication;
         Ok(())
+    }
+
+    fn replication_runtime_missing_binding_error() -> ReplError {
+        ReplError::new(
+            ProtocolErrorCode::Overloaded.into(),
+            "replication runtime binding missing",
+            true,
+        )
+        .with_details(ReplErrorDetails::Overloaded(
+            error_details::OverloadedDetails {
+                subsystem: Some(error_details::OverloadedSubsystem::Repl),
+                retry_after_ms: Some(REPL_RUNTIME_RETRY_AFTER_MS),
+                queue_bytes: None,
+                queue_events: None,
+            },
+        ))
+    }
+
+    fn replication_runtime_stale_binding_error() -> ReplError {
+        ReplError::new(
+            ProtocolErrorCode::Overloaded.into(),
+            "stale replication runtime binding",
+            true,
+        )
+        .with_details(ReplErrorDetails::Overloaded(
+            error_details::OverloadedDetails {
+                subsystem: Some(error_details::OverloadedSubsystem::Repl),
+                retry_after_ms: Some(REPL_RUNTIME_RETRY_AFTER_MS),
+                queue_bytes: None,
+                queue_events: None,
+            },
+        ))
     }
 }

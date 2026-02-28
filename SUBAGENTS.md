@@ -6,8 +6,8 @@
 - workspace: current_workspace
 - close_scope: p0_children_only
 - clean_every_closed_beads: 4
-- closed_count: 10
-- current_bead: bd-swt5
+- closed_count: 11
+- current_bead: bd-8x41
 
 ## Bead Ledger
 | order | bead | stage | planner_id | sanity_id | implementer_id | reviewer_id | plan_file | jj_change | verify_status | close_status | last_update_utc |
@@ -22,7 +22,7 @@
 | 8 | bd-642h | closed | 019ca2e5-391d-71b0-9f6b-065c84f18303 | 019ca2e8-daaf-77e1-b9fc-85f51e267c86 | 019ca2ea-599d-7362-be52-0c32494033c8 | 019ca2fc-2cdf-7e01-83ae-5509a51c1e79 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-642h-implementation.md | ykpvymtw | pass | closed | 2026-02-28T06:47:48Z |
 | 9 | bd-azyx | closed | 019ca30e-f35f-7ba1-a137-57f64ab4e14b | 019ca312-7d8e-7781-82d8-bb8ec08bf096 | 019ca313-f49f-7fe0-9248-e08ce8b7ddf0 | 019ca320-707b-70f0-b383-80bbab627304 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-azyx-implementation.md | lrsnwvov | pass | closed | 2026-02-28T07:26:58Z |
 | 10 | bd-9hym | closed | 019ca663-7b64-79d3-a201-9bd05f98c081 | 019ca665-7333-7001-9692-93aa9d094f13 | 019ca667-d5e7-7f23-b3b0-270eaeb9c431 | 019ca683-b592-7cf2-80b8-4b2b64675f31 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-9hym-implementation.md | wqqvwrxz | pass | closed | 2026-02-28T23:12:50Z |
-| 11 | bd-swt5 | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-swt5-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
+| 11 | bd-swt5 | closed | 019ca694-c52a-72f0-8623-552c653c1978 | 019ca698-69dc-74a1-b303-c9da3cde7188 | 019ca699-a052-7b32-878f-aa7b24aafe51 | 019ca6a1-d3a4-7611-9eba-df7134c7c0a0 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-swt5-implementation.md | nkyxyvqv | pass | closed | 2026-02-28T23:45:02Z |
 | 12 | bd-8x41 | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-8x41-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 
 ## Stage Enum
@@ -149,3 +149,18 @@ planned | sanity_failed | sanity_passed | implementing | review_failed | review_
 | 2026-02-28T23:12:50Z | bd-9hym | verification_completed | pass | controller reran fmt+dylint+clippy(-D warnings)+test successfully |
 | 2026-02-28T23:12:50Z | bd-9hym | close_confirmed | ok | bd close executed and bd show reports status=closed; closed_count=10 |
 | 2026-02-28T23:13:20Z | bd-9hym | subagents_closed | ok | planner/sanity/implementer/reviewer agents closed after review and verification |
+| 2026-02-28T23:13:37Z | bd-swt5 | bead_claimed | ok | bd claim succeeded; jj new created nkyxyvqv (bd-swt5: start) |
+| 2026-02-28T23:20:24Z | bd-swt5 | planner_completed | ok | plan written to docs/plans/2026-02-28-bd-swt5-implementation.md |
+| 2026-02-28T23:23:51Z | bd-swt5 | sanity_completed | fail | ingest gate authority contradictory; must validate request runtime_version against bound repl_handles runtime_version, not store metadata |
+| 2026-02-28T23:25:24Z | bd-swt5 | planner_completed | ok | revised plan clarifies ingest gate authority from bound replication handles runtime_version |
+| 2026-02-28T23:27:48Z | bd-swt5 | sanity_completed | fail | pre-rebind scenario wording inconsistent: with dropped handles and handle-authority gating both v1/v2 requests must reject as missing binding |
+| 2026-02-28T23:28:49Z | bd-swt5 | planner_completed | ok | revised pre/post-rebind scenario now consistently rejects pre-rebind v1/v2 ingest as missing-binding class |
+| 2026-02-28T23:31:54Z | bd-swt5 | sanity_completed | fail | sanity scope mismatch: checked unimplemented code state instead of plan coherence; rerun requested with plan-only criteria |
+| 2026-02-28T23:33:11Z | bd-swt5 | sanity_completed | pass | plan-only sanity approved hard-cutover replication rebind versioning design and test coverage |
+| 2026-02-28T23:33:38Z | bd-swt5 | implementer_started | ok | worker agent spawned for replication runtime version/rebind hard-cutover implementation |
+| 2026-02-28T23:42:01Z | bd-swt5 | implementer_completed | ok | code landed on nkyxyvqv@80f9af89 with runtime-version rebind cutover and full gate passing |
+| 2026-02-28T23:42:32Z | bd-swt5 | reviewer_started | ok | reviewer agent spawned for replication runtime rebind/versioning correctness audit |
+| 2026-02-28T23:44:18Z | bd-swt5 | reviewer_completed | pass | reviewer found no blocking correctness issues for replication runtime rebind/versioning cutover |
+| 2026-02-28T23:45:02Z | bd-swt5 | verification_completed | pass | controller reran fmt+dylint+clippy(-D warnings)+test successfully |
+| 2026-02-28T23:45:02Z | bd-swt5 | close_confirmed | ok | bd close executed and bd show reports status=closed; closed_count=11 |
+| 2026-02-28T23:45:24Z | bd-swt5 | subagents_closed | ok | planner/sanity/implementer/reviewer agents closed after review and verification |

@@ -59,10 +59,33 @@ pub struct WalTailTruncatedRecord {
     pub wall_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ReplicationRuntimeVersion(u64);
+
+impl ReplicationRuntimeVersion {
+    const INITIAL: Self = Self(1);
+
+    fn next(self) -> Self {
+        Self(
+            self.0
+                .checked_add(1)
+                .expect("replication runtime version overflow"),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReplicaIdRotation {
+    pub old_replica_id: ReplicaId,
+    pub new_replica_id: ReplicaId,
+    pub runtime_version: ReplicationRuntimeVersion,
+}
+
 pub struct StoreRuntime {
     layout: DaemonLayout,
     pub primary_remote: RemoteUrl,
     pub meta: StoreMeta,
+    replication_runtime_version: ReplicationRuntimeVersion,
     pub policies: BTreeMap<NamespaceId, NamespacePolicy>,
     pub state: StoreState,
     pub last_wal_tail_truncated: Option<WalTailTruncatedRecord>,
@@ -258,6 +281,7 @@ impl StoreRuntime {
             layout: layout.clone(),
             primary_remote,
             meta,
+            replication_runtime_version: ReplicationRuntimeVersion::INITIAL,
             policies: load_namespace_policies_with_layout(layout, store_id, namespace_defaults)?,
             state: StoreState::new(),
             last_wal_tail_truncated,
@@ -486,6 +510,10 @@ impl StoreRuntime {
         self.checkpoint_dirty_inflight.remove(checkpoint_group);
     }
 
+    pub(crate) fn replication_runtime_version(&self) -> ReplicationRuntimeVersion {
+        self.replication_runtime_version
+    }
+
     pub(crate) fn rollback_checkpoint_dirty_shards(&mut self, checkpoint_group: &str) {
         let Some(in_flight) = self.checkpoint_dirty_inflight.remove(checkpoint_group) else {
             return;
@@ -530,13 +558,18 @@ impl StoreRuntime {
         dirty_shards
     }
 
-    pub fn rotate_replica_id(&mut self) -> Result<(ReplicaId, ReplicaId), StoreRuntimeError> {
-        let old = self.meta.replica_id;
-        let new = new_replica_id();
-        self.meta.replica_id = new;
+    pub(crate) fn rotate_replica_id(&mut self) -> Result<ReplicaIdRotation, StoreRuntimeError> {
+        let old_replica_id = self.meta.replica_id;
+        let new_replica_id = new_replica_id();
+        self.meta.replica_id = new_replica_id;
         let path = self.layout.store_meta_path(&self.meta.store_id());
         write_store_meta(&path, &self.meta)?;
-        Ok((old, new))
+        self.replication_runtime_version = self.replication_runtime_version.next();
+        Ok(ReplicaIdRotation {
+            old_replica_id,
+            new_replica_id,
+            runtime_version: self.replication_runtime_version,
+        })
     }
 
     pub fn next_orset_counter(&mut self) -> Result<u64, StoreRuntimeError> {
@@ -1661,6 +1694,46 @@ mod tests {
             .expect("read meta")
             .expect("meta exists");
         assert_eq!(meta.orset_counter, 2);
+    }
+
+    #[test]
+    fn rotate_replica_id_bumps_replication_runtime_version() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([35u8; 16]));
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let mut runtime = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_000,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("open runtime")
+        .runtime;
+
+        let version_v1 = runtime.replication_runtime_version();
+        let old_replica_id = runtime.meta.replica_id;
+        let rotation = runtime.rotate_replica_id().expect("rotate replica id");
+
+        assert_eq!(rotation.old_replica_id, old_replica_id);
+        assert_ne!(rotation.old_replica_id, rotation.new_replica_id);
+        assert!(rotation.runtime_version > version_v1);
+        assert_eq!(
+            rotation.runtime_version,
+            runtime.replication_runtime_version()
+        );
+
+        let meta_path = paths::store_meta_path(store_id);
+        let meta = read_store_meta_optional(&meta_path)
+            .expect("read meta")
+            .expect("meta exists");
+        assert_eq!(meta.replica_id, rotation.new_replica_id);
     }
 
     #[test]
