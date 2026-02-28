@@ -30,8 +30,8 @@ use super::ops::OpError;
 use super::store::runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
     ClientRequestEventIds, EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof,
-    SegmentRow, VerifiedRecord, WalAppend, WalCursorOffset, WalIndex, WalIndexError, WalIndexTxn,
-    WalIndexTxnProvider, WalReplayError, open_segment_reader,
+    SegmentRow, VerifiedRecord, WalAppend, WalAppendDurabilityEffect, WalCursorOffset, WalIndex,
+    WalIndexError, WalIndexTxn, WalIndexTxnProvider, WalReplayError, open_segment_reader,
 };
 use crate::broadcast::BroadcastEvent;
 use crate::core::error::details::OverloadedSubsystem;
@@ -230,7 +230,7 @@ impl Daemon {
         };
         let stamped_ctx = StampedContext::new(ctx.clone(), stamp.clone())?;
         let mut proof = self.loaded_store(store_id, remote.clone());
-        let draft = {
+        let planned = {
             let store_runtime = proof.runtime_mut();
             let state_snapshot = store_runtime.state.get_or_default(&namespace);
             let mut dot_alloc = RuntimeDotAllocator::new(origin_replica_id, store_runtime);
@@ -244,6 +244,7 @@ impl Daemon {
                 &mut dot_alloc,
             )
         }?;
+        let (draft, planning_effects) = planned.acknowledge_durability();
 
         let mut txn = wal_index.begin_wal_txn().map_err(wal_index_to_op)?;
         let LocalAppendPlan {
@@ -272,7 +273,9 @@ impl Daemon {
             trace_id = %ctx.trace_id,
             namespace = %namespace,
             origin_replica_id = %origin_replica_id,
-            origin_seq = origin_seq.get()
+            origin_seq = origin_seq.get(),
+            planning_dot_meta_sync_boundaries = planning_effects.dot_meta_sync_boundaries,
+            wal_durability_effect = ?WalAppendDurabilityEffect::SyncBoundaryCrossed
         );
         let _guard = span.enter();
         tracing::info!("mutation planned");
@@ -306,18 +309,18 @@ impl Daemon {
         })?;
 
         let now_ms = sequenced.event_body.event_time_ms;
-        let (append, segment_snapshot) = {
+        let (append, wal_effect, segment_snapshot) = {
             let store_runtime = proof.runtime_mut();
             let append_start = Instant::now();
             let append = match store_runtime
                 .event_wal
                 .wal_append(&namespace, &record, now_ms)
             {
-                Ok(append) => {
+                Ok(pending_append) => {
                     let elapsed = append_start.elapsed();
                     metrics::wal_append_ok(elapsed);
                     metrics::wal_fsync_ok(elapsed);
-                    append
+                    pending_append.acknowledge_durability()
                 }
                 Err(err) => {
                     let elapsed = append_start.elapsed();
@@ -326,12 +329,20 @@ impl Daemon {
                     return Err(err.into());
                 }
             };
+            let wal_effect = append.durability;
+            let append = append.append;
             let snapshot = store_runtime
                 .event_wal
                 .segment_snapshot(&namespace)
                 .ok_or(OpError::Internal("missing active wal segment"))?;
-            (append, snapshot)
+            (append, wal_effect, snapshot)
         };
+        span.record("wal_durability_effect", tracing::field::debug(&wal_effect));
+        tracing::debug!(
+            ?planning_effects,
+            ?wal_effect,
+            "mutation durability effects acknowledged"
+        );
         let last_indexed_offset = WalCursorOffset::new(append.offset + append.len as u64);
         let segment_row = SegmentRow::open(
             namespace.clone(),
@@ -863,11 +874,15 @@ mod tests {
     }
 
     impl DotAllocator for TestDotAllocator {
-        fn next_dot(&mut self) -> Result<Dot, OpError> {
+        fn next_dot(&mut self) -> Result<crate::runtime::mutation_engine::DotAllocation, OpError> {
             self.counter += 1;
-            Ok(Dot {
-                replica: self.replica_id,
-                counter: self.counter,
+            Ok(crate::runtime::mutation_engine::DotAllocation {
+                dot: Dot {
+                    replica: self.replica_id,
+                    counter: self.counter,
+                },
+                durability:
+                    crate::runtime::mutation_engine::DotDurabilityEffect::StoreMetaSyncBoundary,
             })
         }
     }
@@ -1046,6 +1061,8 @@ mod tests {
             schema::NAMESPACE,
             schema::ORIGIN_REPLICA_ID,
             schema::ORIGIN_SEQ,
+            "planning_dot_meta_sync_boundaries",
+            "wal_durability_effect",
         ] {
             assert!(
                 fields.contains_key(key),
@@ -1206,7 +1223,7 @@ mod tests {
         let stamp = Stamp::new(clock.tick(), actor.clone());
         let stamped_ctx = StampedContext::new(ctx.clone(), stamp.clone()).unwrap();
         let mut dots = TestDotAllocator::new(replica_id);
-        let draft = engine
+        let planned = engine
             .plan(
                 &state,
                 now_ms,
@@ -1217,6 +1234,7 @@ mod tests {
                 &mut dots,
             )
             .unwrap();
+        let (draft, _planning_effects) = planned.acknowledge_durability();
         let sequenced = engine
             .build_event(draft, store, ctx.namespace.clone(), replica_id, origin_seq)
             .unwrap();

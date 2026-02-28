@@ -90,11 +90,11 @@ impl Daemon {
 
             let append_start = Instant::now();
             let append = match store.event_wal.wal_append(&namespace, &record, now_ms) {
-                Ok(append) => {
+                Ok(pending_append) => {
                     let elapsed = append_start.elapsed();
                     metrics::wal_append_ok(elapsed);
                     metrics::wal_fsync_ok(elapsed);
-                    append
+                    pending_append.acknowledge_durability()
                 }
                 Err(err) => {
                     let elapsed = append_start.elapsed();
@@ -103,6 +103,9 @@ impl Daemon {
                     return Err(event_wal_error_payload(&namespace, None, None, err));
                 }
             };
+            let wal_effect = append.durability;
+            let append = append.append;
+            tracing::debug!(?wal_effect, "repl ingest wal durability acknowledged");
             let segment_snapshot =
                 store
                     .event_wal

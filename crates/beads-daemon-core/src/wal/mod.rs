@@ -55,7 +55,10 @@ pub use replay::{
     RecordShaMismatchInfo, ReplayMode, ReplayStats, WalReplayError, catch_up_index, rebuild_index,
 };
 #[cfg(feature = "wal-fs")]
-pub use seams::{WalAppend, WalIndexTxnProvider, WalReadRange};
+pub use seams::{
+    AcknowledgedWalAppend, PendingWalAppend, WalAppend, WalAppendDurabilityEffect,
+    WalIndexTxnProvider, WalReadRange,
+};
 #[cfg(feature = "wal-fs")]
 pub use segment::{
     AppendOutcome, SEGMENT_HEADER_PREFIX_LEN, SegmentConfig, SegmentHeader, SegmentSyncMode,

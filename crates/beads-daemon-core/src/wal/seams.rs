@@ -9,18 +9,52 @@ use super::{
     AppendOutcome, EventWal, EventWalResult, VerifiedRecord, WalIndex, WalIndexError, WalIndexTxn,
 };
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WalAppendDurabilityEffect {
+    SyncBoundaryCrossed,
+}
+
+/// ```compile_fail
+/// use beads_daemon_core::wal::PendingWalAppend;
+///
+/// fn bypass_ack(pending: PendingWalAppend) {
+///     let _ = pending.append;
+/// }
+/// ```
+#[must_use = "must acknowledge WAL durability effects before using append outcome"]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingWalAppend {
+    append: AppendOutcome,
+    durability: WalAppendDurabilityEffect,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AcknowledgedWalAppend {
+    pub append: AppendOutcome,
+    pub durability: WalAppendDurabilityEffect,
+}
+
+impl PendingWalAppend {
+    pub fn acknowledge_durability(self) -> AcknowledgedWalAppend {
+        AcknowledgedWalAppend {
+            append: self.append,
+            durability: self.durability,
+        }
+    }
+}
+
 /// Capability: append a verified record to namespace WAL storage.
 ///
 /// # Laws
 /// - Appends are per-namespace and preserve monotonic byte offsets.
-/// - Returned [`AppendOutcome`] describes the exact persisted segment/offset/len.
+/// - Returned [`PendingWalAppend`] must be acknowledged before append details are accessible.
 pub trait WalAppend {
     fn wal_append(
         &mut self,
         namespace: &NamespaceId,
         record: &VerifiedRecord,
         now_ms: u64,
-    ) -> EventWalResult<AppendOutcome>;
+    ) -> EventWalResult<PendingWalAppend>;
 }
 
 impl WalAppend for EventWal {
@@ -29,8 +63,12 @@ impl WalAppend for EventWal {
         namespace: &NamespaceId,
         record: &VerifiedRecord,
         now_ms: u64,
-    ) -> EventWalResult<AppendOutcome> {
+    ) -> EventWalResult<PendingWalAppend> {
         self.append(namespace, record, now_ms)
+            .map(|append| PendingWalAppend {
+                append,
+                durability: WalAppendDurabilityEffect::SyncBoundaryCrossed,
+            })
     }
 }
 
