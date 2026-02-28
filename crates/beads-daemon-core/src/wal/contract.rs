@@ -1,7 +1,7 @@
 #[cfg(any(feature = "test-harness", test))]
 use super::{
-    ClientRequestEventIds, HlcRow, ReplicaDurabilityRole, ReplicaLivenessRow, SegmentRow, WalIndex,
-    WalIndexError,
+    ClientRequestEventIds, HlcRow, ReplicaDurabilityRole, ReplicaLivenessRow, SegmentRow,
+    WalCursorOffset, WalIndex, WalIndexError,
 };
 #[cfg(any(feature = "test-harness", test))]
 use crate::core::{
@@ -40,14 +40,14 @@ where
         SegmentId::new(Uuid::from_bytes([31u8; 16])),
         std::path::PathBuf::from("seg-stale-1"),
         10,
-        1,
+        WalCursorOffset::new(1),
     );
     let stale_two = SegmentRow::sealed(
         namespace.clone(),
         SegmentId::new(Uuid::from_bytes([32u8; 16])),
         std::path::PathBuf::from("seg-stale-2"),
         20,
-        2,
+        WalCursorOffset::new(2),
         2,
     );
     let replacement = SegmentRow::open(
@@ -55,7 +55,7 @@ where
         SegmentId::new(Uuid::from_bytes([33u8; 16])),
         std::path::PathBuf::from("seg-new"),
         30,
-        3,
+        WalCursorOffset::new(3),
     );
 
     let mut txn = index.writer().begin_txn().expect("begin txn");
@@ -93,7 +93,7 @@ where
         SegmentId::new(Uuid::from_bytes([34u8; 16])),
         std::path::PathBuf::from("seg-wrong-ns"),
         40,
-        4,
+        WalCursorOffset::new(4),
     );
     let mut txn = index.writer().begin_txn().expect("begin mismatch txn");
     let err = txn
@@ -318,7 +318,13 @@ where
     let seg_id = SegmentId::new(Uuid::new_v4());
     let path = std::path::PathBuf::from("seg-1");
 
-    let row = SegmentRow::open(ns.clone(), seg_id, path.clone(), 1000, 0);
+    let row = SegmentRow::open(
+        ns.clone(),
+        seg_id,
+        path.clone(),
+        1000,
+        WalCursorOffset::new(0),
+    );
 
     let mut txn = index.writer().begin_txn().expect("begin txn");
     txn.upsert_segment(&row).expect("upsert");
@@ -332,7 +338,14 @@ where
     assert!(!rows[0].is_sealed());
 
     // Update to sealed
-    let sealed = SegmentRow::sealed(ns.clone(), seg_id, path.clone(), 1000, 100, 100);
+    let sealed = SegmentRow::sealed(
+        ns.clone(),
+        seg_id,
+        path.clone(),
+        1000,
+        WalCursorOffset::new(100),
+        100,
+    );
     let mut txn = index.writer().begin_txn().expect("begin txn");
     txn.upsert_segment(&sealed).expect("upsert sealed");
     txn.commit().expect("commit");

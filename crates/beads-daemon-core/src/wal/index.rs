@@ -17,8 +17,8 @@ use crate::core::{
 
 pub use super::{
     ClientRequestEventIds, ClientRequestEventIdsError, ClientRequestRow, HlcRow,
-    IndexDurabilityMode, IndexedRangeItem, ReplicaLivenessRow, SegmentRow, WalIndex, WalIndexError,
-    WalIndexReader, WalIndexTxn, WalIndexWriter, WatermarkRow,
+    IndexDurabilityMode, IndexedRangeItem, ReplicaLivenessRow, SegmentRow, WalCursorOffset,
+    WalIndex, WalIndexError, WalIndexReader, WalIndexTxn, WalIndexWriter, WatermarkRow,
 };
 
 const INDEX_SCHEMA_VERSION: u32 = StoreMetaVersions::INDEX_SCHEMA_VERSION;
@@ -465,7 +465,7 @@ impl WalIndexTxn for SqliteWalIndexTxn {
             segment_blob,
             path_str.as_ref(),
             segment.created_at_ms() as i64,
-            segment.last_indexed_offset() as i64,
+            segment.last_indexed_offset().get() as i64,
             sealed,
             final_len,
         ])
@@ -690,6 +690,7 @@ impl WalIndexReader for SqliteWalIndexReader {
                 let last_indexed_offset = u64::try_from(last_indexed_offset).map_err(|_| {
                     WalIndexError::SegmentRowDecode("last_indexed_offset out of range".to_string())
                 })?;
+                let last_indexed_offset = WalCursorOffset::new(last_indexed_offset);
                 let final_len = match final_len {
                     Some(value) => Some(u64::try_from(value).map_err(|_| {
                         WalIndexError::SegmentRowDecode("final_len out of range".to_string())
@@ -1827,14 +1828,14 @@ mod tests {
             SegmentId::new(Uuid::from_bytes([1u8; 16])),
             PathBuf::from("open.wal"),
             1_700_000,
-            0,
+            WalCursorOffset::new(0),
         );
         let sealed = SegmentRow::sealed(
             ns.clone(),
             SegmentId::new(Uuid::from_bytes([2u8; 16])),
             PathBuf::from("sealed.wal"),
             1_700_100,
-            128,
+            WalCursorOffset::new(128),
             128,
         );
 

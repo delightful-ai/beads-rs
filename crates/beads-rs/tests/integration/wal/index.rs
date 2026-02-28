@@ -45,7 +45,7 @@ fn index_rebuild_populates_watermarks_and_segments() {
     let expected_offset = segment
         .frame_offset(1)
         .saturating_add(segment.frame_len(1) as u64);
-    assert_eq!(segments[0].last_indexed_offset(), expected_offset);
+    assert_eq!(segments[0].last_indexed_offset().get(), expected_offset);
 
     let range = index
         .reader()
@@ -88,7 +88,7 @@ fn index_catch_up_scans_new_frames() {
     let expected_offset = segment
         .frame_offset(1)
         .saturating_add(segment.frame_len(1) as u64 + len as u64);
-    assert_eq!(segments[0].last_indexed_offset(), expected_offset);
+    assert_eq!(segments[0].last_indexed_offset().get(), expected_offset);
 
     let watermarks = index.reader().load_watermarks().expect("load watermarks");
     let row = watermarks

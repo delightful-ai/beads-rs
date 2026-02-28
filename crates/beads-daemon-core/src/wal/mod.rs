@@ -530,6 +530,19 @@ pub struct IndexedRangeItem {
     pub client_request_id: Option<ClientRequestId>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WalCursorOffset(u64);
+
+impl WalCursorOffset {
+    pub const fn new(offset: u64) -> Self {
+        Self(offset)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SegmentRow {
     Open {
@@ -537,14 +550,14 @@ pub enum SegmentRow {
         segment_id: SegmentId,
         segment_path: PathBuf,
         created_at_ms: u64,
-        last_indexed_offset: u64,
+        last_indexed_offset: WalCursorOffset,
     },
     Sealed {
         namespace: NamespaceId,
         segment_id: SegmentId,
         segment_path: PathBuf,
         created_at_ms: u64,
-        last_indexed_offset: u64,
+        last_indexed_offset: WalCursorOffset,
         final_len: u64,
     },
 }
@@ -660,7 +673,7 @@ impl SegmentRow {
         segment_id: SegmentId,
         segment_path: PathBuf,
         created_at_ms: u64,
-        last_indexed_offset: u64,
+        last_indexed_offset: WalCursorOffset,
     ) -> Self {
         Self::Open {
             namespace,
@@ -676,7 +689,7 @@ impl SegmentRow {
         segment_id: SegmentId,
         segment_path: PathBuf,
         created_at_ms: u64,
-        last_indexed_offset: u64,
+        last_indexed_offset: WalCursorOffset,
         final_len: u64,
     ) -> Self {
         Self::Sealed {
@@ -689,7 +702,7 @@ impl SegmentRow {
         }
     }
 
-    pub fn last_indexed_offset(&self) -> u64 {
+    pub fn last_indexed_offset(&self) -> WalCursorOffset {
         match self {
             SegmentRow::Open {
                 last_indexed_offset,

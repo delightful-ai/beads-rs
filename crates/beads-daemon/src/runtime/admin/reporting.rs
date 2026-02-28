@@ -52,7 +52,7 @@ pub(super) fn build_wal_status(
             segment_infos.push(AdminWalSegment {
                 segment_id: segment.segment_id(),
                 created_at_ms: segment.created_at_ms(),
-                last_indexed_offset: segment.last_indexed_offset(),
+                last_indexed_offset: segment.last_indexed_offset().get(),
                 sealed: segment.is_sealed(),
                 final_len: segment.final_len(),
                 bytes,

@@ -22,7 +22,10 @@ use super::EventWalError;
 use super::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
 use super::record::{RecordHeaderMismatch, RecordVerifyError, UnverifiedRecord, VerifiedRecord};
 use super::segment::{SEGMENT_HEADER_PREFIX_LEN, SEGMENT_MAGIC, SegmentHeader};
-use super::{ClientRequestEventIds, HlcRow, SegmentRow, WalIndex, WalIndexError, WatermarkRow};
+use super::{
+    ClientRequestEventIds, HlcRow, SegmentRow, WalCursorOffset, WalIndex, WalIndexError,
+    WatermarkRow,
+};
 
 #[cfg(test)]
 use crate::core::sha256_bytes;
@@ -65,8 +68,28 @@ thread_local! {
 }
 
 #[cfg(test)]
+thread_local! {
+    static TEST_SCAN_ENTRY_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
 fn set_test_crash_stage(stage: Option<ReplayAtomicCommitStage>) {
     TEST_CRASH_STAGE.with(|cell| cell.set(stage));
+}
+
+#[cfg(test)]
+fn reset_test_scan_entry_count() {
+    TEST_SCAN_ENTRY_COUNT.with(|cell| cell.set(0));
+}
+
+#[cfg(test)]
+fn test_scan_entry_count() -> usize {
+    TEST_SCAN_ENTRY_COUNT.with(Cell::get)
+}
+
+#[cfg(test)]
+fn increment_test_scan_entry_count() {
+    TEST_SCAN_ENTRY_COUNT.with(|cell| cell.set(cell.get().saturating_add(1)));
 }
 
 #[cfg(test)]
@@ -134,10 +157,11 @@ pub enum WalReplayError {
     },
     #[error("index error: {0}")]
     Index(#[from] WalIndexError),
-    #[error("index offset invalid for {path:?}: offset {offset} > len {len}")]
+    #[error("index offset invalid for {path:?}: offset {offset} outside [{header_len}, {len}]")]
     IndexOffsetInvalid {
         path: PathBuf,
         offset: u64,
+        header_len: u64,
         len: u64,
     },
     #[error(
@@ -384,6 +408,39 @@ pub fn catch_up_index(
     replay_index(store_dir, meta, index, limits, ReplayMode::CatchUp)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReplayStartCursor {
+    offset: u64,
+}
+
+impl ReplayStartCursor {
+    fn for_rebuild(segment: &SegmentDescriptor<Verified>) -> Self {
+        Self {
+            offset: segment.header_len,
+        }
+    }
+
+    fn for_catch_up(
+        segment: &SegmentDescriptor<Verified>,
+        persisted: WalCursorOffset,
+    ) -> Result<Self, WalReplayError> {
+        let offset = persisted.get();
+        if offset < segment.header_len || offset > segment.file_len {
+            return Err(WalReplayError::IndexOffsetInvalid {
+                path: segment.path.clone(),
+                offset,
+                header_len: segment.header_len,
+                len: segment.file_len,
+            });
+        }
+        Ok(Self { offset })
+    }
+
+    const fn offset(self) -> u64 {
+        self.offset
+    }
+}
+
 fn replay_index(
     store_dir: &Path,
     meta: &StoreMeta,
@@ -435,28 +492,15 @@ fn replay_index(
         for segment in segments {
             let is_last = Some(segment.header.segment_id) == last_segment_id;
             stats.segments_scanned += 1;
-            let start_offset = match mode {
-                ReplayMode::Rebuild => segment.header_len,
-                ReplayMode::CatchUp => existing
-                    .get(&segment.header.segment_id)
-                    .map(|row| row.last_indexed_offset())
-                    .unwrap_or(segment.header_len),
+            let start_cursor = match mode {
+                ReplayMode::Rebuild => ReplayStartCursor::for_rebuild(&segment),
+                ReplayMode::CatchUp => match existing.get(&segment.header.segment_id) {
+                    Some(row) => {
+                        ReplayStartCursor::for_catch_up(&segment, row.last_indexed_offset())?
+                    }
+                    None => ReplayStartCursor::for_rebuild(&segment),
+                },
             };
-
-            if start_offset < segment.header_len {
-                return Err(WalReplayError::IndexOffsetInvalid {
-                    path: segment.path.clone(),
-                    offset: start_offset,
-                    len: segment.file_len,
-                });
-            }
-            if start_offset > segment.file_len {
-                return Err(WalReplayError::IndexOffsetInvalid {
-                    path: segment.path.clone(),
-                    offset: start_offset,
-                    len: segment.file_len,
-                });
-            }
 
             if mode == ReplayMode::CatchUp
                 && let Some(row) = existing
@@ -480,7 +524,7 @@ fn replay_index(
                     let mut txn = index.writer().begin_txn()?;
                     let scan = scan_segment(
                         &segment,
-                        start_offset,
+                        start_cursor,
                         max_record_bytes,
                         limits,
                         true,
@@ -514,7 +558,7 @@ fn replay_index(
                         .expect("catch-up commit initialized");
                     let scan = scan_segment(
                         &segment,
-                        start_offset,
+                        start_cursor,
                         max_record_bytes,
                         limits,
                         true,
@@ -597,7 +641,7 @@ fn build_segment_row(
     namespace: &NamespaceId,
     segment: &SegmentDescriptor<Verified>,
     is_last: bool,
-    last_indexed_offset: u64,
+    last_indexed_offset: WalCursorOffset,
 ) -> SegmentRow {
     if is_last {
         SegmentRow::open(
@@ -614,7 +658,7 @@ fn build_segment_row(
             segment_rel_path(store_dir, &segment.path),
             segment.header.created_at_ms,
             last_indexed_offset,
-            last_indexed_offset,
+            last_indexed_offset.get(),
         )
     }
 }
@@ -1221,7 +1265,7 @@ impl SegmentDescriptor<Unverified> {
 }
 
 struct SegmentScanOutcome {
-    last_indexed_offset: u64,
+    last_indexed_offset: WalCursorOffset,
     records: usize,
     truncated: bool,
     truncated_from_offset: Option<u64>,
@@ -1229,7 +1273,7 @@ struct SegmentScanOutcome {
 
 fn scan_segment<F>(
     segment: &SegmentDescriptor<Verified>,
-    start_offset: u64,
+    start: ReplayStartCursor,
     max_record_bytes: usize,
     limits: &Limits,
     repair_tail: bool,
@@ -1238,6 +1282,9 @@ fn scan_segment<F>(
 where
     F: FnMut(u64, &VerifiedRecord, u32) -> Result<(), WalReplayError>,
 {
+    #[cfg(test)]
+    increment_test_scan_entry_count();
+
     let mut file = OpenOptions::new()
         .read(true)
         .write(repair_tail)
@@ -1246,13 +1293,13 @@ where
             path: segment.path.clone(),
             source,
         })?;
-    file.seek(SeekFrom::Start(start_offset))
+    file.seek(SeekFrom::Start(start.offset()))
         .map_err(|source| WalReplayError::Io {
             path: segment.path.clone(),
             source,
         })?;
 
-    let mut offset = start_offset;
+    let mut offset = start.offset();
     let mut records = 0usize;
     let mut truncated = false;
     let mut truncated_from_offset = None;
@@ -1388,7 +1435,7 @@ where
     }
 
     Ok(SegmentScanOutcome {
-        last_indexed_offset: offset,
+        last_indexed_offset: WalCursorOffset::new(offset),
         records,
         truncated,
         truncated_from_offset,
@@ -1718,7 +1765,7 @@ mod tests {
             .list_segments(namespace)
             .expect("list segments")
             .into_iter()
-            .map(|row| (row.segment_id(), row.last_indexed_offset()))
+            .map(|row| (row.segment_id(), row.last_indexed_offset().get()))
             .collect();
         ReplayStateSnapshot {
             rows,
@@ -1753,6 +1800,58 @@ mod tests {
             .into_iter()
             .map(|row| row.segment_id())
             .collect()
+    }
+
+    fn load_verified_segment_for_row(
+        store_dir: &Path,
+        meta: &StoreMeta,
+        row: &SegmentRow,
+    ) -> SegmentDescriptor<Verified> {
+        let path = if row.segment_path().is_absolute() {
+            row.segment_path().to_path_buf()
+        } else {
+            store_dir.join(row.segment_path())
+        };
+        SegmentDescriptor::<Unverified>::load(path)
+            .expect("load segment descriptor")
+            .verify(meta, row.namespace())
+            .expect("verify segment descriptor")
+    }
+
+    fn segment_row_with_offset(
+        row: &SegmentRow,
+        last_indexed_offset: WalCursorOffset,
+    ) -> SegmentRow {
+        match row {
+            SegmentRow::Open {
+                namespace,
+                segment_id,
+                segment_path,
+                created_at_ms,
+                ..
+            } => SegmentRow::open(
+                namespace.clone(),
+                *segment_id,
+                segment_path.clone(),
+                *created_at_ms,
+                last_indexed_offset,
+            ),
+            SegmentRow::Sealed {
+                namespace,
+                segment_id,
+                segment_path,
+                created_at_ms,
+                final_len,
+                ..
+            } => SegmentRow::sealed(
+                namespace.clone(),
+                *segment_id,
+                segment_path.clone(),
+                *created_at_ms,
+                last_indexed_offset,
+                *final_len,
+            ),
+        }
     }
 
     fn assert_recovered_after_retry(fixture: &CatchUpAtomicFixture, pre: &ReplayStateSnapshot) {
@@ -1908,7 +2007,7 @@ mod tests {
         let max_record_bytes = limits.policy().max_wal_record_bytes();
         let err = match scan_segment(
             &verified,
-            verified.header_len,
+            ReplayStartCursor::for_rebuild(&verified),
             max_record_bytes,
             &limits,
             false,
@@ -1929,6 +2028,86 @@ mod tests {
             }
             other => panic!("expected RecordShaMismatch, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn catch_up_rejects_persisted_cursor_before_header_without_scan_entry() {
+        let fixture = seed_catch_up_atomic_fixture();
+        let row = fixture
+            .index
+            .reader()
+            .list_segments(&fixture.namespace)
+            .expect("list segments")
+            .into_iter()
+            .find(|row| row.segment_id() == fixture.touched_segment_id)
+            .expect("touched segment row");
+        let segment = load_verified_segment_for_row(fixture.temp.path(), &fixture.meta, &row);
+        let invalid_offset = WalCursorOffset::new(segment.header_len.saturating_sub(1));
+        assert!(invalid_offset.get() < segment.header_len);
+
+        let corrupt_row = segment_row_with_offset(&row, invalid_offset);
+        let mut txn = fixture.index.writer().begin_txn().expect("begin txn");
+        txn.upsert_segment(&corrupt_row)
+            .expect("upsert corrupted segment row");
+        txn.commit().expect("commit corrupted segment row");
+
+        reset_test_scan_entry_count();
+        let err = catch_up_index(
+            fixture.temp.path(),
+            &fixture.meta,
+            &fixture.index,
+            &fixture.limits,
+        )
+        .expect_err("header-before persisted offset should error");
+
+        assert!(matches!(
+            err,
+            WalReplayError::IndexOffsetInvalid {
+                offset,
+                header_len,
+                ..
+            } if offset < header_len
+        ));
+        assert_eq!(test_scan_entry_count(), 0);
+    }
+
+    #[test]
+    fn catch_up_rejects_persisted_cursor_beyond_segment_len_without_scan_entry() {
+        let fixture = seed_catch_up_atomic_fixture();
+        let row = fixture
+            .index
+            .reader()
+            .list_segments(&fixture.namespace)
+            .expect("list segments")
+            .into_iter()
+            .find(|row| row.segment_id() == fixture.touched_segment_id)
+            .expect("touched segment row");
+        let segment = load_verified_segment_for_row(fixture.temp.path(), &fixture.meta, &row);
+        let invalid_offset = WalCursorOffset::new(segment.file_len.saturating_add(1));
+        assert!(invalid_offset.get() > segment.file_len);
+
+        let corrupt_row = segment_row_with_offset(&row, invalid_offset);
+        let mut txn = fixture.index.writer().begin_txn().expect("begin txn");
+        txn.upsert_segment(&corrupt_row)
+            .expect("upsert corrupted segment row");
+        txn.commit().expect("commit corrupted segment row");
+
+        reset_test_scan_entry_count();
+        let err = catch_up_index(
+            fixture.temp.path(),
+            &fixture.meta,
+            &fixture.index,
+            &fixture.limits,
+        )
+        .expect_err("out-of-bounds persisted offset should error");
+
+        assert!(matches!(
+            err,
+            WalReplayError::IndexOffsetInvalid {
+                offset, len, ..
+            } if offset > len
+        ));
+        assert_eq!(test_scan_entry_count(), 0);
     }
 
     #[test]
@@ -2035,7 +2214,7 @@ mod tests {
                 fixture.namespace.as_str()
             )),
             1,
-            0,
+            WalCursorOffset::new(0),
         );
 
         let mut txn = fixture.index.writer().begin_txn().expect("begin txn");
@@ -2079,7 +2258,7 @@ mod tests {
                 index_only_namespace.as_str()
             )),
             2,
-            0,
+            WalCursorOffset::new(0),
         );
 
         let mut txn = fixture.index.writer().begin_txn().expect("begin txn");
@@ -2360,7 +2539,7 @@ mod tests {
             SegmentId::new(Uuid::from_bytes([1u8; 16])),
             segment_rel_path(temp.path(), &keep),
             1,
-            0,
+            WalCursorOffset::new(0),
         );
         txn.upsert_segment(&segment_row).unwrap();
         txn.commit().unwrap();

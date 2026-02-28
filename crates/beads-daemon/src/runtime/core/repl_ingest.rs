@@ -1,4 +1,5 @@
 use super::*;
+use crate::daemon::wal::WalCursorOffset;
 
 impl Daemon {
     pub(super) fn ingest_remote_batch(
@@ -113,7 +114,7 @@ impl Daemon {
                             false,
                         )
                     })?;
-            let last_indexed_offset = append.offset + append.len as u64;
+            let last_indexed_offset = WalCursorOffset::new(append.offset + append.len as u64);
             let segment_row = SegmentRow::open(
                 namespace.clone(),
                 append.segment_id,
@@ -130,7 +131,7 @@ impl Daemon {
                     sealed.segment_id,
                     segment_rel_path(&store_dir, &sealed.path),
                     sealed.created_at_ms,
-                    sealed.final_len,
+                    WalCursorOffset::new(sealed.final_len),
                     sealed.final_len,
                 );
                 txn.upsert_segment(&sealed_row)

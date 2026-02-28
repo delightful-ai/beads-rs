@@ -6,8 +6,8 @@
 - workspace: current_workspace
 - close_scope: p0_children_only
 - clean_every_closed_beads: 4
-- closed_count: 3
-- current_bead: bd-ub8m
+- closed_count: 4
+- current_bead: bd-q6o7
 
 ## Bead Ledger
 | order | bead | stage | planner_id | sanity_id | implementer_id | reviewer_id | plan_file | jj_change | verify_status | close_status | last_update_utc |
@@ -15,7 +15,7 @@
 | 1 | bd-2g9q | closed | 019ca229-9ab1-7ed0-aa18-802e825a77f2 | 019ca22e-7b3e-7792-9504-409e00b8f951 | 019ca234-6785-7bf3-8acf-c015fac3624e | 019ca243-520c-7c40-bb59-2e1fd20e1417 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-2g9q-implementation.md | ysnrnrwz | pass | closed | 2026-02-28T03:27:04Z |
 | 2 | bd-ooe2 | closed | 019ca253-b508-78c0-acdb-c64083ec32b4 | 019ca256-2f48-7ae1-a236-8b800b0ca482 | 019ca257-2780-7462-8099-4804f625aad0 | 019ca25f-d3b7-7f41-8165-1fa74b679a5a | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-ooe2-implementation.md | ozmlwmyn | pass | closed | 2026-02-28T03:56:17Z |
 | 3 | bd-a3hl | closed | 019ca264-6693-7833-974a-7a498c2be3d0 | 019ca269-0cbd-7480-bfe0-223fcca93357 | 019ca26b-2851-7383-b54f-9f05ba71dc88 | 019ca272-bb45-79a2-b27b-0aa622ed8cd0 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-a3hl-implementation.md | kyqkwxro | pass | closed | 2026-02-28T04:17:06Z |
-| 4 | bd-ub8m | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-ub8m-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
+| 4 | bd-ub8m | closed | 019ca277-7825-79c0-9d6a-0729659f3dcd | 019ca27b-e24a-7641-9cbd-7f569a9b5b04 | 019ca27e-7e8e-7ac1-8e18-2719d610ef52 | 019ca286-984e-7052-870d-6d504f4d468e | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-ub8m-implementation.md | oxoskrvp | pass | closed | 2026-02-28T04:40:13Z |
 | 5 | bd-q6o7 | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-q6o7-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 | 6 | bd-r39f | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-r39f-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 | 7 | bd-jzxt | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-jzxt-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
@@ -63,3 +63,13 @@ planned | sanity_failed | sanity_passed | implementing | review_failed | review_
 | 2026-02-28T04:16:37Z | bd-a3hl | reviewer_completed | pass | reviewer found no blocking correctness issues; replay/contract evidence verified |
 | 2026-02-28T04:17:06Z | bd-a3hl | verification_completed | pass | controller ran fmt+dylint+clippy(-D warnings)+test successfully |
 | 2026-02-28T04:17:06Z | bd-a3hl | close_confirmed | ok | bd close executed and bd show reports status=closed; closed_count=3 |
+| 2026-02-28T04:17:33Z | bd-ub8m | bead_claimed | ok | bd claim succeeded; jj new created oxoskrvp (bd-ub8m: start) |
+| 2026-02-28T04:22:21Z | bd-ub8m | planner_completed | ok | plan saved to docs/plans/2026-02-28-bd-ub8m-implementation.md |
+| 2026-02-28T04:25:08Z | bd-ub8m | sanity_completed | pass | validated-cursor proof plan accepted with mandatory pre-scan rejection tests |
+| 2026-02-28T04:25:27Z | bd-ub8m | implementer_started | ok | worker agent spawned for validated-cursor hard-cutover implementation |
+| 2026-02-28T04:34:03Z | bd-ub8m | implementer_completed | ok | code landed on oxoskrvp with cursor proof boundary + pre-scan rejection tests |
+| 2026-02-28T04:34:18Z | bd-ub8m | reviewer_started | ok | reviewer agent spawned for bd-ub8m correctness audit |
+| 2026-02-28T04:38:49Z | bd-ub8m | reviewer_completed | pass | reviewer found no blocking correctness issues; mandatory cursor checks validated |
+| 2026-02-28T04:40:13Z | bd-ub8m | verification_completed | pass | controller ran fmt+dylint+clippy(-D warnings)+test successfully |
+| 2026-02-28T04:40:13Z | bd-ub8m | close_confirmed | ok | bd close executed and bd show reports status=closed; closed_count=4 |
+| 2026-02-28T04:40:13Z | campaign | maintenance | ok | cadence hit (4 closed): ran cargo clean && cargo check |

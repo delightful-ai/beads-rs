@@ -30,7 +30,7 @@ use super::ops::OpError;
 use super::store::runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
 use super::wal::{
     ClientRequestEventIds, EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof,
-    SegmentRow, VerifiedRecord, WalAppend, WalIndex, WalIndexError, WalIndexTxn,
+    SegmentRow, VerifiedRecord, WalAppend, WalCursorOffset, WalIndex, WalIndexError, WalIndexTxn,
     WalIndexTxnProvider, WalReplayError, open_segment_reader,
 };
 use crate::broadcast::BroadcastEvent;
@@ -332,7 +332,7 @@ impl Daemon {
                 .ok_or(OpError::Internal("missing active wal segment"))?;
             (append, snapshot)
         };
-        let last_indexed_offset = append.offset + append.len as u64;
+        let last_indexed_offset = WalCursorOffset::new(append.offset + append.len as u64);
         let segment_row = SegmentRow::open(
             namespace.clone(),
             append.segment_id,
@@ -357,7 +357,7 @@ impl Daemon {
                 sealed.segment_id,
                 segment_rel_path(&store_dir, &sealed.path),
                 sealed.created_at_ms,
-                sealed.final_len,
+                WalCursorOffset::new(sealed.final_len),
                 sealed.final_len,
             );
             txn.upsert_segment(&sealed_row).map_err(wal_index_to_op)?;

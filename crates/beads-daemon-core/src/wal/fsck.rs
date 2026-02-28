@@ -1290,7 +1290,8 @@ fn check_index_offsets(
                         }
                     }
 
-                    if row.last_indexed_offset() > segment.file_len {
+                    let last_indexed_offset = row.last_indexed_offset().get();
+                    if last_indexed_offset > segment.file_len {
                         builder.record_issue(
                             FsckCheckId::IndexOffsets,
                             FsckStatus::Fail,
@@ -1303,11 +1304,11 @@ fn check_index_offsets(
                                 namespace: Some(namespace.clone()),
                                 origin: None,
                                 seq: None,
-                                offset: Some(row.last_indexed_offset()),
+                                offset: Some(last_indexed_offset),
                             },
                             Some("rebuild wal.sqlite from WAL segments"),
                         );
-                    } else if row.last_indexed_offset() < segment.header_len {
+                    } else if last_indexed_offset < segment.header_len {
                         builder.record_issue(
                             FsckCheckId::IndexOffsets,
                             FsckStatus::Fail,
@@ -1320,11 +1321,11 @@ fn check_index_offsets(
                                 namespace: Some(namespace.clone()),
                                 origin: None,
                                 seq: None,
-                                offset: Some(row.last_indexed_offset()),
+                                offset: Some(last_indexed_offset),
                             },
                             Some("rebuild wal.sqlite from WAL segments"),
                         );
-                    } else if row.last_indexed_offset() < segment.file_len {
+                    } else if last_indexed_offset < segment.file_len {
                         builder.record_issue(
                             FsckCheckId::IndexOffsets,
                             FsckStatus::Warn,
@@ -1337,7 +1338,7 @@ fn check_index_offsets(
                                 namespace: Some(namespace.clone()),
                                 origin: None,
                                 seq: None,
-                                offset: Some(row.last_indexed_offset()),
+                                offset: Some(last_indexed_offset),
                             },
                             Some("rebuild wal.sqlite from WAL segments"),
                         );
