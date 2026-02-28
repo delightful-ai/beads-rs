@@ -698,30 +698,23 @@ pub struct FsckCheck {
     pub suggested_actions: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FsckRepairKind {
-    TruncateTail,
-    QuarantineSegment,
-    RebuildIndex,
-}
-
-impl fmt::Display for FsckRepairKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::TruncateTail => "truncate_tail",
-            Self::QuarantineSegment => "quarantine_segment",
-            Self::RebuildIndex => "rebuild_index",
-        })
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FsckRepair {
-    pub kind: FsckRepairKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<PathBuf>,
-    pub detail: String,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FsckRepair {
+    PrefixSalvageTruncate {
+        segment_path: PathBuf,
+        truncate_to_offset: u64,
+        discarded_suffix_bytes: u64,
+        cause: FsckEvidenceCode,
+    },
+    QuarantineNoValidPrefix {
+        original_segment_path: PathBuf,
+        quarantined_path: PathBuf,
+        cause: FsckEvidenceCode,
+    },
+    RebuildIndex {
+        index_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

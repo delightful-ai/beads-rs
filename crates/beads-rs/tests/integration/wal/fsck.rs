@@ -6,13 +6,13 @@ use uuid::Uuid;
 
 use beads_core::{Limits, NamespaceId, ReplicaId, StoreMeta};
 use beads_daemon::testkit::wal::fsck::{
-    FsckCheckId, FsckEvidenceCode, FsckOptions, FsckRepairKind, FsckStatus, fsck_store_dir,
+    FsckCheckId, FsckEvidenceCode, FsckOptions, FsckRepair, FsckStatus, fsck_store_dir,
 };
 use beads_daemon::testkit::wal::{SegmentRow, VerifiedRecord, WalIndex, rebuild_index};
 
 use crate::fixtures::wal::{TempWalDir, record_for_seq};
 use crate::fixtures::wal_corrupt::{
-    corrupt_frame_body, corrupt_record_header_event_time, corrupt_record_header_sha,
+    corrupt_frame_body, corrupt_record_header_event_time, corrupt_record_header_sha, truncate_file,
     truncate_frame_mid_body,
 };
 
@@ -53,6 +53,7 @@ fn fsck_repair_truncates_tail() {
         .expect("write segment");
 
     truncate_frame_mid_body(&segment, 0).expect("truncate frame");
+    let pre_repair_len = fs::metadata(&segment.path).expect("segment metadata").len();
 
     let report = fsck_store_dir(
         temp.store_dir(),
@@ -61,11 +62,27 @@ fn fsck_repair_truncates_tail() {
     )
     .expect("fsck store dir");
 
-    let repaired = report
+    let repaired = report.repairs.iter().any(|repair| {
+        matches!(
+            repair,
+            FsckRepair::PrefixSalvageTruncate {
+                segment_path,
+                truncate_to_offset,
+                discarded_suffix_bytes,
+                cause,
+            } if *segment_path == segment.path
+                && *truncate_to_offset == segment.header_len
+                && *discarded_suffix_bytes == pre_repair_len.saturating_sub(segment.header_len)
+                && *cause == FsckEvidenceCode::FrameTruncated
+        )
+    });
+    assert!(repaired);
+
+    let quarantined = report
         .repairs
         .iter()
-        .any(|repair| repair.kind == FsckRepairKind::TruncateTail);
-    assert!(repaired);
+        .any(|repair| matches!(repair, FsckRepair::QuarantineNoValidPrefix { .. }));
+    assert!(!quarantined);
 
     let meta = fs::metadata(&segment.path).expect("segment metadata");
     assert_eq!(meta.len(), segment.header_len);
@@ -82,6 +99,7 @@ fn fsck_repair_truncates_mid_file_corruption_to_preserve_prefix() {
         .expect("write segment");
 
     corrupt_frame_body(&segment, 1).expect("corrupt frame");
+    let pre_repair_len = fs::metadata(&segment.path).expect("segment metadata").len();
 
     let report = fsck_store_dir(
         temp.store_dir(),
@@ -91,11 +109,25 @@ fn fsck_repair_truncates_mid_file_corruption_to_preserve_prefix() {
     .expect("fsck store dir");
 
     assert!(!report.summary.safe_to_accept_writes);
+    assert!(report.repairs.iter().any(|repair| {
+        matches!(
+            repair,
+            FsckRepair::PrefixSalvageTruncate {
+                segment_path,
+                truncate_to_offset,
+                discarded_suffix_bytes,
+                cause,
+            } if *segment_path == segment.path
+                && *truncate_to_offset == segment.frame_offset(1)
+                && *discarded_suffix_bytes == pre_repair_len.saturating_sub(segment.frame_offset(1))
+                && *cause == FsckEvidenceCode::FrameCrcMismatch
+        )
+    }));
     assert!(
-        report
+        !report
             .repairs
             .iter()
-            .any(|repair| repair.kind == FsckRepairKind::TruncateTail)
+            .any(|repair| matches!(repair, FsckRepair::QuarantineNoValidPrefix { .. }))
     );
     assert!(segment.path.exists());
 
@@ -108,6 +140,48 @@ fn fsck_repair_truncates_mid_file_corruption_to_preserve_prefix() {
         .find(|check| check.id == FsckCheckId::SegmentFrames)
         .expect("segment frames check");
     assert_eq!(frames_check.status, FsckStatus::Fail);
+}
+
+#[test]
+fn fsck_repair_quarantines_only_when_no_valid_prefix_exists() {
+    let temp = TempWalDir::new();
+    let namespace = NamespaceId::core();
+    let origin = ReplicaId::new(Uuid::from_bytes([15u8; 16]));
+    let records = record_chain(temp.meta(), &namespace, origin, 1, 1);
+    let segment = temp
+        .write_segment(&namespace, 1_700_000_000_000, &records)
+        .expect("write segment");
+
+    truncate_file(&segment.path, segment.header_len.saturating_sub(1)).expect("truncate header");
+
+    let report = fsck_store_dir(
+        temp.store_dir(),
+        temp.meta(),
+        FsckOptions::new(true, Limits::default()),
+    )
+    .expect("fsck store dir");
+
+    let quarantined_path = report
+        .repairs
+        .iter()
+        .find_map(|repair| match repair {
+            FsckRepair::QuarantineNoValidPrefix {
+                original_segment_path,
+                quarantined_path,
+                cause,
+            } if *original_segment_path == segment.path && *cause == FsckEvidenceCode::SegmentHeaderInvalid => {
+                Some(quarantined_path.clone())
+            }
+            _ => None,
+        })
+        .expect("quarantine repair");
+
+    assert!(!segment.path.exists());
+    assert!(quarantined_path.exists());
+    assert_eq!(
+        quarantined_path.parent().expect("quarantine parent").file_name(),
+        Some(std::ffi::OsStr::new("quarantine"))
+    );
 }
 
 #[test]

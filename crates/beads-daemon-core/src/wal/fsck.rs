@@ -241,20 +241,23 @@ pub struct FsckCheck {
     pub suggested_actions: Vec<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum FsckRepairKind {
-    TruncateTail,
-    QuarantineSegment,
-    RebuildIndex,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct FsckRepair {
-    pub kind: FsckRepairKind,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub path: Option<PathBuf>,
-    pub detail: String,
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FsckRepair {
+    PrefixSalvageTruncate {
+        segment_path: PathBuf,
+        truncate_to_offset: u64,
+        discarded_suffix_bytes: u64,
+        cause: FsckEvidenceCode,
+    },
+    QuarantineNoValidPrefix {
+        original_segment_path: PathBuf,
+        quarantined_path: PathBuf,
+        cause: FsckEvidenceCode,
+    },
+    RebuildIndex {
+        index_path: PathBuf,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -311,7 +314,7 @@ pub fn fsck_store_dir(
     let mut segments_by_id = BTreeMap::new();
     for namespace in namespaces {
         let segments = list_segments(&wal_dir, &namespace, meta, &mut builder, options.repair)?;
-        for segment in segments {
+        for mut segment in segments {
             builder.stats.segments += 1;
             let result = scan_segment(
                 &segment,
@@ -322,9 +325,7 @@ pub fn fsck_store_dir(
                 options.repair,
             )?;
             builder.stats.records += result.records;
-            if result.quarantined {
-                continue;
-            }
+            segment.file_len = result.final_file_len;
 
             segments_by_id.insert(segment.header.segment_id, segment.clone());
             segments_by_path.insert(segment.path.clone(), segment);
@@ -349,10 +350,8 @@ pub fn fsck_store_dir(
                 Some("re-run fsck after investigating wal.sqlite rebuild failure"),
             );
         } else {
-            builder.repairs.push(FsckRepair {
-                kind: FsckRepairKind::RebuildIndex,
-                path: Some(wal_index_path(store_dir)),
-                detail: "rebuilt wal.sqlite from WAL segments".to_string(),
+            builder.repairs.push(FsckRepair::RebuildIndex {
+                index_path: wal_index_path(store_dir),
             });
         }
     }
@@ -381,8 +380,13 @@ struct SegmentInfo {
 #[derive(Clone, Debug)]
 struct SegmentScanResult {
     records: usize,
-    quarantined: bool,
+    final_file_len: u64,
 }
+
+const REPAIR_ACTION_PREFIX_SALVAGE_TRUNCATE: &str =
+    "run `bd store fsck --repair` to salvage valid prefix and truncate corrupted suffix";
+const REPAIR_ACTION_QUARANTINE_NO_VALID_PREFIX: &str =
+    "run `bd store fsck --repair` to quarantine segments with unreadable headers (no valid prefix)";
 
 fn scan_segment(
     segment: &SegmentInfo,
@@ -408,7 +412,7 @@ fn scan_segment(
 
     let mut offset = segment.header_len;
     let mut records = 0usize;
-    let mut quarantined = false;
+    let mut final_file_len = segment.file_len;
 
     while offset < segment.file_len {
         let remaining = segment.file_len - offset;
@@ -426,17 +430,16 @@ fn scan_segment(
                     seq: None,
                     offset: Some(offset),
                 },
-                Some("run `bd store fsck --repair` to truncate tail corruption"),
+                Some(REPAIR_ACTION_PREFIX_SALVAGE_TRUNCATE),
             );
             if repair {
-                truncate_tail(&mut file, &segment.path, offset)?;
-                builder.repairs.push(FsckRepair {
-                    kind: FsckRepairKind::TruncateTail,
-                    path: Some(segment.path.clone()),
-                    detail: format!(
-                        "truncated segment tail to offset {offset}; discarded corrupted suffix"
-                    ),
-                });
+                final_file_len = repair_prefix_salvage_truncate(
+                    &mut file,
+                    segment,
+                    offset,
+                    FsckEvidenceCode::FrameTruncated,
+                    builder,
+                )?;
             }
             break;
         }
@@ -454,7 +457,6 @@ fn scan_segment(
 
         let frame_len = FRAME_HEADER_LEN as u64 + length as u64;
         if magic != FRAME_MAGIC || length == 0 || length as usize > max_record_bytes {
-            let can_truncate = offset > segment.header_len;
             builder.record_issue(
                 FsckCheckId::SegmentFrames,
                 FsckStatus::Fail,
@@ -468,32 +470,16 @@ fn scan_segment(
                     seq: None,
                     offset: Some(offset),
                 },
-                Some(if can_truncate {
-                    "run `bd store fsck --repair` to truncate corrupted suffix"
-                } else {
-                    "run `bd store fsck --repair` to quarantine corrupted segments"
-                }),
+                Some(REPAIR_ACTION_PREFIX_SALVAGE_TRUNCATE),
             );
             if repair {
-                if can_truncate {
-                    truncate_tail(&mut file, &segment.path, offset)?;
-                    builder.repairs.push(FsckRepair {
-                        kind: FsckRepairKind::TruncateTail,
-                        path: Some(segment.path.clone()),
-                        detail: format!(
-                            "truncated segment tail to offset {offset}; discarded corrupted suffix"
-                        ),
-                    });
-                } else {
-                    drop(file);
-                    let quarantined_path = quarantine_segment(&segment.path)?;
-                    builder.repairs.push(FsckRepair {
-                        kind: FsckRepairKind::QuarantineSegment,
-                        path: Some(quarantined_path),
-                        detail: "quarantined segment with invalid frame header".to_string(),
-                    });
-                    quarantined = true;
-                }
+                final_file_len = repair_prefix_salvage_truncate(
+                    &mut file,
+                    segment,
+                    offset,
+                    FsckEvidenceCode::FrameHeaderInvalid,
+                    builder,
+                )?;
             }
             break;
         }
@@ -512,17 +498,16 @@ fn scan_segment(
                     seq: None,
                     offset: Some(offset),
                 },
-                Some("run `bd store fsck --repair` to truncate tail corruption"),
+                Some(REPAIR_ACTION_PREFIX_SALVAGE_TRUNCATE),
             );
             if repair {
-                truncate_tail(&mut file, &segment.path, offset)?;
-                builder.repairs.push(FsckRepair {
-                    kind: FsckRepairKind::TruncateTail,
-                    path: Some(segment.path.clone()),
-                    detail: format!(
-                        "truncated segment tail to offset {offset}; discarded corrupted suffix"
-                    ),
-                });
+                final_file_len = repair_prefix_salvage_truncate(
+                    &mut file,
+                    segment,
+                    offset,
+                    FsckEvidenceCode::FrameTruncated,
+                    builder,
+                )?;
             }
             break;
         }
@@ -535,7 +520,6 @@ fn scan_segment(
 
         let actual_crc = crc32c::crc32c(&body);
         if actual_crc != expected_crc {
-            let can_truncate = offset > segment.header_len;
             builder.record_issue(
                 FsckCheckId::SegmentFrames,
                 FsckStatus::Fail,
@@ -549,32 +533,16 @@ fn scan_segment(
                     seq: None,
                     offset: Some(offset),
                 },
-                Some(if can_truncate {
-                    "run `bd store fsck --repair` to truncate corrupted suffix"
-                } else {
-                    "run `bd store fsck --repair` to quarantine corrupted segments"
-                }),
+                Some(REPAIR_ACTION_PREFIX_SALVAGE_TRUNCATE),
             );
             if repair {
-                if can_truncate {
-                    truncate_tail(&mut file, &segment.path, offset)?;
-                    builder.repairs.push(FsckRepair {
-                        kind: FsckRepairKind::TruncateTail,
-                        path: Some(segment.path.clone()),
-                        detail: format!(
-                            "truncated segment tail to offset {offset}; discarded corrupted suffix"
-                        ),
-                    });
-                } else {
-                    drop(file);
-                    let quarantined_path = quarantine_segment(&segment.path)?;
-                    builder.repairs.push(FsckRepair {
-                        kind: FsckRepairKind::QuarantineSegment,
-                        path: Some(quarantined_path),
-                        detail: "quarantined segment with corrupted first frame".to_string(),
-                    });
-                    quarantined = true;
-                }
+                final_file_len = repair_prefix_salvage_truncate(
+                    &mut file,
+                    segment,
+                    offset,
+                    FsckEvidenceCode::FrameCrcMismatch,
+                    builder,
+                )?;
             }
             break;
         }
@@ -582,7 +550,6 @@ fn scan_segment(
         let record = match UnverifiedRecord::decode_body(&body) {
             Ok(record) => record,
             Err(err) => {
-                let can_truncate = offset > segment.header_len;
                 builder.record_issue(
                     FsckCheckId::SegmentFrames,
                     FsckStatus::Fail,
@@ -596,30 +563,16 @@ fn scan_segment(
                         seq: None,
                         offset: Some(offset),
                     },
-                    Some(if can_truncate {
-                        "run `bd store fsck --repair` to truncate corrupted suffix"
-                    } else {
-                        "run `bd store fsck --repair` to quarantine corrupted segments"
-                    }),
+                    Some(REPAIR_ACTION_PREFIX_SALVAGE_TRUNCATE),
                 );
                 if repair {
-                    if can_truncate {
-                        truncate_tail(&mut file, &segment.path, offset)?;
-                        builder.repairs.push(FsckRepair {
-                            kind: FsckRepairKind::TruncateTail,
-                            path: Some(segment.path.clone()),
-                            detail: format!("truncated segment tail to offset {offset}; discarded corrupted suffix"),
-                        });
-                    } else {
-                        drop(file);
-                        let quarantined_path = quarantine_segment(&segment.path)?;
-                        builder.repairs.push(FsckRepair {
-                            kind: FsckRepairKind::QuarantineSegment,
-                            path: Some(quarantined_path),
-                            detail: "quarantined segment with undecodable record".to_string(),
-                        });
-                        quarantined = true;
-                    }
+                    final_file_len = repair_prefix_salvage_truncate(
+                        &mut file,
+                        segment,
+                        offset,
+                        FsckEvidenceCode::RecordDecodeInvalid,
+                        builder,
+                    )?;
                 }
                 break;
             }
@@ -629,7 +582,6 @@ fn scan_segment(
         let (_, event_body) = match decode_event_body(record.payload_bytes(), limits) {
             Ok(decoded) => decoded,
             Err(err) => {
-                let can_truncate = offset > segment.header_len;
                 builder.record_issue(
                     FsckCheckId::SegmentFrames,
                     FsckStatus::Fail,
@@ -643,30 +595,16 @@ fn scan_segment(
                         seq: Some(header.origin_seq.get()),
                         offset: Some(offset),
                     },
-                    Some(if can_truncate {
-                        "run `bd store fsck --repair` to truncate corrupted suffix"
-                    } else {
-                        "run `bd store fsck --repair` to quarantine corrupted segments"
-                    }),
+                    Some(REPAIR_ACTION_PREFIX_SALVAGE_TRUNCATE),
                 );
                 if repair {
-                    if can_truncate {
-                        truncate_tail(&mut file, &segment.path, offset)?;
-                        builder.repairs.push(FsckRepair {
-                            kind: FsckRepairKind::TruncateTail,
-                            path: Some(segment.path.clone()),
-                            detail: format!("truncated segment tail to offset {offset}; discarded corrupted suffix"),
-                        });
-                    } else {
-                        drop(file);
-                        let quarantined_path = quarantine_segment(&segment.path)?;
-                        builder.repairs.push(FsckRepair {
-                            kind: FsckRepairKind::QuarantineSegment,
-                            path: Some(quarantined_path),
-                            detail: "quarantined segment with undecodable event body".to_string(),
-                        });
-                        quarantined = true;
-                    }
+                    final_file_len = repair_prefix_salvage_truncate(
+                        &mut file,
+                        segment,
+                        offset,
+                        FsckEvidenceCode::RecordDecodeInvalid,
+                        builder,
+                    )?;
                 }
                 break;
             }
@@ -675,7 +613,6 @@ fn scan_segment(
         match verify {
             Ok(_) => {}
             Err(RecordVerifyError::HeaderMismatch(err)) => {
-                let can_truncate = offset > segment.header_len;
                 builder.record_issue(
                     FsckCheckId::RecordHashes,
                     FsckStatus::Fail,
@@ -689,30 +626,16 @@ fn scan_segment(
                         seq: Some(header.origin_seq.get()),
                         offset: Some(offset),
                     },
-                    Some(if can_truncate {
-                        "run `bd store fsck --repair` to truncate corrupted suffix"
-                    } else {
-                        "run `bd store fsck --repair` to quarantine corrupted segments"
-                    }),
+                    Some(REPAIR_ACTION_PREFIX_SALVAGE_TRUNCATE),
                 );
                 if repair {
-                    if can_truncate {
-                        truncate_tail(&mut file, &segment.path, offset)?;
-                        builder.repairs.push(FsckRepair {
-                            kind: FsckRepairKind::TruncateTail,
-                            path: Some(segment.path.clone()),
-                            detail: format!("truncated segment tail to offset {offset}; discarded corrupted suffix"),
-                        });
-                    } else {
-                        drop(file);
-                        let quarantined_path = quarantine_segment(&segment.path)?;
-                        builder.repairs.push(FsckRepair {
-                            kind: FsckRepairKind::QuarantineSegment,
-                            path: Some(quarantined_path),
-                            detail: "quarantined segment with header/body mismatch".to_string(),
-                        });
-                        quarantined = true;
-                    }
+                    final_file_len = repair_prefix_salvage_truncate(
+                        &mut file,
+                        segment,
+                        offset,
+                        FsckEvidenceCode::RecordHeaderMismatch,
+                        builder,
+                    )?;
                 }
                 break;
             }
@@ -771,7 +694,7 @@ fn scan_segment(
 
     Ok(SegmentScanResult {
         records,
-        quarantined,
+        final_file_len,
     })
 }
 
@@ -1085,13 +1008,13 @@ fn list_segments(
                         seq: None,
                         offset: None,
                     },
-                    Some("run `bd store fsck --repair` to quarantine corrupted segments"),
+                    Some(REPAIR_ACTION_QUARANTINE_NO_VALID_PREFIX),
                 );
                 if repair && let Ok(quarantined_path) = quarantine_segment(&path) {
-                    builder.repairs.push(FsckRepair {
-                        kind: FsckRepairKind::QuarantineSegment,
-                        path: Some(quarantined_path),
-                        detail: "quarantined segment with invalid header".to_string(),
+                    builder.repairs.push(FsckRepair::QuarantineNoValidPrefix {
+                        original_segment_path: path.clone(),
+                        quarantined_path,
+                        cause: FsckEvidenceCode::SegmentHeaderInvalid,
                     });
                 }
             }
@@ -1660,6 +1583,23 @@ fn truncate_tail(file: &mut std::fs::File, path: &Path, len: u64) -> Result<(), 
         source,
     })?;
     Ok(())
+}
+
+fn repair_prefix_salvage_truncate(
+    file: &mut std::fs::File,
+    segment: &SegmentInfo,
+    truncate_to_offset: u64,
+    cause: FsckEvidenceCode,
+    builder: &mut FsckReportBuilder,
+) -> Result<u64, FsckError> {
+    truncate_tail(file, &segment.path, truncate_to_offset)?;
+    builder.repairs.push(FsckRepair::PrefixSalvageTruncate {
+        segment_path: segment.path.clone(),
+        truncate_to_offset,
+        discarded_suffix_bytes: segment.file_len.saturating_sub(truncate_to_offset),
+        cause,
+    });
+    Ok(truncate_to_offset)
 }
 
 fn quarantine_segment(path: &Path) -> Result<PathBuf, FsckError> {

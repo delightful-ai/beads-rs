@@ -35,8 +35,8 @@ use beads_api::{
 };
 use beads_api::{
     AdminFsckOutput, AdminStoreLockInfoOutput, AdminStoreUnlockOutput, FsckCheck, FsckCheckId,
-    FsckEvidence, FsckEvidenceCode, FsckRepair, FsckRepairKind, FsckRisk, FsckSeverity, FsckStats,
-    FsckStatus, FsckSummary, StoreLockMetaOutput, UnlockAction,
+    FsckEvidence, FsckEvidenceCode, FsckRepair, FsckRisk, FsckSeverity, FsckStats, FsckStatus,
+    FsckSummary, StoreLockMetaOutput, UnlockAction,
 };
 
 use super::core::Daemon;
@@ -94,16 +94,30 @@ fn fsck_evidence_to_api(e: crate::runtime::wal::fsck::FsckEvidence) -> FsckEvide
 }
 
 fn fsck_repair_to_api(r: crate::runtime::wal::fsck::FsckRepair) -> FsckRepair {
-    FsckRepair {
-        kind: match r.kind {
-            crate::runtime::wal::fsck::FsckRepairKind::TruncateTail => FsckRepairKind::TruncateTail,
-            crate::runtime::wal::fsck::FsckRepairKind::QuarantineSegment => {
-                FsckRepairKind::QuarantineSegment
-            }
-            crate::runtime::wal::fsck::FsckRepairKind::RebuildIndex => FsckRepairKind::RebuildIndex,
+    match r {
+        crate::runtime::wal::fsck::FsckRepair::PrefixSalvageTruncate {
+            segment_path,
+            truncate_to_offset,
+            discarded_suffix_bytes,
+            cause,
+        } => FsckRepair::PrefixSalvageTruncate {
+            segment_path,
+            truncate_to_offset,
+            discarded_suffix_bytes,
+            cause: fsck_evidence_code_to_api(cause),
         },
-        path: r.path,
-        detail: r.detail,
+        crate::runtime::wal::fsck::FsckRepair::QuarantineNoValidPrefix {
+            original_segment_path,
+            quarantined_path,
+            cause,
+        } => FsckRepair::QuarantineNoValidPrefix {
+            original_segment_path,
+            quarantined_path,
+            cause: fsck_evidence_code_to_api(cause),
+        },
+        crate::runtime::wal::fsck::FsckRepair::RebuildIndex { index_path } => {
+            FsckRepair::RebuildIndex { index_path }
+        }
     }
 }
 
@@ -202,6 +216,7 @@ fn fsck_evidence_code_to_api(c: crate::runtime::wal::fsck::FsckEvidenceCode) -> 
 
 #[cfg(test)]
 mod tests {
+    use super::fsck_repair_to_api;
     use super::offline_store::{
         OfflinePidState, offline_store_lock_info_output, offline_store_unlock_with_pid_check,
     };
@@ -209,8 +224,8 @@ mod tests {
     use crate::core::{Limits, NamespaceId, ReplicaId, StoreId};
     use crate::paths;
     use crate::runtime::OpError;
-    use beads_api::{AdminWalWarningKind, UnlockAction};
-    use std::path::Path;
+    use beads_api::{AdminWalWarningKind, FsckRepair, UnlockAction};
+    use std::path::{Path, PathBuf};
     use tempfile::TempDir;
     use uuid::Uuid;
 
@@ -335,6 +350,52 @@ mod tests {
             }
             assert!(lock_path.exists());
         });
+    }
+
+    #[test]
+    fn fsck_repair_to_api_maps_all_variants() {
+        let salvage = fsck_repair_to_api(crate::runtime::wal::fsck::FsckRepair::PrefixSalvageTruncate {
+            segment_path: PathBuf::from("/tmp/wal/core/a.wal"),
+            truncate_to_offset: 64,
+            discarded_suffix_bytes: 32,
+            cause: crate::runtime::wal::fsck::FsckEvidenceCode::FrameCrcMismatch,
+        });
+        assert!(matches!(
+            salvage,
+            FsckRepair::PrefixSalvageTruncate {
+                segment_path,
+                truncate_to_offset,
+                discarded_suffix_bytes,
+                cause: beads_api::FsckEvidenceCode::FrameCrcMismatch,
+            } if segment_path == PathBuf::from("/tmp/wal/core/a.wal")
+                && truncate_to_offset == 64
+                && discarded_suffix_bytes == 32
+        ));
+
+        let quarantine = fsck_repair_to_api(
+            crate::runtime::wal::fsck::FsckRepair::QuarantineNoValidPrefix {
+                original_segment_path: PathBuf::from("/tmp/wal/core/b.wal"),
+                quarantined_path: PathBuf::from("/tmp/wal/core/quarantine/b.wal"),
+                cause: crate::runtime::wal::fsck::FsckEvidenceCode::SegmentHeaderInvalid,
+            },
+        );
+        assert!(matches!(
+            quarantine,
+            FsckRepair::QuarantineNoValidPrefix {
+                original_segment_path,
+                quarantined_path,
+                cause: beads_api::FsckEvidenceCode::SegmentHeaderInvalid,
+            } if original_segment_path == PathBuf::from("/tmp/wal/core/b.wal")
+                && quarantined_path == PathBuf::from("/tmp/wal/core/quarantine/b.wal")
+        ));
+
+        let rebuild = fsck_repair_to_api(crate::runtime::wal::fsck::FsckRepair::RebuildIndex {
+            index_path: PathBuf::from("/tmp/index/wal.sqlite"),
+        });
+        assert!(matches!(
+            rebuild,
+            FsckRepair::RebuildIndex { index_path } if index_path == PathBuf::from("/tmp/index/wal.sqlite")
+        ));
     }
 
     fn with_test_data_dir<F>(f: F)
