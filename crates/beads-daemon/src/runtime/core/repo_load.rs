@@ -1,3 +1,4 @@
+use super::checkpoint_import::CheckpointCompatibilityError;
 use super::*;
 
 impl Daemon {
@@ -202,7 +203,9 @@ impl Daemon {
         let mut needs_sync = loaded.needs_sync;
         let mut state = store_state_from_legacy(loaded.state);
         let root_slug = loaded.root_slug;
-        let checkpoint_imports = self.load_checkpoint_imports(store_id, repo);
+        let checkpoint_imports = self
+            .load_checkpoint_imports(store_id, repo)
+            .map_err(Self::checkpoint_compatibility_op_error)?;
         for import in &checkpoint_imports {
             match merge_store_states(&state, &import.state) {
                 Ok(merged) => state = merged,
@@ -304,6 +307,13 @@ impl Daemon {
             repo: repo.to_owned(),
             timeout_secs: timeout.as_secs(),
             remote: remote.as_str().to_string(),
+        }
+    }
+
+    fn checkpoint_compatibility_op_error(err: CheckpointCompatibilityError) -> OpError {
+        OpError::ValidationFailed {
+            field: "checkpoint_compatibility".into(),
+            reason: err.to_string(),
         }
     }
 }

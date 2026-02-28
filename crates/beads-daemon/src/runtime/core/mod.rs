@@ -417,16 +417,12 @@ mod tests {
     use crate::runtime::store::discovery::store_id_from_remote;
     use beads_api::QueryResult;
     use std::collections::BTreeMap;
-    use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
     use git2::{Oid, Repository};
-    use tracing::{Dispatch, Level};
-    use tracing_subscriber::fmt::MakeWriter;
     use uuid::Uuid;
 
     use crate::core::{
@@ -440,10 +436,10 @@ mod tests {
         hash_event_body,
     };
     use crate::git::checkpoint::{
-        CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointFileKind, CheckpointImport,
+        CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointFileKind,
         CheckpointPublishOutcome, CheckpointShardPath, CheckpointSnapshotInput,
-        CheckpointStoreMeta, IncludedWatermarks, build_snapshot, export_checkpoint, policy_hash,
-        publish_checkpoint, shard_for_bead, store_state_from_legacy,
+        CheckpointStoreMeta, build_snapshot, export_checkpoint, policy_hash, publish_checkpoint,
+        shard_for_bead, store_state_from_legacy,
     };
     use crate::runtime::OpResult;
     use crate::runtime::git_worker::LoadResult;
@@ -459,39 +455,6 @@ mod tests {
 
     fn test_remote() -> RemoteUrl {
         RemoteUrl::new("example.com/test/repo")
-    }
-
-    #[derive(Clone)]
-    struct TestWriter {
-        buffer: Arc<Mutex<Vec<u8>>>,
-    }
-
-    struct TestWriterGuard {
-        buffer: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl<'a> MakeWriter<'a> for TestWriter {
-        type Writer = TestWriterGuard;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            TestWriterGuard {
-                buffer: self.buffer.clone(),
-            }
-        }
-    }
-
-    impl Write for TestWriterGuard {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.buffer
-                .lock()
-                .expect("log buffer")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
     }
 
     struct TempStoreDir {
@@ -704,46 +667,6 @@ mod tests {
             .expect("read lock meta")
             .expect("lock meta");
         assert_eq!(after.last_heartbeat_ms, Some(now_ms));
-    }
-
-    #[test]
-    fn checkpoint_roster_hash_mismatch_warns() {
-        let _tmp = test_store_dir();
-        let daemon = Daemon::new_with_limits(test_actor(), Limits::default());
-        let store_id = StoreId::new(Uuid::from_bytes([99u8; 16]));
-        let import = CheckpointImport {
-            checkpoint_group: "core".to_string(),
-            policy_hash: ContentHash::from_bytes([1u8; 32]),
-            roster_hash: Some(ContentHash::from_bytes([2u8; 32])),
-            state: StoreState::new(),
-            included: IncludedWatermarks::new(),
-            included_heads: None,
-        };
-        let local_policy_hash = Some(ContentHash::from_bytes([1u8; 32]));
-        let local_roster_hash = Some(ContentHash::from_bytes([3u8; 32]));
-
-        let buffer = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(TestWriter {
-                buffer: buffer.clone(),
-            })
-            .with_max_level(Level::WARN)
-            .with_ansi(false)
-            .finish();
-
-        let dispatch = Dispatch::new(subscriber);
-        tracing::dispatcher::with_default(&dispatch, || {
-            daemon.warn_on_checkpoint_hash_mismatch(
-                store_id,
-                &import,
-                local_policy_hash,
-                local_roster_hash,
-            );
-        });
-
-        let logs =
-            String::from_utf8(buffer.lock().expect("log buffer").clone()).expect("utf8 logs");
-        assert!(logs.contains("checkpoint roster hash mismatch"));
     }
 
     #[cfg(unix)]
@@ -1670,6 +1593,161 @@ mod tests {
         );
     }
 
+    fn store_policy_hash(daemon: &Daemon, store_id: StoreId) -> ContentHash {
+        let policies = &daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store session")
+            .runtime()
+            .policies;
+        policy_hash(policies).expect("policy hash")
+    }
+
+    fn empty_load_result() -> LoadResult {
+        LoadResult {
+            state: CanonicalState::new(),
+            root_slug: None,
+            needs_sync: false,
+            last_seen_stamp: None,
+            fetch_error: None,
+            divergence: None,
+            force_push: None,
+        }
+    }
+
+    fn setup_checkpoint_import_fixture(
+        checkpoint_policy_hash: Option<ContentHash>,
+        checkpoint_roster_hash: Option<ContentHash>,
+        bead_slug: &str,
+    ) -> (Daemon, RemoteUrl, TempDir, StoreId, BeadId) {
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init(repo_dir.path()).unwrap();
+
+        let store_id = store_id_from_remote(&remote);
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), repo_dir.path())
+            .expect("store init");
+        let checkpoint_policy_hash =
+            checkpoint_policy_hash.unwrap_or_else(|| store_policy_hash(&daemon, store_id));
+
+        let bead = make_bead(bead_slug, 1_700_000_000_000, "checkpoint@test");
+        let bead_id = bead.core.id.clone();
+        let mut legacy_state = CanonicalState::new();
+        legacy_state.insert_live(bead);
+        let store_state = store_state_from_legacy(legacy_state);
+
+        let origin = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store session")
+            .runtime()
+            .meta
+            .replica_id;
+        let watermarks = Watermarks::<Durable>::new();
+
+        let snapshot = build_snapshot(CheckpointSnapshotInput {
+            checkpoint_group: "core".to_string(),
+            namespaces: vec![NamespaceId::core()].into(),
+            store_id,
+            store_epoch: StoreEpoch::ZERO,
+            created_at_ms: 1_700_000_000_000,
+            created_by_replica_id: origin,
+            policy_hash: checkpoint_policy_hash,
+            roster_hash: checkpoint_roster_hash,
+            dirty_shards: None,
+            state: &store_state,
+            watermarks_durable: &watermarks,
+        })
+        .expect("checkpoint snapshot");
+
+        let export = export_checkpoint(CheckpointExportInput {
+            snapshot: &snapshot,
+            previous: None,
+        })
+        .expect("checkpoint export");
+
+        let git_ref = format!("refs/beads/{store_id}/core");
+        let mut checkpoint_groups = BTreeMap::new();
+        checkpoint_groups.insert("core".to_string(), git_ref.clone());
+        let store_meta = CheckpointStoreMeta::new(
+            store_id,
+            StoreEpoch::ZERO,
+            CHECKPOINT_FORMAT_VERSION,
+            checkpoint_groups,
+        );
+        publish_checkpoint(&repo, &export, &git_ref, &store_meta).expect("checkpoint publish");
+
+        (daemon, remote, repo_dir, store_id, bead_id)
+    }
+
+    #[test]
+    fn load_from_checkpoint_ref_rejects_policy_hash_mismatch_pre_merge() {
+        let _tmp = test_store_dir();
+        let checkpoint_policy_hash = ContentHash::from_bytes([9u8; 32]);
+
+        let (mut daemon, remote, repo_dir, store_id, checkpoint_bead_id) =
+            setup_checkpoint_import_fixture(
+                Some(checkpoint_policy_hash),
+                None,
+                "bd-checkpoint-policy-mismatch",
+            );
+        let err = daemon
+            .apply_loaded_repo_state(store_id, &remote, repo_dir.path(), empty_load_result())
+            .expect_err("policy mismatch should fail before merge");
+
+        match err {
+            OpError::ValidationFailed { field, reason } => {
+                assert_eq!(field, "checkpoint_compatibility");
+                assert!(
+                    reason.contains("policy hash mismatch"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let store = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store runtime")
+            .runtime();
+        assert!(store.state.core().get_live(&checkpoint_bead_id).is_none());
+    }
+
+    #[test]
+    fn load_from_checkpoint_ref_rejects_roster_hash_mismatch_pre_merge() {
+        let _tmp = test_store_dir();
+        let (mut daemon, remote, repo_dir, store_id, checkpoint_bead_id) =
+            setup_checkpoint_import_fixture(
+                None,
+                Some(ContentHash::from_bytes([8u8; 32])),
+                "bd-checkpoint-roster-mismatch",
+            );
+        let err = daemon
+            .apply_loaded_repo_state(store_id, &remote, repo_dir.path(), empty_load_result())
+            .expect_err("roster mismatch should fail before merge");
+
+        match err {
+            OpError::ValidationFailed { field, reason } => {
+                assert_eq!(field, "checkpoint_compatibility");
+                assert!(
+                    reason.contains("roster hash mismatch"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let store = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store runtime")
+            .runtime();
+        assert!(store.state.core().get_live(&checkpoint_bead_id).is_none());
+    }
+
     #[test]
     fn load_from_checkpoint_ref_sets_watermarks() {
         let _tmp = test_store_dir();
@@ -1707,9 +1785,7 @@ mod tests {
             )
             .expect("watermark");
 
-        let mut policies = BTreeMap::new();
-        policies.insert(NamespaceId::core(), NamespacePolicy::core_default());
-        let policy_hash = policy_hash(&policies).expect("policy hash");
+        let policy_hash = store_policy_hash(&daemon, store_id);
 
         let snapshot = build_snapshot(CheckpointSnapshotInput {
             checkpoint_group: "core".to_string(),
@@ -1743,15 +1819,7 @@ mod tests {
         );
         publish_checkpoint(&repo, &export, &git_ref, &store_meta).expect("checkpoint publish");
 
-        let loaded = LoadResult {
-            state: CanonicalState::new(),
-            root_slug: None,
-            needs_sync: false,
-            last_seen_stamp: None,
-            fetch_error: None,
-            divergence: None,
-            force_push: None,
-        };
+        let loaded = empty_load_result();
         daemon
             .apply_loaded_repo_state(store_id, &remote, repo_dir.path(), loaded)
             .expect("load repo");

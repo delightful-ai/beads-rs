@@ -1,0 +1,8 @@
+warning: `update_watermark` splits applied/durable scalars at WAL boundary
+  --> $DIR/watermark_split_params_violation.rs:LL:CC
+   |
+LL |     fn update_watermark(&mut self, applied: u64, durable: u64);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: use a single `WatermarkPair` parameter at WAL boundary APIs
+

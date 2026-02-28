@@ -6,8 +6,8 @@
 - workspace: current_workspace
 - close_scope: p0_children_only
 - clean_every_closed_beads: 4
-- closed_count: 11
-- current_bead: bd-8x41
+- closed_count: 12
+- current_bead: none
 
 ## Bead Ledger
 | order | bead | stage | planner_id | sanity_id | implementer_id | reviewer_id | plan_file | jj_change | verify_status | close_status | last_update_utc |
@@ -23,7 +23,7 @@
 | 9 | bd-azyx | closed | 019ca30e-f35f-7ba1-a137-57f64ab4e14b | 019ca312-7d8e-7781-82d8-bb8ec08bf096 | 019ca313-f49f-7fe0-9248-e08ce8b7ddf0 | 019ca320-707b-70f0-b383-80bbab627304 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-azyx-implementation.md | lrsnwvov | pass | closed | 2026-02-28T07:26:58Z |
 | 10 | bd-9hym | closed | 019ca663-7b64-79d3-a201-9bd05f98c081 | 019ca665-7333-7001-9692-93aa9d094f13 | 019ca667-d5e7-7f23-b3b0-270eaeb9c431 | 019ca683-b592-7cf2-80b8-4b2b64675f31 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-9hym-implementation.md | wqqvwrxz | pass | closed | 2026-02-28T23:12:50Z |
 | 11 | bd-swt5 | closed | 019ca694-c52a-72f0-8623-552c653c1978 | 019ca698-69dc-74a1-b303-c9da3cde7188 | 019ca699-a052-7b32-878f-aa7b24aafe51 | 019ca6a1-d3a4-7611-9eba-df7134c7c0a0 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-swt5-implementation.md | nkyxyvqv | pass | closed | 2026-02-28T23:45:02Z |
-| 12 | bd-8x41 | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-8x41-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
+| 12 | bd-8x41 | closed | 019ca6ab-1640-7291-9dd5-d6be487c9ec8 | 019ca6ac-105a-7b90-a435-a113db8ab407 | 019ca6ad-fa04-7392-9487-cbad1a8d1d33 | 019ca6b4-d9a9-76c1-8465-3af18dd262c8 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-8x41-implementation.md | qmpzlsok | pass | closed | 2026-03-01T00:06:05Z |
 
 ## Stage Enum
 planned | sanity_failed | sanity_passed | implementing | review_failed | review_passed | verified | closed | blocked
@@ -164,3 +164,17 @@ planned | sanity_failed | sanity_passed | implementing | review_failed | review_
 | 2026-02-28T23:45:02Z | bd-swt5 | verification_completed | pass | controller reran fmt+dylint+clippy(-D warnings)+test successfully |
 | 2026-02-28T23:45:02Z | bd-swt5 | close_confirmed | ok | bd close executed and bd show reports status=closed; closed_count=11 |
 | 2026-02-28T23:45:24Z | bd-swt5 | subagents_closed | ok | planner/sanity/implementer/reviewer agents closed after review and verification |
+| 2026-02-28T23:45:36Z | bd-8x41 | bead_claimed | ok | bd claim succeeded; jj new created qmpzlsok (bd-8x41: start) |
+| 2026-02-28T23:49:47Z | bd-8x41 | planner_completed | ok | plan written to docs/plans/2026-02-28-bd-8x41-implementation.md |
+| 2026-02-28T23:52:21Z | bd-8x41 | sanity_completed | fail | plan mapped compatibility error via to_string without Display bound; revise error type/mapping for compile-safe repo_load conversion |
+| 2026-02-28T23:53:23Z | bd-8x41 | planner_completed | ok | revised plan makes CheckpointCompatibilityError derive thiserror::Error so repo_load to_string mapping is compile-safe |
+| 2026-02-28T23:55:10Z | bd-8x41 | sanity_completed | pass | plan-only sanity approved typed checkpoint compatibility gate and pre-merge rejection test design |
+| 2026-02-28T23:55:50Z | bd-8x41 | implementer_started | ok | worker agent spawned for checkpoint compatibility hard-gate cutover implementation |
+| 2026-03-01T00:03:00Z | bd-8x41 | implementer_completed | ok | code landed on qmpzlsok@ee64368d with checkpoint compatibility hard-gate cutover and full gate passing |
+| 2026-03-01T00:03:21Z | bd-8x41 | reviewer_started | ok | reviewer agent spawned for checkpoint compatibility hard-gate correctness/spec audit |
+| 2026-03-01T00:04:34Z | bd-8x41 | reviewer_completed | pass | reviewer found no blocking correctness issues; hard compatibility gate acceptance met |
+| 2026-03-01T00:06:05Z | bd-8x41 | verification_completed | pass | controller reran fmt+dylint+clippy(-D warnings)+test successfully |
+| 2026-03-01T00:06:05Z | bd-8x41 | close_confirmed | ok | bd close executed and bd show reports status=closed; closed_count=12 |
+| 2026-03-01T00:06:05Z | campaign | maintenance | ok | cadence hit (12 closed): ran cargo clean && cargo check |
+| 2026-03-01T00:06:29Z | bd-8x41 | subagents_closed | ok | planner/sanity/implementer/reviewer agents closed after review and verification |
+| 2026-03-01T00:07:54Z | campaign | pr_created | ok | https://github.com/delightful-ai/beads-rs/pull/79 |
