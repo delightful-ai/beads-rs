@@ -1737,6 +1737,75 @@ mod tests {
         }
     }
 
+    fn seed_catch_up_gap_fixture() -> CatchUpAtomicFixture {
+        let temp = TempDir::new().unwrap();
+        let store_id = StoreId::new(Uuid::from_bytes([51u8; 16]));
+        let store_epoch = StoreEpoch::new(1);
+        let meta = test_meta(store_id, store_epoch);
+        let limits = Limits::default();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([52u8; 16]));
+        let store = StoreIdentity::new(store_id, store_epoch);
+
+        let mut writer = SegmentWriter::open(
+            temp.path(),
+            &meta,
+            &namespace,
+            10,
+            SegmentConfig::from_limits(&limits),
+        )
+        .unwrap();
+
+        let sha1 = append_record(
+            &mut writer,
+            store,
+            &namespace,
+            origin,
+            Seq1::from_u64(1).expect("seq1"),
+            None,
+            11,
+            1,
+            &limits,
+        );
+        let sha2 = append_record(
+            &mut writer,
+            store,
+            &namespace,
+            origin,
+            Seq1::from_u64(2).expect("seq2"),
+            Some(sha1),
+            12,
+            2,
+            &limits,
+        );
+        let touched_segment_id = writer.current_segment_id();
+
+        rebuild_index(temp.path(), &meta, &index, &limits).expect("seed rebuild");
+
+        append_record(
+            &mut writer,
+            store,
+            &namespace,
+            origin,
+            Seq1::from_u64(4).expect("seq4"),
+            Some(sha2),
+            14,
+            4,
+            &limits,
+        );
+
+        CatchUpAtomicFixture {
+            temp,
+            meta,
+            index,
+            limits,
+            namespace,
+            origin,
+            touched_segment_id,
+        }
+    }
+
     fn capture_snapshot(
         index: &dyn WalIndex,
         namespace: &NamespaceId,
@@ -2031,6 +2100,80 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_rejects_gap_and_does_not_commit_next_origin_seq() {
+        let temp = TempDir::new().unwrap();
+        let store_id = StoreId::new(Uuid::from_bytes([61u8; 16]));
+        let store_epoch = StoreEpoch::new(1);
+        let meta = test_meta(store_id, store_epoch);
+        let limits = Limits::default();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([62u8; 16]));
+        let store = StoreIdentity::new(store_id, store_epoch);
+
+        let mut writer = SegmentWriter::open(
+            temp.path(),
+            &meta,
+            &namespace,
+            10,
+            SegmentConfig::from_limits(&limits),
+        )
+        .unwrap();
+        let sha1 = append_record(
+            &mut writer,
+            store,
+            &namespace,
+            origin,
+            Seq1::from_u64(1).expect("seq1"),
+            None,
+            11,
+            1,
+            &limits,
+        );
+        append_record(
+            &mut writer,
+            store,
+            &namespace,
+            origin,
+            Seq1::from_u64(3).expect("seq3"),
+            Some(sha1),
+            13,
+            3,
+            &limits,
+        );
+
+        let err = rebuild_index(temp.path(), &meta, &index, &limits)
+            .expect_err("rebuild must reject forward sequence gaps");
+        assert!(matches!(
+            err,
+            WalReplayError::NonContiguousSeq {
+                expected,
+                got,
+                ..
+            } if expected == Seq1::from_u64(2).expect("seq2") && got == Seq0::new(3)
+        ));
+
+        let next_origin_seq = {
+            let mut txn = index.writer().begin_txn().expect("begin txn");
+            let next = txn
+                .next_origin_seq(&namespace, &origin)
+                .expect("next origin seq");
+            txn.rollback().expect("rollback probe");
+            next
+        };
+        assert_eq!(next_origin_seq.get(), 1);
+        assert!(
+            index
+                .reader()
+                .load_watermarks()
+                .expect("load watermarks")
+                .into_iter()
+                .all(|row| !(row.namespace == namespace && row.origin == origin)),
+            "frontier row should not be committed on rebuild gap"
+        );
+    }
+
+    #[test]
     fn catch_up_rejects_persisted_cursor_before_header_without_scan_entry() {
         let fixture = seed_catch_up_atomic_fixture();
         let row = fixture
@@ -2069,6 +2212,33 @@ mod tests {
             } if offset < header_len
         ));
         assert_eq!(test_scan_entry_count(), 0);
+    }
+
+    #[test]
+    fn catch_up_rejects_gap_and_rolls_back_next_origin_seq() {
+        let fixture = seed_catch_up_gap_fixture();
+        let pre = capture_snapshot(&fixture.index, &fixture.namespace, fixture.origin);
+        assert_eq!(pre.rows.len(), 2);
+        assert_eq!(pre.next_origin_seq.get(), 3);
+
+        let err = catch_up_index(
+            fixture.temp.path(),
+            &fixture.meta,
+            &fixture.index,
+            &fixture.limits,
+        )
+        .expect_err("catch-up must reject forward sequence gaps");
+        assert!(matches!(
+            err,
+            WalReplayError::NonContiguousSeq {
+                expected,
+                got,
+                ..
+            } if expected == Seq1::from_u64(3).expect("seq3") && got == Seq0::new(4)
+        ));
+
+        let post = capture_snapshot(&fixture.index, &fixture.namespace, fixture.origin);
+        assert_eq!(post, pre);
     }
 
     #[test]
@@ -2308,6 +2478,53 @@ mod tests {
                 .expect("list segment namespaces")
                 .contains(&index_only_namespace)
         );
+    }
+
+    #[test]
+    fn origin_replay_state_enters_terminal_gap_state() {
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([65u8; 16]));
+        let mut state = OriginReplayState::default();
+        let sha1 = [1u8; 32];
+        let sha2 = [2u8; 32];
+
+        let err = state
+            .observe(
+                &namespace,
+                origin,
+                Seq1::from_u64(2).expect("seq2"),
+                sha2,
+                Some(sha1),
+                8,
+            )
+            .expect_err("forward gap must transition state to terminal gap");
+        assert!(matches!(
+            err,
+            WalReplayError::NonContiguousSeq {
+                expected,
+                got,
+                ..
+            } if expected == Seq1::from_u64(1).expect("seq1") && got == Seq0::new(2)
+        ));
+
+        let err = state
+            .observe(
+                &namespace,
+                origin,
+                Seq1::from_u64(1).expect("seq1"),
+                sha1,
+                None,
+                8,
+            )
+            .expect_err("terminal gap state should reject later observations");
+        assert!(matches!(
+            err,
+            WalReplayError::NonContiguousSeq {
+                expected,
+                got,
+                ..
+            } if expected == Seq1::from_u64(1).expect("seq1") && got == Seq0::new(2)
+        ));
     }
 
     #[test]
