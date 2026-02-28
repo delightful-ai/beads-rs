@@ -375,6 +375,11 @@ pub trait WalIndexTxn {
     ) -> Result<(), WalIndexError>;
     fn update_hlc(&mut self, hlc: &HlcRow) -> Result<(), WalIndexError>;
     fn upsert_segment(&mut self, segment: &SegmentRow) -> Result<(), WalIndexError>;
+    fn replace_namespace_segments(
+        &mut self,
+        ns: &NamespaceId,
+        segments: &[SegmentRow],
+    ) -> Result<(), WalIndexError>;
     #[allow(clippy::too_many_arguments)]
     fn upsert_client_request(
         &mut self,
@@ -398,6 +403,7 @@ pub trait WalIndexReader {
         eid: &EventId,
     ) -> Result<Option<[u8; 32]>, WalIndexError>;
     fn list_segments(&self, ns: &NamespaceId) -> Result<Vec<SegmentRow>, WalIndexError>;
+    fn list_segment_namespaces(&self) -> Result<Vec<NamespaceId>, WalIndexError>;
     fn load_watermarks(&self) -> Result<Vec<WatermarkRow>, WalIndexError>;
     fn load_hlc(&self) -> Result<Vec<HlcRow>, WalIndexError>;
     fn load_replica_liveness(&self) -> Result<Vec<ReplicaLivenessRow>, WalIndexError>;

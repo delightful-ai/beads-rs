@@ -22,8 +22,109 @@ where
     test_watermark_updates(&factory);
     test_client_requests(&factory);
     test_segment_storage(&factory);
+    test_segment_replacement_is_total_set_with_factory(&factory);
     test_hlc_storage(&factory);
     test_replica_liveness(&factory);
+}
+
+#[cfg(any(feature = "test-harness", test))]
+fn test_segment_replacement_is_total_set_with_factory<I, F>(factory: &F)
+where
+    I: WalIndex,
+    F: Fn() -> I,
+{
+    let index = factory();
+    let namespace = NamespaceId::core();
+    let stale_one = SegmentRow::open(
+        namespace.clone(),
+        SegmentId::new(Uuid::from_bytes([31u8; 16])),
+        std::path::PathBuf::from("seg-stale-1"),
+        10,
+        1,
+    );
+    let stale_two = SegmentRow::sealed(
+        namespace.clone(),
+        SegmentId::new(Uuid::from_bytes([32u8; 16])),
+        std::path::PathBuf::from("seg-stale-2"),
+        20,
+        2,
+        2,
+    );
+    let replacement = SegmentRow::open(
+        namespace.clone(),
+        SegmentId::new(Uuid::from_bytes([33u8; 16])),
+        std::path::PathBuf::from("seg-new"),
+        30,
+        3,
+    );
+
+    let mut txn = index.writer().begin_txn().expect("begin txn");
+    txn.upsert_segment(&stale_one).expect("seed stale_one");
+    txn.upsert_segment(&stale_two).expect("seed stale_two");
+    txn.commit().expect("commit seed");
+
+    let reader = index.reader();
+    assert_eq!(
+        reader
+            .list_segment_namespaces()
+            .expect("list namespaces after seed"),
+        vec![namespace.clone()]
+    );
+
+    let mut txn = index.writer().begin_txn().expect("begin replacement txn");
+    txn.replace_namespace_segments(&namespace, std::slice::from_ref(&replacement))
+        .expect("replace namespace rows");
+    txn.commit().expect("commit replacement");
+
+    let rows = reader
+        .list_segments(&namespace)
+        .expect("list segments after replacement");
+    assert_eq!(rows, vec![replacement.clone()]);
+    assert_eq!(
+        reader
+            .list_segment_namespaces()
+            .expect("list namespaces after replacement"),
+        vec![namespace.clone()]
+    );
+
+    let other_namespace = NamespaceId::parse("other").expect("valid namespace");
+    let wrong_namespace_row = SegmentRow::open(
+        other_namespace,
+        SegmentId::new(Uuid::from_bytes([34u8; 16])),
+        std::path::PathBuf::from("seg-wrong-ns"),
+        40,
+        4,
+    );
+    let mut txn = index.writer().begin_txn().expect("begin mismatch txn");
+    let err = txn
+        .replace_namespace_segments(&namespace, &[wrong_namespace_row])
+        .expect_err("namespace mismatch must error");
+    assert!(matches!(err, WalIndexError::SegmentRowDecode(_)));
+    txn.rollback().expect("rollback mismatch txn");
+
+    let mut txn = index.writer().begin_txn().expect("begin clear txn");
+    txn.replace_namespace_segments(&namespace, &[])
+        .expect("clear namespace rows");
+    txn.commit().expect("commit clear");
+
+    assert!(
+        reader
+            .list_segments(&namespace)
+            .expect("list segments after clear")
+            .is_empty()
+    );
+    assert!(
+        !reader
+            .list_segment_namespaces()
+            .expect("list namespaces after clear")
+            .contains(&namespace)
+    );
+}
+
+#[cfg(test)]
+#[test]
+fn test_segment_replacement_is_total_set() {
+    test_segment_replacement_is_total_set_with_factory(&super::MemoryWalIndex::new);
 }
 
 #[cfg(any(feature = "test-harness", test))]

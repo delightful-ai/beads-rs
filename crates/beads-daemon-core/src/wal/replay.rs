@@ -405,7 +405,17 @@ fn replay_index(
         ReplayMode::Rebuild => None,
     };
 
-    let namespaces = list_namespaces(&wal_dir)?;
+    let namespaces = match mode {
+        ReplayMode::Rebuild => list_namespaces(&wal_dir)?,
+        ReplayMode::CatchUp => {
+            let mut namespaces: BTreeSet<NamespaceId> =
+                list_namespaces(&wal_dir)?.into_iter().collect();
+            for namespace in index.reader().list_segment_namespaces()? {
+                namespaces.insert(namespace);
+            }
+            namespaces.into_iter().collect()
+        }
+    };
     for namespace in namespaces {
         let namespace_dir = wal_dir.join(namespace.as_str());
         cleanup_orphan_tmp_segments(store_dir, &namespace, &namespace_dir, index)?;
@@ -420,6 +430,7 @@ fn replay_index(
                 existing.insert(row.segment_id(), row);
             }
         }
+        let mut catch_up_segment_rows = Vec::new();
 
         for segment in segments {
             let is_last = Some(segment.header.segment_id) == last_segment_id;
@@ -527,7 +538,7 @@ fn replay_index(
                         is_last,
                         scan.last_indexed_offset,
                     );
-                    commit.upsert_segment(&segment_row)?;
+                    catch_up_segment_rows.push(segment_row);
                     scan
                 }
             };
@@ -542,6 +553,13 @@ fn replay_index(
                     });
                 }
             }
+        }
+
+        if mode == ReplayMode::CatchUp {
+            let commit = catch_up_commit
+                .as_mut()
+                .expect("catch-up commit initialized");
+            commit.replace_namespace_segments(&namespace, &catch_up_segment_rows)?;
         }
     }
 
@@ -776,8 +794,12 @@ impl ReplayAtomicCatchUpCommit {
         Ok(())
     }
 
-    fn upsert_segment(&mut self, segment: &SegmentRow) -> Result<(), WalReplayError> {
-        self.txn.upsert_segment(segment)?;
+    fn replace_namespace_segments(
+        &mut self,
+        namespace: &NamespaceId,
+        segments: &[SegmentRow],
+    ) -> Result<(), WalReplayError> {
+        self.txn.replace_namespace_segments(namespace, segments)?;
         Ok(())
     }
 
@@ -1706,6 +1728,33 @@ mod tests {
         }
     }
 
+    fn filesystem_segment_ids(
+        store_dir: &Path,
+        meta: &StoreMeta,
+        namespace: &NamespaceId,
+    ) -> std::collections::BTreeSet<SegmentId> {
+        let namespace_dir = store_dir.join("wal").join(namespace.as_str());
+        let segments = list_segments(&namespace_dir).expect("list filesystem segments");
+        let verified = verify_segments(segments, meta, namespace).expect("verify segments");
+        verified
+            .into_iter()
+            .map(|segment| segment.header.segment_id)
+            .collect()
+    }
+
+    fn indexed_segment_ids(
+        index: &dyn WalIndex,
+        namespace: &NamespaceId,
+    ) -> std::collections::BTreeSet<SegmentId> {
+        index
+            .reader()
+            .list_segments(namespace)
+            .expect("list indexed segments")
+            .into_iter()
+            .map(|row| row.segment_id())
+            .collect()
+    }
+
     fn assert_recovered_after_retry(fixture: &CatchUpAtomicFixture, pre: &ReplayStateSnapshot) {
         let post = capture_snapshot(&fixture.index, &fixture.namespace, fixture.origin);
         assert!(
@@ -1972,6 +2021,114 @@ mod tests {
         )
         .expect("catch-up should succeed");
         assert_recovered_after_retry(&fixture, &pre);
+    }
+
+    #[test]
+    fn catch_up_reconcile_deletes_stale_segment_rows_and_matches_filesystem_set() {
+        let fixture = seed_catch_up_atomic_fixture();
+        let stale_segment_id = SegmentId::new(Uuid::from_bytes([63u8; 16]));
+        let stale_row = SegmentRow::open(
+            fixture.namespace.clone(),
+            stale_segment_id,
+            std::path::PathBuf::from(format!(
+                "wal/{}/stale-segment.wal",
+                fixture.namespace.as_str()
+            )),
+            1,
+            0,
+        );
+
+        let mut txn = fixture.index.writer().begin_txn().expect("begin txn");
+        txn.upsert_segment(&stale_row)
+            .expect("seed stale segment row");
+        txn.commit().expect("commit stale segment row");
+
+        assert!(
+            indexed_segment_ids(&fixture.index, &fixture.namespace).contains(&stale_segment_id),
+            "stale row should exist before catch-up"
+        );
+
+        catch_up_index(
+            fixture.temp.path(),
+            &fixture.meta,
+            &fixture.index,
+            &fixture.limits,
+        )
+        .expect("catch-up should reconcile segments");
+
+        let indexed = indexed_segment_ids(&fixture.index, &fixture.namespace);
+        let filesystem =
+            filesystem_segment_ids(fixture.temp.path(), &fixture.meta, &fixture.namespace);
+        assert_eq!(indexed, filesystem);
+        assert!(
+            !indexed.contains(&stale_segment_id),
+            "catch-up must delete stale namespace rows"
+        );
+    }
+
+    #[test]
+    fn catch_up_reconcile_clears_rows_for_index_only_namespace() {
+        let fixture = seed_catch_up_atomic_fixture();
+        let index_only_namespace = NamespaceId::parse("indexonly").expect("namespace");
+        let index_only_segment_id = SegmentId::new(Uuid::from_bytes([64u8; 16]));
+        let index_only_row = SegmentRow::open(
+            index_only_namespace.clone(),
+            index_only_segment_id,
+            std::path::PathBuf::from(format!(
+                "wal/{}/index-only.wal",
+                index_only_namespace.as_str()
+            )),
+            2,
+            0,
+        );
+
+        let mut txn = fixture.index.writer().begin_txn().expect("begin txn");
+        txn.upsert_segment(&index_only_row)
+            .expect("seed index-only namespace row");
+        txn.commit().expect("commit index-only namespace row");
+
+        assert!(
+            !fixture
+                .temp
+                .path()
+                .join("wal")
+                .join(index_only_namespace.as_str())
+                .exists()
+        );
+        assert_eq!(
+            fixture
+                .index
+                .reader()
+                .list_segments(&index_only_namespace)
+                .expect("list pre catch-up")
+                .len(),
+            1
+        );
+
+        catch_up_index(
+            fixture.temp.path(),
+            &fixture.meta,
+            &fixture.index,
+            &fixture.limits,
+        )
+        .expect("catch-up should reconcile namespaces");
+
+        assert!(
+            fixture
+                .index
+                .reader()
+                .list_segments(&index_only_namespace)
+                .expect("list post catch-up")
+                .is_empty()
+        );
+        assert!(
+            !fixture
+                .index
+                .reader()
+                .list_segment_namespaces()
+                .expect("list segment namespaces")
+                .contains(&index_only_namespace)
+        );
     }
 
     #[test]

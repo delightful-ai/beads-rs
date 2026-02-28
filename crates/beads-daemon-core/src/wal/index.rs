@@ -473,6 +473,38 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         Ok(())
     }
 
+    fn replace_namespace_segments(
+        &mut self,
+        ns: &NamespaceId,
+        segments: &[SegmentRow],
+    ) -> Result<(), WalIndexError> {
+        for segment in segments {
+            if segment.namespace() != ns {
+                return Err(WalIndexError::SegmentRowDecode(format!(
+                    "segment namespace mismatch (expected {}, got {})",
+                    ns,
+                    segment.namespace()
+                )));
+            }
+        }
+
+        let namespace = ns.as_str();
+        {
+            let mut delete_stmt = self
+                .conn
+                .prepare_cached("DELETE FROM segments WHERE namespace = ?1")
+                .map_err(map_sqlite_error)?;
+            delete_stmt
+                .execute(params![namespace])
+                .map_err(map_sqlite_error)?;
+        }
+
+        for segment in segments {
+            self.upsert_segment(segment)?;
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn upsert_client_request(
         &mut self,
@@ -701,6 +733,24 @@ impl WalIndexReader for SqliteWalIndexReader {
                 segments.push(segment_row);
             }
             Ok(segments)
+        })
+    }
+
+    fn list_segment_namespaces(&self) -> Result<Vec<NamespaceId>, WalIndexError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached("SELECT DISTINCT namespace FROM segments ORDER BY namespace ASC")
+                .map_err(map_sqlite_error)?;
+            let mut rows = stmt.query([]).map_err(map_sqlite_error)?;
+            let mut namespaces = Vec::new();
+            while let Some(row) = rows.next().map_err(map_sqlite_error)? {
+                let namespace: String = row.get(0).map_err(map_sqlite_error)?;
+                namespaces.push(
+                    NamespaceId::parse(&namespace)
+                        .map_err(|err| WalIndexError::SegmentRowDecode(err.to_string()))?,
+                );
+            }
+            Ok(namespaces)
         })
     }
 

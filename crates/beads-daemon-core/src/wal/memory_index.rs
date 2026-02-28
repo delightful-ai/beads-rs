@@ -289,6 +289,30 @@ impl WalIndexTxn for MemoryWalIndexTxn {
         Ok(())
     }
 
+    fn replace_namespace_segments(
+        &mut self,
+        ns: &NamespaceId,
+        segments: &[SegmentRow],
+    ) -> Result<(), WalIndexError> {
+        self.ensure_live()?;
+        for segment in segments {
+            if segment.namespace() != ns {
+                return Err(WalIndexError::SegmentRowDecode(format!(
+                    "segment namespace mismatch (expected {}, got {})",
+                    ns,
+                    segment.namespace()
+                )));
+            }
+        }
+        self.working.segments.retain(|(row_ns, _), _| row_ns != ns);
+        for segment in segments {
+            self.working
+                .segments
+                .insert((ns.clone(), segment.segment_id()), segment.clone());
+        }
+        Ok(())
+    }
+
     fn upsert_client_request(
         &mut self,
         ns: &NamespaceId,
@@ -423,6 +447,19 @@ impl WalIndexReader for MemoryWalIndexReader {
                 .collect();
             rows.sort_by_key(|row| (row.created_at_ms(), row.segment_id()));
             Ok(rows)
+        })
+    }
+
+    fn list_segment_namespaces(&self) -> Result<Vec<NamespaceId>, WalIndexError> {
+        self.with_state(|state| {
+            let mut namespaces: Vec<NamespaceId> = state
+                .segments
+                .keys()
+                .map(|(namespace, _)| namespace.clone())
+                .collect();
+            namespaces.sort();
+            namespaces.dedup();
+            Ok(namespaces)
         })
     }
 

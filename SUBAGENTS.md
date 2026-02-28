@@ -6,15 +6,15 @@
 - workspace: current_workspace
 - close_scope: p0_children_only
 - clean_every_closed_beads: 4
-- closed_count: 2
-- current_bead: bd-a3hl
+- closed_count: 3
+- current_bead: bd-ub8m
 
 ## Bead Ledger
 | order | bead | stage | planner_id | sanity_id | implementer_id | reviewer_id | plan_file | jj_change | verify_status | close_status | last_update_utc |
 |------:|------|-------|------------|-----------|----------------|-------------|-----------|-----------|---------------|--------------|-----------------|
 | 1 | bd-2g9q | closed | 019ca229-9ab1-7ed0-aa18-802e825a77f2 | 019ca22e-7b3e-7792-9504-409e00b8f951 | 019ca234-6785-7bf3-8acf-c015fac3624e | 019ca243-520c-7c40-bb59-2e1fd20e1417 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-2g9q-implementation.md | ysnrnrwz | pass | closed | 2026-02-28T03:27:04Z |
 | 2 | bd-ooe2 | closed | 019ca253-b508-78c0-acdb-c64083ec32b4 | 019ca256-2f48-7ae1-a236-8b800b0ca482 | 019ca257-2780-7462-8099-4804f625aad0 | 019ca25f-d3b7-7f41-8165-1fa74b679a5a | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-ooe2-implementation.md | ozmlwmyn | pass | closed | 2026-02-28T03:56:17Z |
-| 3 | bd-a3hl | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-a3hl-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
+| 3 | bd-a3hl | closed | 019ca264-6693-7833-974a-7a498c2be3d0 | 019ca269-0cbd-7480-bfe0-223fcca93357 | 019ca26b-2851-7383-b54f-9f05ba71dc88 | 019ca272-bb45-79a2-b27b-0aa622ed8cd0 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-a3hl-implementation.md | kyqkwxro | pass | closed | 2026-02-28T04:17:06Z |
 | 4 | bd-ub8m | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-ub8m-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 | 5 | bd-q6o7 | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-q6o7-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 | 6 | bd-r39f | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-r39f-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
@@ -54,3 +54,12 @@ planned | sanity_failed | sanity_passed | implementing | review_failed | review_
 | 2026-02-28T03:55:46Z | bd-ooe2 | reviewer_completed | pass | reviewer found no blocking correctness issues; targeted atomic tests pass |
 | 2026-02-28T03:56:17Z | bd-ooe2 | verification_completed | pass | controller ran fmt+dylint+clippy(-D warnings)+test successfully |
 | 2026-02-28T03:56:17Z | bd-ooe2 | close_confirmed | ok | bd close executed and bd show reports status=closed; closed_count=2 |
+| 2026-02-28T03:56:41Z | bd-a3hl | bead_claimed | ok | bd claim succeeded; jj new created kyqkwxro (bd-a3hl: start) |
+| 2026-02-28T04:01:48Z | bd-a3hl | planner_completed | ok | plan written to docs/plans/2026-02-28-bd-a3hl-implementation.md |
+| 2026-02-28T04:04:04Z | bd-a3hl | sanity_completed | pass | total-set reconciliation plan accepted with namespace-union + exact-set tests |
+| 2026-02-28T04:04:19Z | bd-a3hl | implementer_started | ok | worker agent spawned for segment total-set reconciliation cutover |
+| 2026-02-28T04:12:22Z | bd-a3hl | implementer_completed | ok | code landed on kyqkwxro with trait/backend/replay/contract updates and tests |
+| 2026-02-28T04:12:36Z | bd-a3hl | reviewer_started | ok | reviewer agent spawned for bd-a3hl correctness audit |
+| 2026-02-28T04:16:37Z | bd-a3hl | reviewer_completed | pass | reviewer found no blocking correctness issues; replay/contract evidence verified |
+| 2026-02-28T04:17:06Z | bd-a3hl | verification_completed | pass | controller ran fmt+dylint+clippy(-D warnings)+test successfully |
+| 2026-02-28T04:17:06Z | bd-a3hl | close_confirmed | ok | bd close executed and bd show reports status=closed; closed_count=3 |
