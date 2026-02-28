@@ -16,7 +16,7 @@ impl Daemon {
             .path_to_remote
             .insert(repo.to_owned(), remote.clone());
 
-        if !self.stores.contains_key(&store_id) {
+        if !self.store_sessions.contains_key(&store_id) {
             let open = StoreRuntime::open(
                 &self.layout,
                 store_id,
@@ -28,8 +28,11 @@ impl Daemon {
             )?;
             let runtime = open.runtime;
             self.seed_actor_clocks(&runtime)?;
-            self.stores.insert(store_id, runtime);
-            self.git_lanes.insert(store_id, GitLaneState::new());
+            let token = self.alloc_store_session_token(store_id);
+            self.store_sessions.insert(
+                store_id,
+                StoreSession::new(token, runtime, GitLaneState::new()),
+            );
             self.register_default_checkpoint_groups(store_id)?;
 
             let load_result = (|| -> Result<(), OpError> {
@@ -88,14 +91,9 @@ impl Daemon {
                 self.rollback_failed_initial_load(store_id);
                 return Err(err);
             }
-        } else if let Some(store) = self.stores.get_mut(&store_id) {
-            if let Some(repo_state) = self.git_lanes.get_mut(&store_id) {
-                repo_state.register_path(repo.to_owned());
-            } else {
-                let mut repo_state = GitLaneState::with_path(None, repo.to_owned());
-                repo_state.mark_loaded_from_git();
-                self.git_lanes.insert(store_id, repo_state);
-            }
+        } else if let Some(session) = self.store_sessions.get_mut(&store_id) {
+            let (store, repo_state) = session.split_mut();
+            repo_state.register_path(repo.to_owned());
             if store.primary_remote != remote {
                 store.primary_remote = remote.clone();
             }
@@ -121,7 +119,7 @@ impl Daemon {
             .path_to_remote
             .insert(repo.to_owned(), remote.clone());
 
-        if !self.stores.contains_key(&store_id) {
+        if !self.store_sessions.contains_key(&store_id) {
             let open = StoreRuntime::open(
                 &self.layout,
                 store_id,
@@ -133,8 +131,11 @@ impl Daemon {
             )?;
             let runtime = open.runtime;
             self.seed_actor_clocks(&runtime)?;
-            self.stores.insert(store_id, runtime);
-            self.git_lanes.insert(store_id, GitLaneState::new());
+            let token = self.alloc_store_session_token(store_id);
+            self.store_sessions.insert(
+                store_id,
+                StoreSession::new(token, runtime, GitLaneState::new()),
+            );
             self.register_default_checkpoint_groups(store_id)?;
 
             let load_result = (|| -> Result<(), OpError> {
@@ -173,14 +174,9 @@ impl Daemon {
                 self.rollback_failed_initial_load(store_id);
                 return Err(err);
             }
-        } else if let Some(store) = self.stores.get_mut(&store_id) {
-            if let Some(repo_state) = self.git_lanes.get_mut(&store_id) {
-                repo_state.register_path(repo.to_owned());
-            } else {
-                let mut repo_state = GitLaneState::with_path(None, repo.to_owned());
-                repo_state.mark_loaded_from_git();
-                self.git_lanes.insert(store_id, repo_state);
-            }
+        } else if let Some(session) = self.store_sessions.get_mut(&store_id) {
+            let (store, repo_state) = session.split_mut();
+            repo_state.register_path(repo.to_owned());
             if store.primary_remote != remote {
                 store.primary_remote = remote.clone();
             }
@@ -220,17 +216,19 @@ impl Daemon {
         let pending_replay = {
             let store_dir = self.layout().store_dir(&store_id);
             let store = self
-                .stores
+                .store_sessions
                 .get(&store_id)
-                .expect("loaded store missing from state");
+                .expect("loaded store missing from state")
+                .runtime();
             replay_event_wal(&store_dir, store.wal_index.as_ref(), state, self.limits())?
         };
 
         {
             let store = self
-                .stores
+                .store_sessions
                 .get_mut(&store_id)
-                .expect("loaded store missing from state");
+                .expect("loaded store missing from state")
+                .runtime_mut();
             if !checkpoint_imports.is_empty() {
                 apply_checkpoint_watermarks(store, &checkpoint_imports)?;
             }
@@ -276,13 +274,13 @@ impl Daemon {
             self.scheduler.schedule(remote.clone());
         }
 
-        let store = self
-            .stores
+        let session = self
+            .store_sessions
             .get_mut(&store_id)
             .expect("loaded store missing from state");
-        self.git_lanes.insert(store_id, repo_state);
-        if store.primary_remote != *remote {
-            store.primary_remote = remote.clone();
+        *session.lane_mut() = repo_state;
+        if session.runtime().primary_remote != *remote {
+            session.runtime_mut().primary_remote = remote.clone();
         }
 
         // Initial Go-compat export for newly loaded repo

@@ -4,7 +4,7 @@ impl Daemon {
     /// Handle a request from IPC.
     ///
     /// Dispatches to appropriate handler based on request type.
-    pub fn handle_request(&mut self, req: Request, git_tx: &Sender<GitOp>) -> HandleOutcome {
+    pub(crate) fn handle_request(&mut self, req: Request, git_tx: &Sender<GitOp>) -> HandleOutcome {
         match req {
             // Mutations - delegate to executor module
             Request::Create { ctx, payload } => {

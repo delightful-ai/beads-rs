@@ -32,10 +32,6 @@ pub mod git {
     pub use beads_git::*;
 }
 
-pub mod daemon {
-    pub use crate::runtime::*;
-}
-
 pub use beads_api as api;
 pub use beads_api::DaemonInfo;
 pub use beads_core as core;

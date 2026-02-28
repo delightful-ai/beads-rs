@@ -18,7 +18,7 @@ pub mod executor;
 mod export_worker;
 pub mod fingerprint;
 pub mod git_backend;
-pub mod git_worker;
+pub(crate) mod git_worker;
 pub mod io_budget;
 pub mod ipc;
 pub mod metrics;
@@ -36,7 +36,7 @@ pub mod test_hooks;
 pub mod wal;
 mod wal_atomic_commit;
 
-pub use core::{Daemon, LoadedStore};
+pub use core::Daemon;
 
 pub use crate::clock::Clock;
 pub use crate::git_lane::GitLaneState;
@@ -45,7 +45,8 @@ pub use crate::scheduler::SyncScheduler;
 pub use beads_api::QueryResult;
 pub use beads_surface::ops::{BeadPatch, OpResult, Patch};
 pub use beads_surface::query::{Filters, SortField};
-pub use git_worker::{GitOp, GitResult, GitWorker, run_git_loop};
+pub(in crate::runtime) use git_worker::{GitOp, GitResult};
+pub(crate) use git_worker::{GitWorker, run_git_loop};
 pub use ipc::{IpcClient, IpcError, Request, Response, ResponsePayload};
 pub use ops::OpError;
 pub use query::Query;

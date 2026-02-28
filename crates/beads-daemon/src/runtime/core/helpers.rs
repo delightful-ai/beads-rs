@@ -631,10 +631,12 @@ pub fn insert_store_for_tests(
     )
     .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
     daemon.seed_actor_clocks(&open.runtime)?;
-    daemon.stores.insert(store_id, open.runtime);
+    let token = daemon.alloc_store_session_token(store_id);
     let mut lane = GitLaneState::with_path(None, repo_path.to_owned());
     lane.mark_loaded_from_git();
-    daemon.git_lanes.insert(store_id, lane);
+    daemon
+        .store_sessions
+        .insert(store_id, StoreSession::new(token, open.runtime, lane));
     daemon.store_caches.remote_to_store.insert(
         remote.clone(),
         StoreIdResolution::verified(store_id, StoreIdSource::GitMeta),

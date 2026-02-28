@@ -7,7 +7,7 @@ use super::reporting::{
 use super::*;
 
 impl Daemon {
-    pub fn admin_status(
+    pub(crate) fn admin_status(
         &mut self,
         repo: &Path,
         read: ReadConsistency,
@@ -62,7 +62,7 @@ impl Daemon {
         Response::ok(ResponsePayload::query(QueryResult::AdminStatus(output)))
     }
 
-    pub fn admin_metrics(
+    pub(crate) fn admin_metrics(
         &mut self,
         repo: &Path,
         read: ReadConsistency,
@@ -95,7 +95,7 @@ impl Daemon {
         Response::ok(ResponsePayload::query(QueryResult::AdminMetrics(output)))
     }
 
-    pub fn admin_doctor(
+    pub(crate) fn admin_doctor(
         &mut self,
         repo: &Path,
         read: ReadConsistency,
@@ -162,7 +162,7 @@ impl Daemon {
         Response::ok(ResponsePayload::query(QueryResult::AdminDoctor(output)))
     }
 
-    pub fn admin_scrub_now(
+    pub(crate) fn admin_scrub_now(
         &mut self,
         repo: &Path,
         read: ReadConsistency,
@@ -229,7 +229,7 @@ impl Daemon {
         Response::ok(ResponsePayload::query(QueryResult::AdminScrub(output)))
     }
 
-    pub fn admin_flush(
+    pub(crate) fn admin_flush(
         &mut self,
         repo: &Path,
         namespace: Option<NamespaceId>,
@@ -278,7 +278,7 @@ impl Daemon {
         Response::ok(ResponsePayload::query(QueryResult::AdminFlush(output)))
     }
 
-    pub fn admin_fingerprint(
+    pub(crate) fn admin_fingerprint(
         &mut self,
         repo: &Path,
         read: ReadConsistency,
@@ -374,7 +374,11 @@ impl Daemon {
         )))
     }
 
-    pub fn admin_reload_policies(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
+    pub(crate) fn admin_reload_policies(
+        &mut self,
+        repo: &Path,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
         let layout = self.layout().clone();
         let mut proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
@@ -415,7 +419,7 @@ impl Daemon {
         )))
     }
 
-    pub fn admin_reload_limits(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
+    pub(crate) fn admin_reload_limits(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
         let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
             Err(err) => return Response::err_from(err),
@@ -458,7 +462,11 @@ impl Daemon {
         )))
     }
 
-    pub fn admin_reload_replication(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
+    pub(crate) fn admin_reload_replication(
+        &mut self,
+        repo: &Path,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
         let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
             Err(err) => return Response::err_from(err),
@@ -488,7 +496,11 @@ impl Daemon {
         )))
     }
 
-    pub fn admin_rotate_replica_id(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
+    pub(crate) fn admin_rotate_replica_id(
+        &mut self,
+        repo: &Path,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
         let mut proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
             Err(err) => return Response::err_from(err),
@@ -516,7 +528,7 @@ impl Daemon {
         )))
     }
 
-    pub fn admin_maintenance_mode(
+    pub(crate) fn admin_maintenance_mode(
         &mut self,
         repo: &Path,
         enabled: bool,
@@ -535,7 +547,7 @@ impl Daemon {
         )))
     }
 
-    pub fn admin_rebuild_index(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
+    pub(crate) fn admin_rebuild_index(&mut self, repo: &Path, git_tx: &Sender<GitOp>) -> Response {
         let limits = self.limits().clone();
         let layout = self.layout().clone();
         let mut proof = match self.ensure_repo_loaded_strict(repo, git_tx) {

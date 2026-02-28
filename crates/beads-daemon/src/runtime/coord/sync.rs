@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::core::StoreSessionToken;
 
 impl Daemon {
     /// Get the next scheduled sync deadline for a remote, if any.
@@ -57,6 +58,7 @@ impl Daemon {
                 let _ = git_tx.send(GitOp::Refresh {
                     repo: refresh_path,
                     remote: loaded.remote().clone(),
+                    session: loaded.session_token(),
                 });
             }
         }
@@ -71,13 +73,14 @@ impl Daemon {
     /// if refresh succeeded, otherwise just clears the in-progress flag.
     pub(in crate::runtime) fn complete_refresh(
         &mut self,
+        session: StoreSessionToken,
         remote: &RemoteUrl,
         result: Result<LoadResult, SyncError>,
     ) {
-        let store_id = match self.store_id_for_remote(remote) {
-            Some(id) => id,
-            None => return,
-        };
+        if !self.session_matches(session) {
+            return;
+        }
+        let store_id = session.store_id();
         let mut schedule_sync = false;
 
         match result {
@@ -87,9 +90,10 @@ impl Daemon {
                     self.clock_mut().receive(max_stamp);
                 }
 
-                let Some((store, repo_state)) = self.store_and_lane_by_id_mut(store_id) else {
+                let Some(session) = self.store_session_by_id_mut(store_id) else {
                     return;
                 };
+                let (store, repo_state) = session.split_mut();
                 repo_state.refresh_in_progress = false;
 
                 // Only apply refresh if repo is still clean (no mutations happened
@@ -143,8 +147,8 @@ impl Daemon {
                 }
             }
             Err(e) => {
-                if let Some((_, repo_state)) = self.store_and_lane_by_id_mut(store_id) {
-                    repo_state.refresh_in_progress = false;
+                if let Some(session) = self.store_session_by_id_mut(store_id) {
+                    session.lane_mut().refresh_in_progress = false;
                 }
                 // Refresh failed - log and continue with cached state.
                 // Next TTL hit will retry.
@@ -218,15 +222,16 @@ impl Daemon {
     /// Called when git thread reports sync result.
     pub(in crate::runtime) fn complete_sync(
         &mut self,
+        session: StoreSessionToken,
         remote: &RemoteUrl,
         result: Result<SyncOutcome, SyncError>,
     ) {
+        if !self.session_matches(session) {
+            return;
+        }
         let mut backoff_ms = None;
         let mut sync_succeeded = false;
-        let store_id = match self.store_id_for_remote(remote) {
-            Some(id) => id,
-            None => return,
-        };
+        let store_id = session.store_id();
         let mut reschedule_sync = false;
 
         match result {
@@ -238,9 +243,10 @@ impl Daemon {
                 }
                 let wall_ms = self.clock().wall_ms();
 
-                let Some((store, repo_state)) = self.store_and_lane_by_id_mut(store_id) else {
+                let Some(session) = self.store_session_by_id_mut(store_id) else {
                     return;
                 };
+                let (store, repo_state) = session.split_mut();
 
                 repo_state.last_seen_stamp =
                     max_write_stamp(repo_state.last_seen_stamp.clone(), outcome.last_seen_stamp);
@@ -291,9 +297,10 @@ impl Daemon {
             }
             Err(e) => {
                 tracing::error!("sync failed for {:?}: {:?}", remote, e);
-                let Some((_, repo_state)) = self.store_and_lane_by_id_mut(store_id) else {
+                let Some(session) = self.store_session_by_id_mut(store_id) else {
                     return;
                 };
+                let repo_state = session.lane_mut();
                 repo_state.fail_sync();
                 backoff_ms = Some(repo_state.backoff_ms());
             }

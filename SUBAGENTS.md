@@ -6,8 +6,8 @@
 - workspace: current_workspace
 - close_scope: p0_children_only
 - clean_every_closed_beads: 4
-- closed_count: 9
-- current_bead: bd-9hym
+- closed_count: 10
+- current_bead: bd-swt5
 
 ## Bead Ledger
 | order | bead | stage | planner_id | sanity_id | implementer_id | reviewer_id | plan_file | jj_change | verify_status | close_status | last_update_utc |
@@ -21,7 +21,7 @@
 | 7 | bd-jzxt | closed | 019ca2ba-6730-7742-b148-8b9c2ce63edc | 019ca2c2-a138-7842-9a42-bcbe81a07aa5 | 019ca2c6-be88-77f3-9a9f-31e4c0d58c00 | 019ca2d0-c37f-7952-8cc0-672ec401ccec | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-jzxt-implementation.md | uzrynnqr | pass | closed | 2026-02-28T06:02:41Z |
 | 8 | bd-642h | closed | 019ca2e5-391d-71b0-9f6b-065c84f18303 | 019ca2e8-daaf-77e1-b9fc-85f51e267c86 | 019ca2ea-599d-7362-be52-0c32494033c8 | 019ca2fc-2cdf-7e01-83ae-5509a51c1e79 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-642h-implementation.md | ykpvymtw | pass | closed | 2026-02-28T06:47:48Z |
 | 9 | bd-azyx | closed | 019ca30e-f35f-7ba1-a137-57f64ab4e14b | 019ca312-7d8e-7781-82d8-bb8ec08bf096 | 019ca313-f49f-7fe0-9248-e08ce8b7ddf0 | 019ca320-707b-70f0-b383-80bbab627304 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-azyx-implementation.md | lrsnwvov | pass | closed | 2026-02-28T07:26:58Z |
-| 10 | bd-9hym | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-9hym-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
+| 10 | bd-9hym | closed | 019ca663-7b64-79d3-a201-9bd05f98c081 | 019ca665-7333-7001-9692-93aa9d094f13 | 019ca667-d5e7-7f23-b3b0-270eaeb9c431 | 019ca683-b592-7cf2-80b8-4b2b64675f31 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-9hym-implementation.md | wqqvwrxz | pass | closed | 2026-02-28T23:12:50Z |
 | 11 | bd-swt5 | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-swt5-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 | 12 | bd-8x41 | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-8x41-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 
@@ -131,3 +131,21 @@ planned | sanity_failed | sanity_passed | implementing | review_failed | review_
 | 2026-02-28T07:26:58Z | bd-azyx | verification_completed | pass | controller reran fmt+dylint+clippy(-D warnings)+test successfully |
 | 2026-02-28T07:26:58Z | bd-azyx | close_confirmed | ok | bd close executed and bd show reports status=closed; closed_count=9 |
 | 2026-02-28T07:26:58Z | bd-azyx | subagents_closed | ok | planner/sanity/implementer/reviewer agents closed after review and verification |
+| 2026-02-28T07:27:21Z | bd-9hym | bead_claimed | ok | bd claim succeeded; jj new created wqqvwrxz (bd-9hym: start) |
+| 2026-02-28T07:36:29Z | bd-9hym | planner_completed | ok | plan written to docs/plans/2026-02-28-bd-9hym-implementation.md |
+| 2026-02-28T22:29:11Z | bd-9hym | sanity_completed | fail | token visibility mismatch (private interfaces) + missing explicit checkpoint token gating + stale checkpoint callback test |
+| 2026-02-28T22:31:37Z | bd-9hym | planner_completed | ok | revised plan written with crate-private token visibility contract + checkpoint token-gating + stale checkpoint regression test |
+| 2026-02-28T22:34:11Z | bd-9hym | sanity_completed | fail | missing explicit testkit visibility cutover for GitOp/GitResult; parent-epic dependency rule must be stated (open-parent-only allowed) |
+| 2026-02-28T22:36:10Z | bd-9hym | planner_completed | ok | revised plan adds explicit testkit/runtime/lib export cutover and open-parent dependency policy note |
+| 2026-02-28T22:38:49Z | bd-9hym | sanity_completed | pass | plan approved for hard-cutover store session migration with visibility-safe exports and checkpoint token gating |
+| 2026-02-28T22:39:12Z | bd-9hym | implementer_started | ok | worker agent spawned with scoped ownership for store-session generation cutover and stale-token guards |
+| 2026-02-28T22:59:23Z | bd-9hym | implementer_completed | ok | code landed on wqqvwrxz@40691580; focused checks + fmt+dylint+clippy(-D warnings)+test all pass |
+| 2026-02-28T22:59:44Z | bd-9hym | reviewer_started | ok | reviewer agent spawned for correctness/spec audit of store-session generation cutover diff |
+| 2026-02-28T23:03:23Z | bd-9hym | reviewer_completed | fail | GitOp/GitResult still publicly reachable via runtime/git_worker/lib re-exports; visibility hard-cutover incomplete |
+| 2026-02-28T23:03:47Z | bd-9hym | implementer_restarted | ok | implementer instructed to hard-cutover GitOp/GitResult visibility and rerun focused+full verification gate |
+| 2026-02-28T23:09:21Z | bd-9hym | implementer_completed | ok | visibility cutover fixed (runtime/lib/testkit export leaks removed) and full focused+full gate rerun passes |
+| 2026-02-28T23:09:39Z | bd-9hym | reviewer_started | ok | reviewer pass #2 spawned to validate visibility/export hard-cutover fixes and regression safety |
+| 2026-02-28T23:12:13Z | bd-9hym | reviewer_completed | pass | reviewer found no blocking correctness issues after visibility/export cutover fixes |
+| 2026-02-28T23:12:50Z | bd-9hym | verification_completed | pass | controller reran fmt+dylint+clippy(-D warnings)+test successfully |
+| 2026-02-28T23:12:50Z | bd-9hym | close_confirmed | ok | bd close executed and bd show reports status=closed; closed_count=10 |
+| 2026-02-28T23:13:20Z | bd-9hym | subagents_closed | ok | planner/sanity/implementer/reviewer agents closed after review and verification |

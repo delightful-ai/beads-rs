@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use super::helpers::{replication_backoff, replication_listen_addr, replication_max_connections};
-use super::{Daemon, ReplicationHandles};
+use super::{Daemon, ReplicationHandles, StoreSession};
 use crate::core::error::details as error_details;
 use crate::core::{ProtocolErrorCode, ReplicateMode, StoreId};
 use crate::runtime::ops::OpError;
@@ -29,7 +29,12 @@ impl Daemon {
     }
 
     pub(super) fn ensure_replication_runtime(&mut self, store_id: StoreId) -> Result<(), OpError> {
-        if self.repl_handles.contains_key(&store_id) {
+        if self
+            .store_sessions
+            .get(&store_id)
+            .and_then(StoreSession::repl_handles)
+            .is_some()
+        {
             return Ok(());
         }
 
@@ -38,10 +43,10 @@ impl Daemon {
             return Ok(());
         };
 
-        let store = self
-            .stores
-            .get(&store_id)
-            .expect("loaded store missing from state");
+        let Some(session) = self.store_sessions.get(&store_id) else {
+            return Ok(());
+        };
+        let store = session.runtime();
 
         let wal_index: Arc<dyn WalIndex> = store.wal_index.clone();
         let wal_reader = Some(WalRangeReader::new(
@@ -50,7 +55,7 @@ impl Daemon {
             self.limits.clone(),
         ));
         let session_store =
-            SharedSessionStore::new(ReplSessionStore::new(store_id, wal_index, ingest_tx));
+            SharedSessionStore::new(ReplSessionStore::new(session.token(), wal_index, ingest_tx));
 
         let roster = load_replica_roster(self.layout(), store_id)
             .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
@@ -98,25 +103,34 @@ impl Daemon {
             }
         };
 
-        self.repl_handles.insert(
-            store_id,
-            ReplicationHandles {
+        if let Some(session) = self.store_sessions.get_mut(&store_id) {
+            session.set_repl_handles(ReplicationHandles {
                 manager: Some(manager_handle),
                 server: server_handle,
-            },
-        );
+            });
+        }
 
         Ok(())
     }
 
     pub(crate) fn handle_repl_ingest(&mut self, request: ReplIngestRequest) {
+        if !self.session_matches(request.session) {
+            let _ = request.respond.send(Err(ReplError::new(
+                ProtocolErrorCode::Overloaded.into(),
+                "stale store session",
+                true,
+            )));
+            return;
+        }
+
+        let store_id = request.session.store_id();
         let (store_epoch, local_replica_id) = self
-            .stores
-            .get(&request.store_id)
-            .map(|store| {
+            .store_sessions
+            .get(&store_id)
+            .map(|session| {
                 (
-                    Some(store.meta.identity.store_epoch),
-                    Some(store.meta.replica_id),
+                    Some(session.runtime().meta.identity.store_epoch),
+                    Some(session.runtime().meta.replica_id),
                 )
             })
             .unwrap_or((None, None));
@@ -129,7 +143,7 @@ impl Daemon {
         let origin = request.batch.origin();
         let span = tracing::info_span!(
             "repl_ingest_request",
-            store_id = %request.store_id,
+            store_id = %store_id,
             store_epoch = ?store_epoch.map(|epoch| epoch.get()),
             replica_id = ?local_replica_id,
             namespace = %namespace,
@@ -151,73 +165,81 @@ impl Daemon {
             let _ = request.respond.send(Err(error));
             return;
         }
-        if let Some(error) = self.stores.get(&request.store_id).and_then(|store| {
-            if store.maintenance_mode {
-                Some(
-                    ReplError::new(
-                        ProtocolErrorCode::MaintenanceMode.into(),
-                        "maintenance mode enabled",
-                        true,
-                    )
-                    .with_details(ReplErrorDetails::MaintenanceMode(
-                        error_details::MaintenanceModeDetails {
-                            reason: Some("maintenance mode enabled".into()),
-                            until_ms: None,
-                        },
-                    )),
-                )
-            } else if let Some(policy) = store.policies.get(namespace) {
-                if policy.replicate_mode == ReplicateMode::None {
+        if let Some(error) = self
+            .store_sessions
+            .get(&store_id)
+            .map(StoreSession::runtime)
+            .and_then(|store| {
+                if store.maintenance_mode {
                     Some(
                         ReplError::new(
-                            ProtocolErrorCode::NamespacePolicyViolation.into(),
-                            "namespace replication disabled by policy",
+                            ProtocolErrorCode::MaintenanceMode.into(),
+                            "maintenance mode enabled",
+                            true,
+                        )
+                        .with_details(ReplErrorDetails::MaintenanceMode(
+                            error_details::MaintenanceModeDetails {
+                                reason: Some("maintenance mode enabled".into()),
+                                until_ms: None,
+                            },
+                        )),
+                    )
+                } else if let Some(policy) = store.policies.get(namespace) {
+                    if policy.replicate_mode == ReplicateMode::None {
+                        Some(
+                            ReplError::new(
+                                ProtocolErrorCode::NamespacePolicyViolation.into(),
+                                "namespace replication disabled by policy",
+                                false,
+                            )
+                            .with_details(
+                                ReplErrorDetails::NamespacePolicyViolation(
+                                    error_details::NamespacePolicyViolationDetails {
+                                        namespace: namespace.clone(),
+                                        rule: "replicate_mode".to_string(),
+                                        reason: Some("replicate_mode=none".to_string()),
+                                    },
+                                ),
+                            ),
+                        )
+                    } else {
+                        None
+                    }
+                } else {
+                    Some(
+                        ReplError::new(
+                            ProtocolErrorCode::NamespaceUnknown.into(),
+                            "namespace not configured",
                             false,
                         )
-                        .with_details(
-                            ReplErrorDetails::NamespacePolicyViolation(
-                                error_details::NamespacePolicyViolationDetails {
-                                    namespace: namespace.clone(),
-                                    rule: "replicate_mode".to_string(),
-                                    reason: Some("replicate_mode=none".to_string()),
-                                },
-                            ),
-                        ),
+                        .with_details(ReplErrorDetails::NamespaceUnknown(
+                            error_details::NamespaceUnknownDetails {
+                                namespace: namespace.clone(),
+                            },
+                        )),
                     )
-                } else {
-                    None
                 }
-            } else {
-                Some(
-                    ReplError::new(
-                        ProtocolErrorCode::NamespaceUnknown.into(),
-                        "namespace not configured",
-                        false,
-                    )
-                    .with_details(ReplErrorDetails::NamespaceUnknown(
-                        error_details::NamespaceUnknownDetails {
-                            namespace: namespace.clone(),
-                        },
-                    )),
-                )
-            }
-        }) {
+            })
+        {
             let _ = request.respond.send(Err(error));
             return;
         }
-        let outcome = self.ingest_remote_batch(request.store_id, request.batch, request.now_ms);
+        let outcome = self.ingest_remote_batch(request.session, request.batch, request.now_ms);
         let _ = request.respond.send(outcome);
     }
 
     pub(crate) fn shutdown_replication(&mut self) {
-        let handles = std::mem::take(&mut self.repl_handles);
-        for (_, handle) in handles {
-            handle.shutdown();
+        for session in self.store_sessions.values_mut() {
+            if let Some(handles) = session.take_repl_handles() {
+                handles.shutdown();
+            }
         }
     }
 
     pub(crate) fn reload_replication_runtime(&mut self, store_id: StoreId) -> Result<(), OpError> {
-        if let Some(handles) = self.repl_handles.remove(&store_id) {
+        if let Some(session) = self.store_sessions.get_mut(&store_id)
+            && let Some(handles) = session.take_repl_handles()
+        {
             handles.shutdown();
         }
         self.ensure_replication_runtime(store_id)

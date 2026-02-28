@@ -8,23 +8,25 @@ use super::*;
 pub struct LoadedStore<'a> {
     store_id: StoreId,
     remote: RemoteUrl,
-    runtime: &'a mut StoreRuntime,
-    lane: &'a mut GitLaneState,
+    session: &'a mut StoreSession,
 }
 
 impl<'a> LoadedStore<'a> {
-    pub(super) fn new(
-        store_id: StoreId,
-        remote: RemoteUrl,
-        runtime: &'a mut StoreRuntime,
-        lane: &'a mut GitLaneState,
-    ) -> Self {
+    pub(super) fn new(store_id: StoreId, remote: RemoteUrl, session: &'a mut StoreSession) -> Self {
         Self {
             store_id,
             remote,
-            runtime,
-            lane,
+            session,
         }
+    }
+
+    pub(crate) fn session_token(&self) -> StoreSessionToken {
+        self.session.token()
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn generation(&self) -> StoreGeneration {
+        self.session.token().generation()
     }
 
     pub fn store_id(&self) -> StoreId {
@@ -36,28 +38,28 @@ impl<'a> LoadedStore<'a> {
     }
 
     pub fn runtime(&self) -> &StoreRuntime {
-        self.runtime
+        self.session.runtime()
     }
 
     pub fn runtime_mut(&mut self) -> &mut StoreRuntime {
-        self.runtime
+        self.session.runtime_mut()
     }
 
     pub fn lane(&self) -> &GitLaneState {
-        self.lane
+        self.session.lane()
     }
 
     pub fn lane_mut(&mut self) -> &mut GitLaneState {
-        self.lane
+        self.session.lane_mut()
     }
 
     pub fn split_mut(&mut self) -> (&mut StoreRuntime, &mut GitLaneState) {
-        (&mut *self.runtime, &mut *self.lane)
+        self.session.split_mut()
     }
 
     /// Get the store identity.
     pub fn store_identity(&self) -> StoreIdentity {
-        self.runtime.meta.identity
+        self.session.runtime().meta.identity
     }
 }
 

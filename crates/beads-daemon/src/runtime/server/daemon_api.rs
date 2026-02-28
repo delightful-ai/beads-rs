@@ -64,14 +64,14 @@ impl StateLoopDaemon for Daemon {
 
     fn apply_git_result(&mut self, result: GitResult) {
         match result {
-            GitResult::Sync(remote, sync_result) => {
-                self.complete_sync(&remote, sync_result);
+            GitResult::Sync(session, remote, sync_result) => {
+                self.complete_sync(session, &remote, sync_result);
             }
-            GitResult::Refresh(remote, refresh_result) => {
-                self.complete_refresh(&remote, refresh_result);
+            GitResult::Refresh(session, remote, refresh_result) => {
+                self.complete_refresh(session, &remote, refresh_result);
             }
-            GitResult::Checkpoint(store_id, group, result) => {
-                self.complete_checkpoint(store_id, &group, result);
+            GitResult::Checkpoint(session, group, result) => {
+                self.complete_checkpoint(session, &group, result);
             }
         }
     }

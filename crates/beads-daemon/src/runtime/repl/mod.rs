@@ -30,7 +30,8 @@ pub use manager::{
     ReplicationManagerHandle,
 };
 pub use peer_acks::{PeerAckError, PeerAckTable, QuorumOutcome};
-pub use runtime::{ReplIngestRequest, ReplSessionStore, WalRangeError, WalRangeReader};
+pub(crate) use runtime::{ReplIngestRequest, ReplSessionStore};
+pub use runtime::{WalRangeError, WalRangeReader};
 pub use server::{
     ReplicationServer, ReplicationServerConfig, ReplicationServerError, ReplicationServerHandle,
 };

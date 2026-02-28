@@ -64,7 +64,7 @@ impl Daemon {
     }
 
     fn local_policy_hash(&self, store_id: StoreId) -> Option<ContentHash> {
-        let store = self.stores.get(&store_id)?;
+        let store = self.store_sessions.get(&store_id)?.runtime();
         match policy_hash(&store.policies) {
             Ok(hash) => Some(hash),
             Err(err) => {

@@ -1,5 +1,5 @@
 use super::*;
-use crate::daemon::wal::WalCursorOffset;
+use crate::runtime::wal::WalCursorOffset;
 use crate::runtime::wal_atomic_commit::{
     AtomicWalCommitPath, AtomicWalDurabilityTxn, tip_watermark_pair,
 };
@@ -7,10 +7,18 @@ use crate::runtime::wal_atomic_commit::{
 impl Daemon {
     pub(super) fn ingest_remote_batch(
         &mut self,
-        store_id: StoreId,
+        session: StoreSessionToken,
         batch: ContiguousBatch,
         now_ms: u64,
     ) -> Result<IngestOutcome, ReplError> {
+        if !self.session_matches(session) {
+            return Err(ReplError::new(
+                CliErrorCode::Internal.into(),
+                "stale store session",
+                true,
+            ));
+        }
+        let store_id = session.store_id();
         let namespace = batch.namespace().clone();
         let origin = batch.origin();
         let actor_stamps: Vec<(ActorId, WriteStamp)> = batch
@@ -24,13 +32,10 @@ impl Daemon {
                 )
             })
             .collect();
-        let (stores, git_lanes) = (&mut self.stores, &mut self.git_lanes);
-        let store = stores.get_mut(&store_id).ok_or_else(|| {
+        let session = self.store_sessions.get_mut(&store_id).ok_or_else(|| {
             ReplError::new(CliErrorCode::Internal.into(), "store not loaded", true)
         })?;
-        let git_lane = git_lanes.get_mut(&store_id).ok_or_else(|| {
-            ReplError::new(CliErrorCode::Internal.into(), "store not loaded", true)
-        })?;
+        let (store, git_lane) = session.split_mut();
 
         let store_identity = store.meta.identity;
         let origin_seq_first = Some(batch.first().get());
@@ -280,6 +285,9 @@ impl Daemon {
         batch: ContiguousBatch,
         now_ms: u64,
     ) -> Result<IngestOutcome, ReplError> {
-        self.ingest_remote_batch(store_id, batch, now_ms)
+        let session = self.session_token_for_store(store_id).ok_or_else(|| {
+            ReplError::new(CliErrorCode::Internal.into(), "store not loaded", true)
+        })?;
+        self.ingest_remote_batch(session, batch, now_ms)
     }
 }

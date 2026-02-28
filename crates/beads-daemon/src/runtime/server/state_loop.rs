@@ -202,16 +202,20 @@ pub(in crate::runtime) fn run_state_loop(
 
                                 match git_result_rx.recv_timeout(shutdown_deadline - now) {
                                     Ok(result) => match result {
-                                        GitResult::Sync(remote, sync_result) => {
-                                            daemon.complete_sync(&remote, sync_result);
+                                        GitResult::Sync(session, remote, sync_result) => {
+                                            daemon.complete_sync(session, &remote, sync_result);
                                             pending -= 1;
                                         }
-                                        GitResult::Refresh(remote, refresh_result) => {
+                                        GitResult::Refresh(session, remote, refresh_result) => {
                                             // Just complete any in-flight refreshes during shutdown
-                                            daemon.complete_refresh(&remote, refresh_result);
+                                            daemon.complete_refresh(
+                                                session,
+                                                &remote,
+                                                refresh_result,
+                                            );
                                         }
-                                        GitResult::Checkpoint(store_id, group, result) => {
-                                            daemon.complete_checkpoint(store_id, &group, result);
+                                        GitResult::Checkpoint(session, group, result) => {
+                                            daemon.complete_checkpoint(session, &group, result);
                                         }
                                     },
                                     Err(crossbeam::channel::RecvTimeoutError::Timeout) => {

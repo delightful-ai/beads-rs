@@ -21,6 +21,7 @@ use crate::git::error::SyncError;
 use crate::git::observe::SyncObserver;
 use crate::git::sync::{DivergenceInfo, SyncOutcome, init_beads_ref};
 use crate::remote::RemoteUrl;
+use crate::runtime::core::StoreSessionToken;
 use crate::runtime::git_backend::{
     DefaultGitBackend, FetchRemote, PublishCheckpointRef, PushRemote, ReadCheckpointRef,
 };
@@ -71,17 +72,17 @@ pub struct LoadResult {
 }
 
 /// Result of a background refresh operation.
-pub enum GitResult {
+pub(crate) enum GitResult {
     /// Sync completed.
-    Sync(RemoteUrl, SyncResult),
+    Sync(StoreSessionToken, RemoteUrl, SyncResult),
     /// Background refresh completed.
-    Refresh(RemoteUrl, Result<LoadResult, SyncError>),
+    Refresh(StoreSessionToken, RemoteUrl, Result<LoadResult, SyncError>),
     /// Checkpoint publish completed.
-    Checkpoint(StoreId, String, CheckpointResult),
+    Checkpoint(StoreSessionToken, String, CheckpointResult),
 }
 
 /// Operations sent from state thread to git thread.
-pub enum GitOp {
+pub(crate) enum GitOp {
     /// Load state from local refs only (no network).
     LoadLocal {
         repo: PathBuf,
@@ -96,12 +97,17 @@ pub enum GitOp {
 
     /// Background refresh (non-blocking - result sent via result channel).
     /// Used for periodic freshness checks without blocking client requests.
-    Refresh { repo: PathBuf, remote: RemoteUrl },
+    Refresh {
+        repo: PathBuf,
+        remote: RemoteUrl,
+        session: StoreSessionToken,
+    },
 
     /// Background sync (non-blocking - result sent via result channel).
     Sync {
         repo: PathBuf,
         remote: RemoteUrl,
+        session: StoreSessionToken,
         store_id: StoreId,
         state: CanonicalState,
         actor: ActorId,
@@ -110,6 +116,7 @@ pub enum GitOp {
     /// Background checkpoint export + push (non-blocking).
     Checkpoint {
         repo: PathBuf,
+        session: StoreSessionToken,
         store_id: StoreId,
         checkpoint_group: String,
         git_ref: String,
@@ -128,7 +135,7 @@ pub enum GitOp {
 }
 
 /// Git worker that owns Repository handles.
-pub struct GitWorker {
+pub(crate) struct GitWorker {
     /// Cached repository handles.
     repos: HashMap<PathBuf, Repository>,
 
@@ -143,7 +150,7 @@ pub struct GitWorker {
 
 impl GitWorker {
     /// Create a new GitWorker.
-    pub fn new(result_tx: Sender<GitResult>, limits: crate::core::Limits) -> Self {
+    pub(crate) fn new(result_tx: Sender<GitResult>, limits: crate::core::Limits) -> Self {
         let observer: Arc<dyn SyncObserver> = Arc::new(GitSyncMetricsObserver);
         GitWorker {
             repos: HashMap::new(),
@@ -401,14 +408,21 @@ impl GitWorker {
                 let _ = respond.send(result);
             }
 
-            GitOp::Refresh { repo, remote } => {
+            GitOp::Refresh {
+                repo,
+                remote,
+                session,
+            } => {
                 let result = self.load(&repo);
-                let _ = self.result_tx.send(GitResult::Refresh(remote, result));
+                let _ = self
+                    .result_tx
+                    .send(GitResult::Refresh(session, remote, result));
             }
 
             GitOp::Sync {
                 repo,
                 remote,
+                session,
                 store_id,
                 state,
                 actor,
@@ -428,11 +442,14 @@ impl GitWorker {
                     Ok(_) => tracing::info!(elapsed_ms, "sync completed"),
                     Err(err) => tracing::warn!(elapsed_ms, error = ?err, "sync failed"),
                 }
-                let _ = self.result_tx.send(GitResult::Sync(remote, result));
+                let _ = self
+                    .result_tx
+                    .send(GitResult::Sync(session, remote, result));
             }
 
             GitOp::Checkpoint {
                 repo,
+                session,
                 store_id,
                 checkpoint_group,
                 git_ref,
@@ -466,7 +483,7 @@ impl GitWorker {
                 }
                 let _ =
                     self.result_tx
-                        .send(GitResult::Checkpoint(store_id, checkpoint_group, result));
+                        .send(GitResult::Checkpoint(session, checkpoint_group, result));
             }
 
             GitOp::Init { repo, respond } => {
@@ -564,7 +581,7 @@ fn max_write_stamp(a: Option<WriteStamp>, b: Option<WriteStamp>) -> Option<Write
 /// Run the git thread loop.
 ///
 /// Processes GitOp messages until Shutdown is received.
-pub fn run_git_loop(mut worker: GitWorker, git_rx: Receiver<GitOp>) {
+pub(crate) fn run_git_loop(mut worker: GitWorker, git_rx: Receiver<GitOp>) {
     for op in git_rx {
         if !worker.handle_op(op) {
             break;

@@ -27,7 +27,7 @@ pub struct SubscribeReply {
     pub backfill_end: HashMap<ReplicaId, u64>,
 }
 
-pub fn prepare_subscription(
+pub(crate) fn prepare_subscription(
     daemon: &mut Daemon,
     repo: &Path,
     read: ReadConsistency,

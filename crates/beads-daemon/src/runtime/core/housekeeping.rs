@@ -61,12 +61,11 @@ impl Daemon {
             let Some(pending) = self.export_pending.remove(&store_id) else {
                 continue;
             };
-            let Some(store) = self.stores.get(&store_id) else {
+            let Some(session) = self.store_sessions.get(&store_id) else {
                 continue;
             };
-            let Some(lane) = self.git_lanes.get(&store_id) else {
-                continue;
-            };
+            let store = session.runtime();
+            let lane = session.lane();
             if !lane.is_loaded_from_git() {
                 continue;
             }
@@ -97,11 +96,9 @@ impl Daemon {
     }
 
     fn store_ready_for_export(&self, store_id: StoreId) -> bool {
-        self.stores.contains_key(&store_id)
-            && self
-                .git_lanes
-                .get(&store_id)
-                .is_some_and(|lane| lane.is_loaded_from_git())
+        self.store_sessions
+            .get(&store_id)
+            .is_some_and(|session| session.lane().is_loaded_from_git())
     }
 
     pub(in crate::runtime) fn next_wal_checkpoint_deadline(&mut self) -> Option<Instant> {
@@ -113,9 +110,9 @@ impl Daemon {
         now: Instant,
     ) -> Option<Instant> {
         let interval = self.wal_checkpoint_interval()?;
-        self.stores
+        self.store_sessions
             .values()
-            .filter_map(|store| store.wal_checkpoint_deadline(now, interval))
+            .filter_map(|session| session.runtime().wal_checkpoint_deadline(now, interval))
             .min()
     }
 
@@ -127,9 +124,13 @@ impl Daemon {
         &self,
         now: Instant,
     ) -> Option<Instant> {
-        self.stores
+        self.store_sessions
             .values()
-            .filter_map(|store| store.lock_heartbeat_deadline(now, STORE_LOCK_HEARTBEAT_INTERVAL))
+            .filter_map(|session| {
+                session
+                    .runtime()
+                    .lock_heartbeat_deadline(now, STORE_LOCK_HEARTBEAT_INTERVAL)
+            })
             .min()
     }
 
@@ -141,7 +142,8 @@ impl Daemon {
         let Some(interval) = self.wal_checkpoint_interval() else {
             return;
         };
-        for (store_id, store) in self.stores.iter_mut() {
+        for (store_id, session) in self.store_sessions.iter_mut() {
+            let store = session.runtime_mut();
             if !store.wal_checkpoint_due(now, interval) {
                 continue;
             }
@@ -181,7 +183,8 @@ impl Daemon {
         if interval == Duration::ZERO {
             return;
         }
-        for (store_id, store) in self.stores.iter_mut() {
+        for (store_id, session) in self.store_sessions.iter_mut() {
+            let store = session.runtime_mut();
             if !store.lock_heartbeat_due(now, interval) {
                 continue;
             }
