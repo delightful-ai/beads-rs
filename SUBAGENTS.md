@@ -19,7 +19,7 @@
 | 5 | bd-q6o7 | closed | 019ca28c-e0bc-7173-93cf-9e9a5d69907d | 019ca290-f64e-7ec3-af8b-e40b506a35ab | 019ca293-884f-7f60-a890-28b762a5e691 | 019ca29d-b3e6-77a0-8c04-b8156f49dc79 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-q6o7-implementation.md | rnoyzppv | pass | closed | 2026-02-28T05:06:11Z |
 | 6 | bd-r39f | closed | 019ca2a4-6825-7051-a153-3c1d4811b34c | 019ca2ab-6f48-74d3-9b75-97090d82e5cd | 019ca2ae-7bff-7200-8051-fc693ba36bb4 | 019ca2b6-3f92-7b92-bc23-2c9d89d24774 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-r39f-implementation.md | vzksmmsu | pass | closed | 2026-02-28T05:30:17Z |
 | 7 | bd-jzxt | closed | 019ca2ba-6730-7742-b148-8b9c2ce63edc | 019ca2c2-a138-7842-9a42-bcbe81a07aa5 | 019ca2c6-be88-77f3-9a9f-31e4c0d58c00 | 019ca2d0-c37f-7952-8cc0-672ec401ccec | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-jzxt-implementation.md | uzrynnqr | pass | closed | 2026-02-28T06:02:41Z |
-| 8 | bd-642h | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-642h-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
+| 8 | bd-642h | implementing | 019ca2e5-391d-71b0-9f6b-065c84f18303 | 019ca2e8-daaf-77e1-b9fc-85f51e267c86 | 019ca2ea-599d-7362-be52-0c32494033c8 |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-642h-implementation.md | toyktwxn | pending | open | 2026-02-28T06:23:17Z |
 | 9 | bd-azyx | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-azyx-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 | 10 | bd-9hym | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-9hym-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 | 11 | bd-swt5 | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-swt5-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
@@ -105,3 +105,9 @@ planned | sanity_failed | sanity_passed | implementing | review_failed | review_
 | 2026-02-28T06:02:41Z | bd-jzxt | verification_completed | pass | controller reran fmt+dylint+clippy(-D warnings)+test successfully |
 | 2026-02-28T06:02:41Z | bd-jzxt | close_confirmed | ok | bd close executed and bd show reports status=closed; closed_count=7 |
 | 2026-02-28T06:02:41Z | bd-jzxt | subagents_closed | ok | planner/sanity/implementer/reviewer agents closed after review and verification |
+| 2026-02-28T06:03:01Z | bd-642h | bead_claimed | ok | bd claim succeeded; jj new created toyktwxn (bd-642h: start) |
+| 2026-02-28T06:13:16Z | bd-642h | planner_completed | ok | plan written to docs/plans/2026-02-28-bd-642h-implementation.md |
+| 2026-02-28T06:17:23Z | bd-642h | sanity_completed | fail | missing test-harness replay callsite migration + all-features verification coverage in plan |
+| 2026-02-28T06:21:18Z | bd-642h | planner_completed | ok | revised plan written with test-harness callsite migration and all-features verification scope |
+| 2026-02-28T06:22:57Z | bd-642h | sanity_completed | pass | revised plan accepted with complete callsite migration and all-features verification coverage |
+| 2026-02-28T06:23:17Z | bd-642h | implementer_started | ok | worker agent spawned for replay checkpoint-dirty unskippable cutover |

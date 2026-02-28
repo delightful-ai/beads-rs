@@ -409,13 +409,15 @@ mod tests {
         NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority,
         ReplicaDurabilityRole, ReplicaEntry, ReplicaId, ReplicaRoster, SegmentId, Seq0, Seq1,
         Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions,
-        TxnDeltaV1, TxnId, TxnOpV1, TxnV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch,
-        WireNoteV1, WireStamp, Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
+        StoreState, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, VerifiedEvent, WallClock, Watermarks,
+        WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp, encode_event_body_canonical,
+        hash_event_body,
     };
     use crate::git::checkpoint::{
-        CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointImport,
+        CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointFileKind, CheckpointImport,
+        CheckpointShardPath,
         CheckpointSnapshotInput, CheckpointStoreMeta, IncludedWatermarks, build_snapshot,
-        export_checkpoint, policy_hash, publish_checkpoint, store_state_from_legacy,
+        export_checkpoint, policy_hash, publish_checkpoint, shard_for_bead, store_state_from_legacy,
     };
     use crate::runtime::OpResult;
     use crate::runtime::git_worker::LoadResult;
@@ -1308,6 +1310,88 @@ mod tests {
             .expect("next seq");
         txn.rollback().expect("rollback");
         assert_eq!(next_seq.get(), 4);
+    }
+
+    #[test]
+    fn apply_loaded_repo_state_replay_marks_checkpoint_dirty_shards() {
+        let tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+
+        let store_id = store_id_from_remote(&remote);
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("insert store");
+        let (git_tx, _git_rx) = crossbeam::channel::unbounded();
+        let create = daemon.handle_request(
+            Request::Create {
+                ctx: MutationCtx::new(repo_path.clone(), MutationMeta::default()),
+                payload: CreatePayload {
+                    id: None,
+                    parent: None,
+                    title: "replay dirty shard".to_string(),
+                    bead_type: BeadType::Task,
+                    priority: Priority::MEDIUM,
+                    description: None,
+                    design: None,
+                    acceptance_criteria: None,
+                    assignee: None,
+                    external_ref: None,
+                    estimated_minutes: None,
+                    labels: Vec::new(),
+                    dependencies: Vec::new(),
+                },
+            },
+            &git_tx,
+        );
+        let bead_id = match create {
+            HandleOutcome::Response(Response::Ok {
+                ok: ResponsePayload::Op(op),
+            }) => match op.result {
+                OpResult::Created { id } => id,
+                other => panic!("unexpected op result: {other:?}"),
+            },
+            other => panic!("unexpected create outcome: {other:?}"),
+        };
+
+        let namespace = NamespaceId::core();
+        {
+            let store = daemon.stores.get_mut(&store_id).expect("store runtime");
+            let _ = store
+                .checkpoint_snapshot("core", std::slice::from_ref(&namespace), 1_700_000_000_000)
+                .expect("initial snapshot");
+            store.commit_checkpoint_dirty_shards("core");
+            store.state = StoreState::new();
+        }
+
+        let loaded = LoadResult {
+            state: CanonicalState::new(),
+            root_slug: None,
+            needs_sync: false,
+            last_seen_stamp: None,
+            fetch_error: None,
+            divergence: None,
+            force_push: None,
+        };
+        daemon
+            .apply_loaded_repo_state(store_id, &remote, &repo_path, loaded)
+            .expect("apply loaded state");
+
+        let lane = daemon.git_lanes.get(&store_id).expect("git lane");
+        assert!(lane.dirty);
+
+        let store = daemon.stores.get_mut(&store_id).expect("store runtime");
+        assert!(store.state.core().get_live(&bead_id).is_some());
+        let snapshot = store
+            .checkpoint_snapshot("core", std::slice::from_ref(&namespace), 1_700_000_000_001)
+            .expect("checkpoint snapshot");
+        let expected_state_path = CheckpointShardPath::new(
+            namespace,
+            CheckpointFileKind::State,
+            shard_for_bead(&bead_id),
+        );
+        assert!(snapshot.dirty_shards.contains(&expected_state_path));
     }
 
     #[test]
