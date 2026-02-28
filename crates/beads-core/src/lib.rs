@@ -108,7 +108,8 @@ pub use time::{Stamp, WallClock, WriteStamp};
 pub use tombstone::{Tombstone, TombstoneKey};
 pub use validated::{ValidatedActorId, ValidatedBeadId, ValidatedDepKind, ValidatedNamespaceId};
 pub use watermark::{
-    Applied, Durable, HeadStatus, Seq0, Seq1, Watermark, WatermarkError, Watermarks,
+    Applied, Durable, HeadStatus, Seq0, Seq1, Watermark, WatermarkError, WatermarkPair,
+    WatermarkPairError, Watermarks,
 };
 pub use wire_bead::{
     BeadPatchWireV1, BeadSnapshotWireV1, NoteAppendV1, SnapshotCodec, SnapshotCodecError,
