@@ -12,10 +12,10 @@ use thiserror::Error;
 
 use crate::core::error::details as error_details;
 use crate::core::{
-    Applied, CliErrorCode, DecodeError, Durable, EncodeError, ErrorCode, ErrorPayload, EventId,
-    HeadStatus, IntoErrorPayload, Limits, NamespaceId, ProtocolErrorCode, ReplicaId, SegmentId,
-    Seq0, Seq1, StoreMeta, Transience, Watermark, WatermarkError, WatermarkPair, decode_event_body,
-    decode_event_hlc_max,
+    Applied, CliErrorCode, ClientRequestId, DecodeError, Durable, EncodeError, ErrorCode,
+    ErrorPayload, EventId, HeadStatus, IntoErrorPayload, Limits, NamespaceId, ProtocolErrorCode,
+    ReplicaId, SegmentId, Seq0, Seq1, StoreMeta, Transience, TxnId, Watermark, WatermarkError,
+    WatermarkPair, decode_event_body, decode_event_hlc_max,
 };
 
 use super::EventWalError;
@@ -54,7 +54,7 @@ pub enum ReplayMode {
 
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ReplayAtomicCommitStage {
+pub enum ReplayAtomicCommitStage {
     AfterRowsBeforeFrontier,
     AfterFrontierBeforeCommit,
 }
@@ -400,6 +400,10 @@ fn replay_index(
         let rows = index.reader().load_watermarks()?;
         tracker.seed_from_watermarks(rows)?;
     }
+    let mut catch_up_commit = match mode {
+        ReplayMode::CatchUp => Some(ReplayAtomicCatchUpCommit::new(index.writer().begin_txn()?)),
+        ReplayMode::Rebuild => None,
+    };
 
     let namespaces = list_namespaces(&wal_dir)?;
     for namespace in namespaces {
@@ -460,26 +464,73 @@ fn replay_index(
                 }
             }
 
-            let mut txn = index.writer().begin_txn()?;
-            let scan = scan_segment(
-                &segment,
-                start_offset,
-                max_record_bytes,
-                limits,
-                true,
-                |offset, record, frame_len| {
-                    index_record(
-                        &mut *txn,
-                        &mut tracker,
+            let scan = match mode {
+                ReplayMode::Rebuild => {
+                    let mut txn = index.writer().begin_txn()?;
+                    let scan = scan_segment(
+                        &segment,
+                        start_offset,
+                        max_record_bytes,
+                        limits,
+                        true,
+                        |offset, record, frame_len| {
+                            index_record_with_txn(
+                                &mut *txn,
+                                &mut tracker,
+                                &namespace,
+                                &segment,
+                                offset,
+                                record,
+                                frame_len,
+                                limits,
+                            )
+                        },
+                    )?;
+                    let segment_row = build_segment_row(
+                        store_dir,
                         &namespace,
                         &segment,
-                        offset,
-                        record,
-                        frame_len,
+                        is_last,
+                        scan.last_indexed_offset,
+                    );
+                    txn.upsert_segment(&segment_row)?;
+                    txn.commit()?;
+                    scan
+                }
+                ReplayMode::CatchUp => {
+                    let commit = catch_up_commit
+                        .as_mut()
+                        .expect("catch-up commit initialized");
+                    let scan = scan_segment(
+                        &segment,
+                        start_offset,
+                        max_record_bytes,
                         limits,
-                    )
-                },
-            )?;
+                        true,
+                        |offset, record, frame_len| {
+                            index_record(
+                                commit,
+                                &mut tracker,
+                                &namespace,
+                                &segment,
+                                offset,
+                                record,
+                                frame_len,
+                                limits,
+                            )
+                        },
+                    )?;
+                    let segment_row = build_segment_row(
+                        store_dir,
+                        &namespace,
+                        &segment,
+                        is_last,
+                        scan.last_indexed_offset,
+                    );
+                    commit.upsert_segment(&segment_row)?;
+                    scan
+                }
+            };
             stats.records_indexed += scan.records;
             if scan.truncated {
                 stats.segments_truncated += 1;
@@ -491,36 +542,70 @@ fn replay_index(
                     });
                 }
             }
-
-            let segment_row = if is_last {
-                SegmentRow::open(
-                    namespace.clone(),
-                    segment.header.segment_id,
-                    segment_rel_path(store_dir, &segment.path),
-                    segment.header.created_at_ms,
-                    scan.last_indexed_offset,
-                )
-            } else {
-                SegmentRow::sealed(
-                    namespace.clone(),
-                    segment.header.segment_id,
-                    segment_rel_path(store_dir, &segment.path),
-                    segment.header.created_at_ms,
-                    scan.last_indexed_offset,
-                    scan.last_indexed_offset,
-                )
-            };
-            txn.upsert_segment(&segment_row)?;
-            txn.commit()?;
         }
     }
 
-    #[cfg(test)]
-    if mode == ReplayMode::CatchUp {
-        maybe_inject_test_crash(ReplayAtomicCommitStage::AfterRowsBeforeFrontier)?;
+    let frontier_updates = collect_frontier_updates(tracker, mode)?;
+    match mode {
+        ReplayMode::Rebuild => {
+            let mut txn = index.writer().begin_txn()?;
+            apply_frontier_updates(&mut *txn, &frontier_updates)?;
+            txn.commit()?;
+        }
+        ReplayMode::CatchUp => {
+            let mut commit = catch_up_commit.expect("catch-up commit initialized");
+            #[cfg(test)]
+            maybe_inject_test_crash(ReplayAtomicCommitStage::AfterRowsBeforeFrontier)?;
+            commit.apply_frontier_updates(&frontier_updates)?;
+            #[cfg(test)]
+            maybe_inject_test_crash(ReplayAtomicCommitStage::AfterFrontierBeforeCommit)?;
+            commit.commit()?;
+        }
     }
 
-    let mut txn = index.writer().begin_txn()?;
+    Ok(stats)
+}
+
+#[derive(Clone, Debug)]
+struct ReplayFrontierUpdate {
+    namespace: NamespaceId,
+    origin: ReplicaId,
+    watermarks: WatermarkPair,
+    next_seq: Seq1,
+}
+
+fn build_segment_row(
+    store_dir: &Path,
+    namespace: &NamespaceId,
+    segment: &SegmentDescriptor<Verified>,
+    is_last: bool,
+    last_indexed_offset: u64,
+) -> SegmentRow {
+    if is_last {
+        SegmentRow::open(
+            namespace.clone(),
+            segment.header.segment_id,
+            segment_rel_path(store_dir, &segment.path),
+            segment.header.created_at_ms,
+            last_indexed_offset,
+        )
+    } else {
+        SegmentRow::sealed(
+            namespace.clone(),
+            segment.header.segment_id,
+            segment_rel_path(store_dir, &segment.path),
+            segment.header.created_at_ms,
+            last_indexed_offset,
+            last_indexed_offset,
+        )
+    }
+}
+
+fn collect_frontier_updates(
+    tracker: ReplayTracker,
+    mode: ReplayMode,
+) -> Result<Vec<ReplayFrontierUpdate>, WalReplayError> {
+    let mut updates = Vec::new();
     let update_all = mode == ReplayMode::Rebuild;
     for (namespace, origins) in tracker.origins {
         for (origin, state) in origins {
@@ -603,22 +688,184 @@ fn replay_index(
             let watermarks = WatermarkPair::new(applied, durable).map_err(|err| {
                 WalReplayError::Index(WalIndexError::WatermarkRowDecode(err.to_string()))
             })?;
-            txn.update_watermark(&namespace, &origin, watermarks)?;
-            txn.set_next_origin_seq(&namespace, &origin, next_seq)?;
+            updates.push(ReplayFrontierUpdate {
+                namespace: namespace.clone(),
+                origin,
+                watermarks,
+                next_seq,
+            });
         }
     }
+    Ok(updates)
+}
 
-    #[cfg(test)]
-    if mode == ReplayMode::CatchUp {
-        maybe_inject_test_crash(ReplayAtomicCommitStage::AfterFrontierBeforeCommit)?;
+fn apply_frontier_updates(
+    txn: &mut dyn super::WalIndexTxn,
+    updates: &[ReplayFrontierUpdate],
+) -> Result<(), WalReplayError> {
+    for update in updates {
+        txn.update_watermark(&update.namespace, &update.origin, update.watermarks)?;
+        txn.set_next_origin_seq(&update.namespace, &update.origin, update.next_seq)?;
     }
-    txn.commit()?;
+    Ok(())
+}
 
-    Ok(stats)
+struct ReplayAtomicCatchUpCommit {
+    txn: Box<dyn super::WalIndexTxn>,
+}
+
+impl ReplayAtomicCatchUpCommit {
+    fn new(txn: Box<dyn super::WalIndexTxn>) -> Self {
+        Self { txn }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_event(
+        &mut self,
+        ns: &NamespaceId,
+        eid: &EventId,
+        sha: [u8; 32],
+        prev_sha: Option<[u8; 32]>,
+        segment_id: SegmentId,
+        offset: u64,
+        len: u32,
+        event_time_ms: u64,
+        txn_id: TxnId,
+        client_request_id: Option<ClientRequestId>,
+    ) -> Result<(), WalReplayError> {
+        self.txn.record_event(
+            ns,
+            eid,
+            sha,
+            prev_sha,
+            segment_id,
+            offset,
+            len,
+            event_time_ms,
+            txn_id,
+            client_request_id,
+        )?;
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn upsert_client_request(
+        &mut self,
+        ns: &NamespaceId,
+        origin: &ReplicaId,
+        client_request_id: ClientRequestId,
+        request_sha256: [u8; 32],
+        txn_id: TxnId,
+        event_ids: &ClientRequestEventIds,
+        created_at_ms: u64,
+    ) -> Result<(), WalReplayError> {
+        self.txn.upsert_client_request(
+            ns,
+            origin,
+            client_request_id,
+            request_sha256,
+            txn_id,
+            event_ids,
+            created_at_ms,
+        )?;
+        Ok(())
+    }
+
+    fn update_hlc(&mut self, hlc: &HlcRow) -> Result<(), WalReplayError> {
+        self.txn.update_hlc(hlc)?;
+        Ok(())
+    }
+
+    fn upsert_segment(&mut self, segment: &SegmentRow) -> Result<(), WalReplayError> {
+        self.txn.upsert_segment(segment)?;
+        Ok(())
+    }
+
+    fn apply_frontier_updates(
+        &mut self,
+        updates: &[ReplayFrontierUpdate],
+    ) -> Result<(), WalReplayError> {
+        apply_frontier_updates(&mut *self.txn, updates)
+    }
+
+    fn commit(self) -> Result<(), WalReplayError> {
+        self.txn.commit()?;
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn index_record(
+    commit: &mut ReplayAtomicCatchUpCommit,
+    tracker: &mut ReplayTracker,
+    namespace: &NamespaceId,
+    segment: &SegmentDescriptor<Verified>,
+    offset: u64,
+    record: &VerifiedRecord,
+    frame_len: u32,
+    limits: &Limits,
+) -> Result<(), WalReplayError> {
+    let header = record.header();
+    let origin_seq = header.origin_seq;
+    let event_id = EventId::new(header.origin_replica_id, namespace.clone(), origin_seq);
+
+    tracker.observe_record(
+        namespace,
+        header.origin_replica_id,
+        header.origin_seq,
+        header.sha256,
+        header.prev_sha256,
+    )?;
+
+    commit.record_event(
+        namespace,
+        &event_id,
+        header.sha256,
+        header.prev_sha256,
+        segment.header.segment_id,
+        offset,
+        frame_len,
+        header.event_time_ms,
+        header.txn_id,
+        header.client_request_id(),
+    )?;
+
+    if let (Some(client_request_id), Some(request_sha256)) =
+        (header.client_request_id(), header.request_sha256())
+    {
+        let event_ids = ClientRequestEventIds::single(event_id.clone());
+        commit.upsert_client_request(
+            namespace,
+            &header.origin_replica_id,
+            client_request_id,
+            request_sha256,
+            header.txn_id,
+            &event_ids,
+            header.event_time_ms,
+        )?;
+    }
+
+    if let Some(hlc_max) =
+        decode_event_hlc_max(record.payload_bytes(), limits).map_err(|source| {
+            WalReplayError::EventBodyDecode {
+                path: segment.path.clone(),
+                offset,
+                source,
+            }
+        })?
+    {
+        commit.update_hlc(&HlcRow {
+            actor_id: hlc_max.actor_id,
+            last_physical_ms: hlc_max.physical_ms,
+            last_logical: hlc_max.logical,
+        })?;
+    }
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn index_record_with_txn(
     txn: &mut dyn super::WalIndexTxn,
     tracker: &mut ReplayTracker,
     namespace: &NamespaceId,
@@ -1644,8 +1891,13 @@ mod tests {
 
         {
             let _guard = CrashStageGuard::install(ReplayAtomicCommitStage::AfterRowsBeforeFrontier);
-            let err = catch_up_index(fixture.temp.path(), &fixture.meta, &fixture.index, &fixture.limits)
-                .expect_err("injected crash should fail catch-up");
+            let err = catch_up_index(
+                fixture.temp.path(),
+                &fixture.meta,
+                &fixture.index,
+                &fixture.limits,
+            )
+            .expect_err("injected crash should fail catch-up");
             assert!(matches!(
                 err,
                 WalReplayError::InjectedAtomicCatchUpCrash {
@@ -1657,8 +1909,13 @@ mod tests {
             assert_eq!(post_crash, pre);
         }
 
-        catch_up_index(fixture.temp.path(), &fixture.meta, &fixture.index, &fixture.limits)
-            .expect("retry catch-up should succeed");
+        catch_up_index(
+            fixture.temp.path(),
+            &fixture.meta,
+            &fixture.index,
+            &fixture.limits,
+        )
+        .expect("retry catch-up should succeed");
         assert_recovered_after_retry(&fixture, &pre);
     }
 
@@ -1670,9 +1927,15 @@ mod tests {
         assert_eq!(pre.next_origin_seq.get(), 3);
 
         {
-            let _guard = CrashStageGuard::install(ReplayAtomicCommitStage::AfterFrontierBeforeCommit);
-            let err = catch_up_index(fixture.temp.path(), &fixture.meta, &fixture.index, &fixture.limits)
-                .expect_err("injected crash should fail catch-up");
+            let _guard =
+                CrashStageGuard::install(ReplayAtomicCommitStage::AfterFrontierBeforeCommit);
+            let err = catch_up_index(
+                fixture.temp.path(),
+                &fixture.meta,
+                &fixture.index,
+                &fixture.limits,
+            )
+            .expect_err("injected crash should fail catch-up");
             assert!(matches!(
                 err,
                 WalReplayError::InjectedAtomicCatchUpCrash {
@@ -1684,8 +1947,13 @@ mod tests {
             assert_eq!(post_crash, pre);
         }
 
-        catch_up_index(fixture.temp.path(), &fixture.meta, &fixture.index, &fixture.limits)
-            .expect("retry catch-up should succeed");
+        catch_up_index(
+            fixture.temp.path(),
+            &fixture.meta,
+            &fixture.index,
+            &fixture.limits,
+        )
+        .expect("retry catch-up should succeed");
         assert_recovered_after_retry(&fixture, &pre);
     }
 
@@ -1696,8 +1964,13 @@ mod tests {
         assert_eq!(pre.rows.len(), 2);
         assert_eq!(pre.next_origin_seq.get(), 3);
 
-        catch_up_index(fixture.temp.path(), &fixture.meta, &fixture.index, &fixture.limits)
-            .expect("catch-up should succeed");
+        catch_up_index(
+            fixture.temp.path(),
+            &fixture.meta,
+            &fixture.index,
+            &fixture.limits,
+        )
+        .expect("catch-up should succeed");
         assert_recovered_after_retry(&fixture, &pre);
     }
 

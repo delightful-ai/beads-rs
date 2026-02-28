@@ -6,14 +6,14 @@
 - workspace: current_workspace
 - close_scope: p0_children_only
 - clean_every_closed_beads: 4
-- closed_count: 1
-- current_bead: bd-ooe2
+- closed_count: 2
+- current_bead: bd-a3hl
 
 ## Bead Ledger
 | order | bead | stage | planner_id | sanity_id | implementer_id | reviewer_id | plan_file | jj_change | verify_status | close_status | last_update_utc |
 |------:|------|-------|------------|-----------|----------------|-------------|-----------|-----------|---------------|--------------|-----------------|
 | 1 | bd-2g9q | closed | 019ca229-9ab1-7ed0-aa18-802e825a77f2 | 019ca22e-7b3e-7792-9504-409e00b8f951 | 019ca234-6785-7bf3-8acf-c015fac3624e | 019ca243-520c-7c40-bb59-2e1fd20e1417 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-2g9q-implementation.md | ysnrnrwz | pass | closed | 2026-02-28T03:27:04Z |
-| 2 | bd-ooe2 | implementing | 019ca253-b508-78c0-acdb-c64083ec32b4 | 019ca256-2f48-7ae1-a236-8b800b0ca482 | 019ca257-2780-7462-8099-4804f625aad0 |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-ooe2-implementation.md | lksynrwv | pending | open | 2026-02-28T03:42:28Z |
+| 2 | bd-ooe2 | closed | 019ca253-b508-78c0-acdb-c64083ec32b4 | 019ca256-2f48-7ae1-a236-8b800b0ca482 | 019ca257-2780-7462-8099-4804f625aad0 | 019ca25f-d3b7-7f41-8165-1fa74b679a5a | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-ooe2-implementation.md | ozmlwmyn | pass | closed | 2026-02-28T03:56:17Z |
 | 3 | bd-a3hl | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-a3hl-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 | 4 | bd-ub8m | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-ub8m-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 | 5 | bd-q6o7 | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-q6o7-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
@@ -49,3 +49,8 @@ planned | sanity_failed | sanity_passed | implementing | review_failed | review_
 | 2026-02-28T03:41:10Z | bd-ooe2 | planner_completed | ok | revised plan adds segment-offset rollback + post-crash retry assertions |
 | 2026-02-28T03:42:09Z | bd-ooe2 | sanity_completed | pass | revised plan accepted with rollback+retry atomicity proof requirements |
 | 2026-02-28T03:42:28Z | bd-ooe2 | implementer_started | ok | worker agent spawned for replay atomic catch-up refactor |
+| 2026-02-28T03:51:43Z | bd-ooe2 | implementer_completed | ok | code landed on ozmlwmyn with replay atomic catch-up tests and refactor |
+| 2026-02-28T03:51:57Z | bd-ooe2 | reviewer_started | ok | reviewer agent spawned for bd-ooe2 correctness audit |
+| 2026-02-28T03:55:46Z | bd-ooe2 | reviewer_completed | pass | reviewer found no blocking correctness issues; targeted atomic tests pass |
+| 2026-02-28T03:56:17Z | bd-ooe2 | verification_completed | pass | controller ran fmt+dylint+clippy(-D warnings)+test successfully |
+| 2026-02-28T03:56:17Z | bd-ooe2 | close_confirmed | ok | bd close executed and bd show reports status=closed; closed_count=2 |
