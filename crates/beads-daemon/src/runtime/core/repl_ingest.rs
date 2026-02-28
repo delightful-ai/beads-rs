@@ -244,8 +244,9 @@ impl Daemon {
         let mut watermark_txn = wal_index
             .begin_wal_txn()
             .map_err(|err| wal_index_error_payload(&err))?;
-        let watermarks = crate::core::WatermarkPair::new(applied, durable)
-            .map_err(|err| wal_index_error_payload(&WalIndexError::WatermarkRowDecode(err.to_string())))?;
+        let watermarks = crate::core::WatermarkPair::new(applied, durable).map_err(|err| {
+            wal_index_error_payload(&WalIndexError::WatermarkRowDecode(err.to_string()))
+        })?;
         watermark_txn
             .update_watermark(&namespace, &origin, watermarks)
             .map_err(|err| wal_index_error_payload(&err))?;

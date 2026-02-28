@@ -1331,14 +1331,11 @@ mod tests {
     use crate::core::identity::BeadId;
     use crate::core::time::{Stamp, WriteStamp};
     use crate::core::{
-        ActorId, CanonicalState, DepKey, Dot, ReplicaId, Seq0, StoreState, Watermark,
-        WatermarkPair,
+        ActorId, CanonicalState, DepKey, Dot, ReplicaId, Seq0, StoreState, Watermark, WatermarkPair,
     };
     use crate::paths;
     use crate::remote::RemoteUrl;
-    use crate::runtime::wal::{
-        IndexDurabilityMode, SqliteWalIndex, WalIndex,
-    };
+    use crate::runtime::wal::{IndexDurabilityMode, SqliteWalIndex, WalIndex};
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
     use uuid::Uuid;
@@ -1391,7 +1388,10 @@ mod tests {
         .expect("insert store_epoch");
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
-            rusqlite::params!["index_schema_version", meta.index_schema_version.to_string()],
+            rusqlite::params![
+                "index_schema_version",
+                meta.index_schema_version.to_string()
+            ],
         )
         .expect("insert index_schema_version");
         conn.execute(
@@ -1476,8 +1476,7 @@ mod tests {
         let now_ms = 1_700_000_000_000;
         let mut stale_versions = StoreMetaVersions::current();
         stale_versions.index_schema_version = stale_versions.index_schema_version.saturating_sub(1);
-        let stale_meta =
-            write_meta_with_versions_for(store_id, replica_id, now_ms, stale_versions);
+        let stale_meta = write_meta_with_versions_for(store_id, replica_id, now_ms, stale_versions);
         write_legacy_index_with_sentinel(store_id, &stale_meta);
 
         let namespace_defaults = crate::config::Config::default()

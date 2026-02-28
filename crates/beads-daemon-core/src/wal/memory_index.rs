@@ -528,8 +528,7 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        Applied, Durable, EventId, HeadStatus, NamespaceId, SegmentId, Seq0, Seq1, TxnId,
-        Watermark,
+        Applied, Durable, EventId, HeadStatus, NamespaceId, SegmentId, Seq0, Seq1, TxnId, Watermark,
     };
 
     #[test]

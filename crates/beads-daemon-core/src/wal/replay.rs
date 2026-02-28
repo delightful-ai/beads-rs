@@ -562,8 +562,9 @@ fn replay_index(
             })?;
             let applied: Watermark<Applied> = applied;
             let durable: Watermark<Durable> = durable;
-            let watermarks = WatermarkPair::new(applied, durable)
-                .map_err(|err| WalReplayError::Index(WalIndexError::WatermarkRowDecode(err.to_string())))?;
+            let watermarks = WatermarkPair::new(applied, durable).map_err(|err| {
+                WalReplayError::Index(WalIndexError::WatermarkRowDecode(err.to_string()))
+            })?;
             txn.update_watermark(&namespace, &origin, watermarks)?;
             txn.set_next_origin_seq(&namespace, &origin, next_seq)?;
         }

@@ -1569,8 +1569,7 @@ mod tests {
         let applied = Watermark::<Applied>::new(Seq0::new(seq), HeadStatus::Known(sha)).unwrap();
         let durable = Watermark::<Durable>::new(Seq0::new(seq), HeadStatus::Known(sha)).unwrap();
         let watermarks = WatermarkPair::new(applied, durable).unwrap();
-        txn.update_watermark(&ns, &origin, watermarks)
-            .unwrap();
+        txn.update_watermark(&ns, &origin, watermarks).unwrap();
         let event_ids = ClientRequestEventIds::single(event_id.clone());
         txn.upsert_client_request(
             &ns,
@@ -1621,8 +1620,7 @@ mod tests {
         let watermarks = WatermarkPair::new(applied, durable).unwrap();
 
         let mut txn = index.writer().begin_txn().unwrap();
-        txn.update_watermark(&ns, &origin, watermarks)
-            .unwrap();
+        txn.update_watermark(&ns, &origin, watermarks).unwrap();
         txn.commit().unwrap();
 
         let rows = index.reader().load_watermarks().unwrap();
@@ -1689,15 +1687,7 @@ mod tests {
         let db_path = temp.path().join("index").join("wal.sqlite");
         let conn = open_connection(&db_path, IndexDurabilityMode::Cache, false).unwrap();
 
-        assert_watermark_insert_rejected(
-            &conn,
-            &ns,
-            &origin,
-            0,
-            0,
-            Some([7u8; 32].to_vec()),
-            None,
-        );
+        assert_watermark_insert_rejected(&conn, &ns, &origin, 0, 0, Some([7u8; 32].to_vec()), None);
     }
 
     #[test]
@@ -1710,15 +1700,7 @@ mod tests {
         let db_path = temp.path().join("index").join("wal.sqlite");
         let conn = open_connection(&db_path, IndexDurabilityMode::Cache, false).unwrap();
 
-        assert_watermark_insert_rejected(
-            &conn,
-            &ns,
-            &origin,
-            2,
-            1,
-            Some([8u8; 32].to_vec()),
-            None,
-        );
+        assert_watermark_insert_rejected(&conn, &ns, &origin, 2, 1, Some([8u8; 32].to_vec()), None);
     }
 
     #[test]

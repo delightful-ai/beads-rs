@@ -590,8 +590,10 @@ mod tests {
 
     #[test]
     fn watermark_pair_rejects_durable_ahead_of_applied() {
-        let applied = Watermark::<Applied>::new(Seq0::new(1), HeadStatus::Known([1u8; 32])).unwrap();
-        let durable = Watermark::<Durable>::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap();
+        let applied =
+            Watermark::<Applied>::new(Seq0::new(1), HeadStatus::Known([1u8; 32])).unwrap();
+        let durable =
+            Watermark::<Durable>::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap();
         let err = WatermarkPair::new(applied, durable).unwrap_err();
         assert_eq!(
             err,
@@ -604,8 +606,10 @@ mod tests {
 
     #[test]
     fn watermark_pair_rejects_equal_seq_with_mismatched_heads() {
-        let applied = Watermark::<Applied>::new(Seq0::new(3), HeadStatus::Known([3u8; 32])).unwrap();
-        let durable = Watermark::<Durable>::new(Seq0::new(3), HeadStatus::Known([4u8; 32])).unwrap();
+        let applied =
+            Watermark::<Applied>::new(Seq0::new(3), HeadStatus::Known([3u8; 32])).unwrap();
+        let durable =
+            Watermark::<Durable>::new(Seq0::new(3), HeadStatus::Known([4u8; 32])).unwrap();
         let err = WatermarkPair::new(applied, durable).unwrap_err();
         assert_eq!(
             err,
@@ -619,8 +623,10 @@ mod tests {
 
     #[test]
     fn watermark_pair_accepts_valid_unequal_seq() {
-        let applied = Watermark::<Applied>::new(Seq0::new(3), HeadStatus::Known([3u8; 32])).unwrap();
-        let durable = Watermark::<Durable>::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap();
+        let applied =
+            Watermark::<Applied>::new(Seq0::new(3), HeadStatus::Known([3u8; 32])).unwrap();
+        let durable =
+            Watermark::<Durable>::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap();
         let pair = WatermarkPair::new(applied, durable).unwrap();
         assert_eq!(pair.applied(), applied);
         assert_eq!(pair.durable(), durable);
@@ -628,8 +634,10 @@ mod tests {
 
     #[test]
     fn watermark_pair_accepts_equal_seq_with_matching_head() {
-        let applied = Watermark::<Applied>::new(Seq0::new(4), HeadStatus::Known([6u8; 32])).unwrap();
-        let durable = Watermark::<Durable>::new(Seq0::new(4), HeadStatus::Known([6u8; 32])).unwrap();
+        let applied =
+            Watermark::<Applied>::new(Seq0::new(4), HeadStatus::Known([6u8; 32])).unwrap();
+        let durable =
+            Watermark::<Durable>::new(Seq0::new(4), HeadStatus::Known([6u8; 32])).unwrap();
         let pair = WatermarkPair::new(applied, durable).unwrap();
         assert_eq!(pair.applied(), applied);
         assert_eq!(pair.durable(), durable);
