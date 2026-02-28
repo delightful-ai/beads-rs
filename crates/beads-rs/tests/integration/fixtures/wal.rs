@@ -39,7 +39,13 @@ impl TempWalDir {
         let store_dir = temp.path().join("store");
         fs::create_dir_all(&store_dir).expect("create store dir");
 
-        let versions = StoreMetaVersions::new(1, WAL_FORMAT_VERSION, 1, 1, 1);
+        let versions = StoreMetaVersions::new(
+            1,
+            WAL_FORMAT_VERSION,
+            1,
+            1,
+            StoreMetaVersions::INDEX_SCHEMA_VERSION,
+        );
         let meta =
             identity::store_meta_with_versions(seed, 0, 1_700_000_000_000 + seed as u64, versions);
 

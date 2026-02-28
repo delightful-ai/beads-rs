@@ -101,8 +101,8 @@ impl SessionStore for ReplSessionStore {
             durable
                 .entry(ns.clone())
                 .or_default()
-                .insert(origin, row.durable);
-            applied.entry(ns).or_default().insert(origin, row.applied);
+                .insert(origin, row.durable());
+            applied.entry(ns).or_default().insert(origin, row.applied());
         }
 
         WatermarkSnapshot { durable, applied }

@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use crate::core::{
-    ActorId, Applied, ClientRequestId, Durable, EventId, NamespaceId, ReplicaId, SegmentId, Seq0,
-    Seq1, TxnId, Watermark,
+    ActorId, ClientRequestId, EventId, NamespaceId, ReplicaId, SegmentId, Seq0, Seq1, TxnId,
+    WatermarkPair,
 };
 
 use super::{
@@ -264,18 +264,12 @@ impl WalIndexTxn for MemoryWalIndexTxn {
         &mut self,
         ns: &NamespaceId,
         origin: &ReplicaId,
-        applied: Watermark<Applied>,
-        durable: Watermark<Durable>,
+        watermarks: WatermarkPair,
     ) -> Result<(), WalIndexError> {
         self.ensure_live()?;
         self.working.watermarks.insert(
             (ns.clone(), *origin),
-            WatermarkRow {
-                namespace: ns.clone(),
-                origin: *origin,
-                applied,
-                durable,
-            },
+            WatermarkRow::new(ns.clone(), *origin, watermarks),
         );
         Ok(())
     }
@@ -533,7 +527,10 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    use crate::core::{EventId, HeadStatus, NamespaceId, SegmentId, Seq1, TxnId};
+    use crate::core::{
+        Applied, Durable, EventId, HeadStatus, NamespaceId, SegmentId, Seq0, Seq1, TxnId,
+        Watermark,
+    };
 
     #[test]
     fn memory_index_records_event_and_watermarks() {
@@ -564,7 +561,8 @@ mod tests {
             Watermark::<Applied>::new(Seq0::new(1), HeadStatus::Known(sha)).expect("watermark");
         let durable =
             Watermark::<Durable>::new(Seq0::new(1), HeadStatus::Known(sha)).expect("watermark");
-        txn.update_watermark(&namespace, &origin, applied, durable)
+        let watermarks = WatermarkPair::new(applied, durable).expect("watermark pair");
+        txn.update_watermark(&namespace, &origin, watermarks)
             .expect("update watermark");
         txn.commit().expect("commit");
 

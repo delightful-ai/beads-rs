@@ -121,7 +121,9 @@ pub(super) fn apply_checkpoint_watermarks(
             })?;
             txn.set_next_origin_seq(&namespace, &origin, next_seq)?;
 
-            txn.update_watermark(&namespace, &origin, applied, durable)?;
+            let watermarks = crate::core::WatermarkPair::new(applied, durable)
+                .map_err(|err| WalIndexError::WatermarkRowDecode(err.to_string()))?;
+            txn.update_watermark(&namespace, &origin, watermarks)?;
         }
     }
     txn.commit()?;
@@ -256,7 +258,7 @@ pub fn replay_event_wal(
     let mut applied_any = false;
 
     for row in rows {
-        if row.applied.seq().get() == 0 {
+        if row.applied().seq().get() == 0 {
             continue;
         }
         let namespace = row.namespace.clone();
@@ -272,7 +274,7 @@ pub fn replay_event_wal(
 
         let state_for_namespace = state.ensure_namespace(namespace.clone());
         let mut from_seq_excl = Seq0::ZERO;
-        while from_seq_excl.get() < row.applied.seq().get() {
+        while from_seq_excl.get() < row.applied().seq().get() {
             let items = wal_index.reader().iter_from(
                 &namespace,
                 &row.origin,
@@ -291,8 +293,8 @@ pub fn replay_event_wal(
             }
             for item in items {
                 let seq = item.event_id.origin_seq.get();
-                if seq > row.applied.seq().get() {
-                    from_seq_excl = row.applied.seq();
+                if seq > row.applied().seq().get() {
+                    from_seq_excl = row.applied().seq();
                     break;
                 }
                 let segment_path = segments.get(&item.segment_id).ok_or_else(|| {

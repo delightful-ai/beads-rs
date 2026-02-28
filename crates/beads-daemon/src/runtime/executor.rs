@@ -39,7 +39,8 @@ use crate::core::{
     ActorId, Applied, BeadId, CanonicalState, Dot, DurabilityClass, DurabilityReceipt, Durable,
     EventBytes, EventId, EventKindV1, HeadStatus, Limits, NamespaceId, NoteId, ReplicaId, Seq1,
     Sha256, Stamp, StoreIdentity, TxnDeltaV1, TxnOpV1, ValidatedEventBody, WallClock, Watermark,
-    WatermarkError, Watermarks, WirePatch, WriteStamp, apply_event, decode_event_body,
+    WatermarkError, WatermarkPair, Watermarks, WirePatch, WriteStamp, apply_event,
+    decode_event_body,
     hash_event_body,
 };
 use crate::runtime::metrics;
@@ -469,8 +470,13 @@ impl Daemon {
         };
 
         let mut watermark_txn = wal_index.begin_wal_txn().map_err(wal_index_to_op)?;
+        let watermarks = WatermarkPair::new(applied, durable).map_err(|err| {
+            OpError::from(StoreRuntimeError::WalIndex(WalIndexError::WatermarkRowDecode(
+                err.to_string(),
+            )))
+        })?;
         watermark_txn
-            .update_watermark(&namespace, &origin_replica_id, applied, durable)
+            .update_watermark(&namespace, &origin_replica_id, watermarks)
             .map_err(wal_index_to_op)?;
         watermark_txn.commit().map_err(wal_index_to_op)?;
 
@@ -1173,7 +1179,13 @@ mod tests {
         let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
         let store = StoreIdentity::new(store_id, StoreEpoch::new(0));
         let replica_id = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
-        let versions = StoreMetaVersions::new(1, 2, 1, 1, 1);
+        let versions = StoreMetaVersions::new(
+            1,
+            2,
+            1,
+            1,
+            StoreMetaVersions::INDEX_SCHEMA_VERSION,
+        );
         let meta = StoreMeta::new(store, replica_id, versions, 1_700_000_000_000);
 
         let index = SqliteWalIndex::open(&store_dir, &meta, IndexDurabilityMode::Cache).unwrap();

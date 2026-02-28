@@ -14,7 +14,7 @@ use crate::core::error::details as error_details;
 use crate::core::{
     Applied, CliErrorCode, DecodeError, Durable, EncodeError, ErrorCode, ErrorPayload, EventId,
     HeadStatus, IntoErrorPayload, Limits, NamespaceId, ProtocolErrorCode, ReplicaId, SegmentId,
-    Seq0, Seq1, StoreMeta, Transience, Watermark, WatermarkError, decode_event_body,
+    Seq0, Seq1, StoreMeta, Transience, Watermark, WatermarkError, WatermarkPair, decode_event_body,
     decode_event_hlc_max,
 };
 
@@ -562,7 +562,9 @@ fn replay_index(
             })?;
             let applied: Watermark<Applied> = applied;
             let durable: Watermark<Durable> = durable;
-            txn.update_watermark(&namespace, &origin, applied, durable)?;
+            let watermarks = WatermarkPair::new(applied, durable)
+                .map_err(|err| WalReplayError::Index(WalIndexError::WatermarkRowDecode(err.to_string())))?;
+            txn.update_watermark(&namespace, &origin, watermarks)?;
             txn.set_next_origin_seq(&namespace, &origin, next_seq)?;
         }
     }
@@ -1603,8 +1605,9 @@ impl ReplayTracker {
 
     fn seed_from_watermarks(&mut self, rows: Vec<WatermarkRow>) -> Result<(), WalReplayError> {
         for row in rows {
-            let durable_seq = row.durable.seq();
-            let head = match row.durable.head() {
+            let durable = row.durable();
+            let durable_seq = durable.seq();
+            let head = match durable.head() {
                 HeadStatus::Genesis => None,
                 HeadStatus::Known(sha) => Some(sha),
             };

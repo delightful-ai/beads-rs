@@ -101,7 +101,7 @@ impl StoreRuntime {
         let existing = read_store_meta_optional(&meta_path)?;
 
         let expected_versions = StoreMetaVersions::current();
-        let meta = match existing.as_ref() {
+        let (meta, write_meta) = match existing.as_ref() {
             Some(meta) => {
                 if meta.store_id() != store_id {
                     return Err(StoreRuntimeError::MetaMismatch {
@@ -110,23 +110,31 @@ impl StoreRuntime {
                     });
                 }
                 let got_versions = meta.versions();
-                if got_versions != expected_versions {
+                if got_versions == expected_versions {
+                    (meta.clone(), false)
+                } else if can_upgrade_index_schema_only(got_versions, expected_versions) {
+                    let mut upgraded = meta.clone();
+                    upgraded.index_schema_version = expected_versions.index_schema_version;
+                    (upgraded, true)
+                } else {
                     return Err(StoreRuntimeError::UnsupportedStoreMetaVersion {
                         expected: expected_versions,
                         got: got_versions,
                     });
                 }
-                meta.clone()
             }
             None => {
                 let identity = StoreIdentity::new(store_id, StoreEpoch::ZERO);
-                StoreMeta::new(identity, new_replica_id(), expected_versions, now_ms)
+                (
+                    StoreMeta::new(identity, new_replica_id(), expected_versions, now_ms),
+                    true,
+                )
             }
         };
 
         let lock = StoreLock::acquire(layout, store_id, meta.replica_id, now_ms, daemon_version)?;
 
-        if existing.is_none() {
+        if write_meta {
             write_store_meta(&meta_path, &meta)?;
         }
 
@@ -941,6 +949,14 @@ fn open_wal_index_with_layout(
     }
 }
 
+fn can_upgrade_index_schema_only(got: StoreMetaVersions, expected: StoreMetaVersions) -> bool {
+    got.store_format_version == expected.store_format_version
+        && got.wal_format_version == expected.wal_format_version
+        && got.checkpoint_format_version == expected.checkpoint_format_version
+        && got.replication_protocol_version == expected.replication_protocol_version
+        && got.index_schema_version < expected.index_schema_version
+}
+
 fn load_store_config_with_layout(
     layout: &DaemonLayout,
     store_id: StoreId,
@@ -1121,11 +1137,13 @@ fn load_watermarks(
     let mut durable = Watermarks::<Durable>::new();
 
     for row in rows {
-        let namespace = row.namespace;
+        let namespace = row.namespace.clone();
         let origin = row.origin;
+        let applied_row = row.applied();
+        let durable_row = row.durable();
 
         applied
-            .observe_at_least(&namespace, &origin, row.applied.seq(), row.applied.head())
+            .observe_at_least(&namespace, &origin, applied_row.seq(), applied_row.head())
             .map_err(|source| StoreRuntimeError::WatermarkInvalid {
                 kind: "applied",
                 namespace: namespace.clone(),
@@ -1134,7 +1152,7 @@ fn load_watermarks(
             })?;
 
         durable
-            .observe_at_least(&namespace, &origin, row.durable.seq(), row.durable.head())
+            .observe_at_least(&namespace, &origin, durable_row.seq(), durable_row.head())
             .map_err(|source| StoreRuntimeError::WatermarkInvalid {
                 kind: "durable",
                 namespace: namespace.clone(),
@@ -1314,11 +1332,12 @@ mod tests {
     use crate::core::time::{Stamp, WriteStamp};
     use crate::core::{
         ActorId, CanonicalState, DepKey, Dot, ReplicaId, Seq0, StoreState, Watermark,
+        WatermarkPair,
     };
     use crate::paths;
     use crate::remote::RemoteUrl;
     use crate::runtime::wal::{
-        IndexDurabilityMode, SqliteWalIndex, WalIndex, WalIndexError, WalReplayError,
+        IndexDurabilityMode, SqliteWalIndex, WalIndex,
     };
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
@@ -1330,6 +1349,58 @@ mod tests {
         let meta = StoreMeta::new(identity, replica_id, versions, now_ms);
         write_store_meta(&paths::store_meta_path(store_id), &meta).expect("write meta");
         meta
+    }
+
+    fn write_meta_with_versions_for(
+        store_id: StoreId,
+        replica_id: ReplicaId,
+        now_ms: u64,
+        versions: StoreMetaVersions,
+    ) -> StoreMeta {
+        let identity = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+        let meta = StoreMeta::new(identity, replica_id, versions, now_ms);
+        write_store_meta(&paths::store_meta_path(store_id), &meta).expect("write meta");
+        meta
+    }
+
+    fn write_legacy_index_with_sentinel(store_id: StoreId, meta: &StoreMeta) {
+        let db_path = paths::store_dir(store_id).join("index").join("wal.sqlite");
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).expect("create index dir");
+        }
+        let conn = rusqlite::Connection::open(&db_path).expect("open legacy sqlite");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS meta (
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS legacy_sentinel (
+               id INTEGER PRIMARY KEY
+             );",
+        )
+        .expect("create legacy schema");
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["store_id", meta.store_id().to_string()],
+        )
+        .expect("insert store_id");
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["store_epoch", meta.store_epoch().get().to_string()],
+        )
+        .expect("insert store_epoch");
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["index_schema_version", meta.index_schema_version.to_string()],
+        )
+        .expect("insert index_schema_version");
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["wal_format_version", meta.wal_format_version.to_string()],
+        )
+        .expect("insert wal_format_version");
+        conn.execute("INSERT INTO legacy_sentinel (id) VALUES (1)", [])
+            .expect("insert sentinel");
     }
 
     #[test]
@@ -1356,7 +1427,8 @@ mod tests {
             Watermark::<Applied>::new(Seq0::new(2), HeadStatus::Known(head)).expect("watermark");
         let durable =
             Watermark::<Durable>::new(Seq0::new(2), HeadStatus::Known(head)).expect("watermark");
-        txn.update_watermark(&namespace, &origin, applied, durable)
+        let watermarks = WatermarkPair::new(applied, durable).expect("watermark pair");
+        txn.update_watermark(&namespace, &origin, watermarks)
             .expect("update watermark");
         txn.commit().expect("commit watermark");
 
@@ -1395,43 +1467,23 @@ mod tests {
     }
 
     #[test]
-    fn phase3_head_sha_rejects_missing_head() {
+    fn runtime_upgrades_stale_index_meta_and_rebuilds_legacy_index() {
         let temp = TempDir::new().expect("temp dir");
         let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
 
         let store_id = StoreId::new(Uuid::from_bytes([20u8; 16]));
         let replica_id = ReplicaId::new(Uuid::from_bytes([21u8; 16]));
         let now_ms = 1_700_000_000_000;
-        let meta = write_meta_for(store_id, replica_id, now_ms);
-        let _index = SqliteWalIndex::open(
-            &paths::store_dir(store_id),
-            &meta,
-            IndexDurabilityMode::Cache,
-        )
-        .expect("open wal index");
-
-        let namespace = NamespaceId::core();
-        let origin = ReplicaId::new(Uuid::from_bytes([22u8; 16]));
-        let db_path = paths::store_dir(store_id).join("index").join("wal.sqlite");
-        let conn = rusqlite::Connection::open(&db_path).expect("open wal sqlite");
-        conn.execute(
-            "INSERT INTO watermarks (namespace, origin_replica_id, applied_seq, durable_seq, applied_head_sha, durable_head_sha) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                namespace.as_str(),
-                origin.as_uuid().as_bytes().to_vec(),
-                1i64,
-                0i64,
-                Option::<Vec<u8>>::None,
-                Option::<Vec<u8>>::None,
-            ],
-        )
-        .expect("insert invalid watermark");
+        let mut stale_versions = StoreMetaVersions::current();
+        stale_versions.index_schema_version = stale_versions.index_schema_version.saturating_sub(1);
+        let stale_meta =
+            write_meta_with_versions_for(store_id, replica_id, now_ms, stale_versions);
+        write_legacy_index_with_sentinel(store_id, &stale_meta);
 
         let namespace_defaults = crate::config::Config::default()
             .namespace_defaults
             .namespaces;
-        let result = StoreRuntime::open(
+        let _runtime = StoreRuntime::open(
             &crate::daemon_layout_from_paths(),
             store_id,
             RemoteUrl::new("example.com/test/repo"),
@@ -1439,16 +1491,49 @@ mod tests {
             "test",
             &Limits::default(),
             &namespace_defaults,
+        )
+        .expect("open runtime with stale index schema")
+        .runtime;
+
+        let persisted_meta = read_store_meta_optional(&paths::store_meta_path(store_id))
+            .expect("read store meta")
+            .expect("store meta exists");
+        assert_eq!(
+            persisted_meta.index_schema_version,
+            StoreMetaVersions::INDEX_SCHEMA_VERSION
         );
 
-        assert!(matches!(
-            result,
-            Err(StoreRuntimeError::WalReplay(err))
-                if matches!(
-                    &*err,
-                    WalReplayError::Index(WalIndexError::WatermarkRowDecode(_))
-                )
-        ));
+        let db_path = paths::store_dir(store_id).join("index").join("wal.sqlite");
+        let conn = rusqlite::Connection::open(&db_path).expect("open rebuilt wal sqlite");
+        let sentinel_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                rusqlite::params!["legacy_sentinel"],
+                |row| row.get(0),
+            )
+            .expect("query sqlite_master");
+        assert_eq!(sentinel_count, 0, "legacy index should be replaced");
+
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([22u8; 16]));
+        let insert_err = conn
+            .execute(
+                "INSERT INTO watermarks (namespace, origin_replica_id, applied_seq, durable_seq, applied_head_sha, durable_head_sha) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    namespace.as_str(),
+                    origin.as_uuid().as_bytes().to_vec(),
+                    1i64,
+                    0i64,
+                    Option::<Vec<u8>>::None,
+                    Option::<Vec<u8>>::None,
+                ],
+            )
+            .expect_err("invalid watermark insert should fail");
+        assert!(
+            insert_err.to_string().contains("CHECK constraint failed"),
+            "expected CHECK constraint failure, got {insert_err}"
+        );
     }
 
     #[test]
@@ -1465,6 +1550,42 @@ mod tests {
         versions.wal_format_version = versions.wal_format_version.saturating_add(1);
         let meta = StoreMeta::new(identity, replica_id, versions, now_ms);
         write_store_meta(&paths::store_meta_path(store_id), &meta).expect("write meta");
+
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let err = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            now_ms + 1,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .err()
+        .expect("expected version mismatch");
+
+        let expected = StoreMetaVersions::current();
+        assert!(matches!(
+            err,
+            StoreRuntimeError::UnsupportedStoreMetaVersion { expected: got_expected, got }
+                if got_expected == expected && got == versions
+        ));
+    }
+
+    #[test]
+    fn store_runtime_rejects_newer_index_schema_version() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([33u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([34u8; 16]));
+        let now_ms = 1_700_000_000_000;
+
+        let mut versions = StoreMetaVersions::current();
+        versions.index_schema_version = versions.index_schema_version.saturating_add(1);
+        write_meta_with_versions_for(store_id, replica_id, now_ms, versions);
 
         let namespace_defaults = crate::config::Config::default()
             .namespace_defaults

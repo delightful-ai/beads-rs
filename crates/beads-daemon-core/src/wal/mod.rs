@@ -9,7 +9,7 @@ use crate::core::error::details as error_details;
 use crate::core::{
     ActorId, Applied, CliErrorCode, ClientRequestId, Durable, ErrorCode, ErrorPayload, EventId,
     HeadStatus, IntoErrorPayload, NamespaceId, ProtocolErrorCode, ReplicaId, SegmentId, Seq0, Seq1,
-    StoreId, Transience, TxnId, Watermark,
+    StoreId, Transience, TxnId, Watermark, WatermarkPair,
 };
 pub use crate::core::{ReplicaDurabilityRole, ReplicaDurabilityRoleError};
 
@@ -371,8 +371,7 @@ pub trait WalIndexTxn {
         &mut self,
         ns: &NamespaceId,
         origin: &ReplicaId,
-        applied: Watermark<Applied>,
-        durable: Watermark<Durable>,
+        watermarks: WatermarkPair,
     ) -> Result<(), WalIndexError>;
     fn update_hlc(&mut self, hlc: &HlcRow) -> Result<(), WalIndexError>;
     fn upsert_segment(&mut self, segment: &SegmentRow) -> Result<(), WalIndexError>;
@@ -580,28 +579,47 @@ impl SegmentRow {
 pub struct WatermarkRow {
     pub namespace: NamespaceId,
     pub origin: ReplicaId,
-    pub applied: Watermark<Applied>,
-    pub durable: Watermark<Durable>,
+    watermarks: WatermarkPair,
 }
 
 impl WatermarkRow {
+    pub fn new(namespace: NamespaceId, origin: ReplicaId, watermarks: WatermarkPair) -> Self {
+        Self {
+            namespace,
+            origin,
+            watermarks,
+        }
+    }
+
+    pub fn watermarks(&self) -> WatermarkPair {
+        self.watermarks
+    }
+
+    pub fn applied(&self) -> Watermark<Applied> {
+        self.watermarks.applied()
+    }
+
+    pub fn durable(&self) -> Watermark<Durable> {
+        self.watermarks.durable()
+    }
+
     pub fn applied_seq(&self) -> u64 {
-        self.applied.seq().get()
+        self.applied().seq().get()
     }
 
     pub fn durable_seq(&self) -> u64 {
-        self.durable.seq().get()
+        self.durable().seq().get()
     }
 
     pub fn applied_head_sha(&self) -> Option<[u8; 32]> {
-        match self.applied.head() {
+        match self.applied().head() {
             HeadStatus::Known(sha) => Some(sha),
             HeadStatus::Genesis => None,
         }
     }
 
     pub fn durable_head_sha(&self) -> Option<[u8; 32]> {
-        match self.durable.head() {
+        match self.durable().head() {
             HeadStatus::Known(sha) => Some(sha),
             HeadStatus::Genesis => None,
         }

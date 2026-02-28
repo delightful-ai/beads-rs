@@ -6,7 +6,7 @@ use super::{
 #[cfg(any(feature = "test-harness", test))]
 use crate::core::{
     ActorId, Applied, ClientRequestId, Durable, EventId, HeadStatus, NamespaceId, ReplicaId,
-    ReplicaRole, SegmentId, Seq0, Seq1, TxnId, Watermark,
+    ReplicaRole, SegmentId, Seq0, Seq1, TxnId, Watermark, WatermarkPair,
 };
 #[cfg(any(feature = "test-harness", test))]
 use uuid::Uuid;
@@ -140,9 +140,10 @@ where
 
     let applied = Watermark::<Applied>::new(Seq0::new(10), HeadStatus::Known([10u8; 32])).unwrap();
     let durable = Watermark::<Durable>::new(Seq0::new(5), HeadStatus::Known([5u8; 32])).unwrap();
+    let watermarks = WatermarkPair::new(applied, durable).unwrap();
 
     let mut txn = index.writer().begin_txn().expect("begin txn");
-    txn.update_watermark(&ns, &origin, applied, durable)
+    txn.update_watermark(&ns, &origin, watermarks)
         .expect("update");
     txn.commit().expect("commit");
 
