@@ -8,6 +8,8 @@ use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
+use crate::env_flags::env_flag_truthy;
+
 use super::remote::RemoteUrl;
 
 const DEFAULT_DEBOUNCE_MS: u64 = 500;
@@ -19,16 +21,6 @@ fn default_delay() -> Duration {
     } else {
         Duration::from_millis(DEFAULT_DEBOUNCE_MS)
     }
-}
-
-fn env_flag_truthy(name: &str) -> bool {
-    let Ok(raw) = std::env::var(name) else {
-        return false;
-    };
-    !matches!(
-        raw.trim().to_ascii_lowercase().as_str(),
-        "0" | "false" | "no" | "n" | "off"
-    )
 }
 
 /// Manages sync scheduling with debounce.

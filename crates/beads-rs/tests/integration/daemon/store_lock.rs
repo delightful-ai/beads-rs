@@ -5,8 +5,9 @@ use std::fs;
 use crate::fixtures::store_dir::TempStoreDir;
 use uuid::Uuid;
 
-use beads_rs::daemon::{StoreLock, StoreLockError, read_lock_meta};
-use beads_rs::{NamespaceId, ReplicaId, StoreId};
+use beads_core::{NamespaceId, ReplicaId, StoreId};
+use beads_daemon::daemon_layout_from_paths;
+use beads_daemon::testkit::store::{StoreLock, StoreLockError, read_lock_meta};
 
 #[test]
 fn store_paths_live_under_bd_data_dir() {
@@ -55,11 +56,12 @@ fn store_paths_live_under_bd_data_dir() {
 #[test]
 fn store_lock_acquire_writes_metadata() {
     let _temp = TempStoreDir::new().expect("temp store dir");
+    let layout = daemon_layout_from_paths();
     let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
     let replica_id = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
     let started_at_ms = 1_726_000_000_123;
 
-    let lock = StoreLock::acquire(store_id, replica_id, started_at_ms, "0.1.0-test")
+    let lock = StoreLock::acquire(&layout, store_id, replica_id, started_at_ms, "0.1.0-test")
         .expect("acquire lock");
 
     let meta = read_lock_meta(store_id)
@@ -78,14 +80,16 @@ fn store_lock_acquire_writes_metadata() {
 #[test]
 fn store_lock_held_surfaces_metadata() {
     let _temp = TempStoreDir::new().expect("temp store dir");
+    let layout = daemon_layout_from_paths();
     let store_id = StoreId::new(Uuid::from_bytes([3u8; 16]));
     let replica_id = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
     let started_at_ms = 1_726_000_001_000;
 
-    let _lock = StoreLock::acquire(store_id, replica_id, started_at_ms, "0.1.0-test")
+    let _lock = StoreLock::acquire(&layout, store_id, replica_id, started_at_ms, "0.1.0-test")
         .expect("acquire lock");
 
-    let err = StoreLock::acquire(store_id, replica_id, started_at_ms, "0.1.0-test").unwrap_err();
+    let err =
+        StoreLock::acquire(&layout, store_id, replica_id, started_at_ms, "0.1.0-test").unwrap_err();
 
     match err {
         StoreLockError::Held { meta, .. } => {
@@ -103,10 +107,17 @@ fn store_lock_permissions_are_restricted() {
     use std::os::unix::fs::PermissionsExt;
 
     let _temp = TempStoreDir::new().expect("temp store dir");
+    let layout = daemon_layout_from_paths();
     let store_id = StoreId::new(Uuid::from_bytes([5u8; 16]));
     let replica_id = ReplicaId::new(Uuid::from_bytes([6u8; 16]));
-    let lock = StoreLock::acquire(store_id, replica_id, 1_726_000_002_000, "0.1.0-test")
-        .expect("acquire lock");
+    let lock = StoreLock::acquire(
+        &layout,
+        store_id,
+        replica_id,
+        1_726_000_002_000,
+        "0.1.0-test",
+    )
+    .expect("acquire lock");
 
     let meta = fs::metadata(lock.path()).expect("lock metadata");
     assert_eq!(meta.permissions().mode() & 0o777, 0o600);
@@ -124,6 +135,7 @@ fn store_lock_rejects_symlink_path() {
     use std::os::unix::fs::symlink;
 
     let temp = TempStoreDir::new().expect("temp store dir");
+    let layout = daemon_layout_from_paths();
     let store_id = StoreId::new(Uuid::from_bytes([7u8; 16]));
     let replica_id = ReplicaId::new(Uuid::from_bytes([8u8; 16]));
     let store_dir = beads_rs::paths::store_dir(store_id);
@@ -134,7 +146,13 @@ fn store_lock_rejects_symlink_path() {
     let lock_path = beads_rs::paths::store_lock_path(store_id);
     symlink(&target, &lock_path).expect("create symlink");
 
-    let err =
-        StoreLock::acquire(store_id, replica_id, 1_726_000_003_000, "0.1.0-test").unwrap_err();
+    let err = StoreLock::acquire(
+        &layout,
+        store_id,
+        replica_id,
+        1_726_000_003_000,
+        "0.1.0-test",
+    )
+    .unwrap_err();
     assert!(matches!(err, StoreLockError::Symlink { .. }));
 }

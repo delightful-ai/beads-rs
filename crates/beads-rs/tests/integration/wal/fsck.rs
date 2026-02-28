@@ -4,11 +4,11 @@ use std::fs;
 
 use uuid::Uuid;
 
-use beads_rs::daemon::wal::fsck::{
+use beads_core::{Limits, NamespaceId, ReplicaId, StoreMeta};
+use beads_daemon::testkit::wal::fsck::{
     FsckCheckId, FsckEvidenceCode, FsckOptions, FsckRepairKind, FsckStatus, fsck_store_dir,
 };
-use beads_rs::daemon::wal::{SegmentRow, VerifiedRecord, WalIndex, rebuild_index};
-use beads_rs::{Limits, NamespaceId, ReplicaId, StoreMeta};
+use beads_daemon::testkit::wal::{SegmentRow, VerifiedRecord, WalIndex, rebuild_index};
 
 use crate::fixtures::wal::{TempWalDir, record_for_seq};
 use crate::fixtures::wal_corrupt::{
@@ -72,7 +72,7 @@ fn fsck_repair_truncates_tail() {
 }
 
 #[test]
-fn fsck_repair_quarantines_mid_file_corruption() {
+fn fsck_repair_truncates_mid_file_corruption_to_preserve_prefix() {
     let temp = TempWalDir::new();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
@@ -81,7 +81,7 @@ fn fsck_repair_quarantines_mid_file_corruption() {
         .write_segment(&namespace, 1_700_000_000_000, &records)
         .expect("write segment");
 
-    corrupt_frame_body(&segment, 0).expect("corrupt frame");
+    corrupt_frame_body(&segment, 1).expect("corrupt frame");
 
     let report = fsck_store_dir(
         temp.store_dir(),
@@ -91,14 +91,16 @@ fn fsck_repair_quarantines_mid_file_corruption() {
     .expect("fsck store dir");
 
     assert!(!report.summary.safe_to_accept_writes);
-    let quarantine = report
-        .repairs
-        .iter()
-        .find(|repair| repair.kind == FsckRepairKind::QuarantineSegment)
-        .expect("quarantine repair");
-    let new_path = quarantine.path.as_ref().expect("quarantine path");
-    assert!(!segment.path.exists());
-    assert!(new_path.exists());
+    assert!(
+        report
+            .repairs
+            .iter()
+            .any(|repair| repair.kind == FsckRepairKind::TruncateTail)
+    );
+    assert!(segment.path.exists());
+
+    let meta = fs::metadata(&segment.path).expect("segment metadata");
+    assert_eq!(meta.len(), segment.frame_offset(1));
 
     let frames_check = report
         .checks
@@ -106,6 +108,34 @@ fn fsck_repair_quarantines_mid_file_corruption() {
         .find(|check| check.id == FsckCheckId::SegmentFrames)
         .expect("segment frames check");
     assert_eq!(frames_check.status, FsckStatus::Fail);
+}
+
+#[test]
+fn fsck_reports_invalid_checkpoint_cache_files() {
+    let temp = TempWalDir::new();
+    let cache_group = temp.store_dir().join("checkpoint_cache").join("core");
+    fs::create_dir_all(&cache_group).expect("create checkpoint cache group");
+    fs::write(cache_group.join("CURRENT"), "a".repeat(2048)).expect("write oversized current");
+
+    let report = fsck_store_dir(
+        temp.store_dir(),
+        temp.meta(),
+        FsckOptions::new(false, Limits::default()),
+    )
+    .expect("fsck store dir");
+
+    let checkpoint_check = report
+        .checks
+        .iter()
+        .find(|check| check.id == FsckCheckId::CheckpointCache)
+        .expect("checkpoint cache check");
+    assert_eq!(checkpoint_check.status, FsckStatus::Fail);
+    assert!(
+        checkpoint_check
+            .evidence
+            .iter()
+            .any(|e| e.code == FsckEvidenceCode::CheckpointCacheInvalid)
+    );
 }
 
 #[test]

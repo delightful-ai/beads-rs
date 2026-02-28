@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use beads_rs::{
+use beads_core::{
     ApplyOutcome, Bead, BeadId, CanonicalState, NoteId, NoteKey, ValidatedEventBody, apply_event,
 };
 

@@ -11,15 +11,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::hash::{Hash, Hasher};
 use std::time::Duration;
 
+use beads_core::{
+    ActorId, Applied, Durable, EventFrameError, EventFrameV1, EventId, EventShaLookup, HeadStatus,
+    Limits, NamespaceId, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity,
+    TxnDeltaV1, TxnId, Watermark,
+};
 use beads_rs::model::{
     BufferedEventSnapshot, BufferedPrevSnapshot, ContiguousBatch, GapBufferByNsOrigin,
     GapBufferByNsOriginSnapshot, GapBufferSnapshot, HeadSnapshot, OriginStreamSnapshot,
     WatermarkSnapshot, event_factory, repl_ingest,
-};
-use beads_rs::{
-    ActorId, Applied, Durable, EventFrameError, EventFrameV1, EventId, EventShaLookup, HeadStatus,
-    Limits, NamespaceId, ReplicaId, Seq0, Seq1, Sha256, StoreEpoch, StoreId, StoreIdentity,
-    TxnDeltaV1, TxnId, Watermark,
 };
 use beads_stateright_models::ordered_reliable_link::{ActorWrapper, MsgWrapper};
 use stateright::actor::{
@@ -938,7 +938,7 @@ impl EventShaLookup for EventLookup<'_> {
     fn lookup_event_sha(
         &self,
         eid: &EventId,
-    ) -> Result<Option<Sha256>, beads_rs::EventShaLookupError> {
+    ) -> Result<Option<Sha256>, beads_core::EventShaLookupError> {
         Ok(self.events.get(eid).copied())
     }
 }
@@ -1070,8 +1070,8 @@ fn frame_error_code(err: &EventFrameError) -> &'static str {
     }
 }
 
-fn reject_reason_code(reason: &beads_rs::core::error::details::ReplRejectReason) -> &'static str {
-    use beads_rs::core::error::details::ReplRejectReason as R;
+fn reject_reason_code(reason: &beads_core::error::details::ReplRejectReason) -> &'static str {
+    use beads_core::error::details::ReplRejectReason as R;
     match reason {
         R::PrevUnknown => "prev_unknown",
         R::GapTimeout => "gap_timeout",

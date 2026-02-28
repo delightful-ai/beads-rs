@@ -9,11 +9,9 @@ use tempfile::TempDir;
 
 use super::daemon_runtime::shutdown_daemon;
 use super::git::{init_bare_repo, init_repo_with_origin};
+use beads_api::QueryResult;
 use beads_daemon::test_utils::poll_until;
-use beads_rs::api::QueryResult;
-use beads_rs::surface::ipc::{
-    EmptyPayload, IpcClient, RepoCtx, Request, Response, ResponsePayload,
-};
+use beads_surface::ipc::{EmptyPayload, IpcClient, RepoCtx, Request, Response, ResponsePayload};
 
 pub struct RealtimeFixture {
     runtime_dir: TempDir,

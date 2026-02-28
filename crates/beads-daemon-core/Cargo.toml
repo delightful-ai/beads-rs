@@ -8,7 +8,11 @@ repository.workspace = true
 description = "Shared daemon protocol and WAL primitives for beads-rs"
 
 [features]
-test-harness = ["uuid"]
+default = []
+wal-sqlite = ["dep:rusqlite"]
+wal-fs = ["dep:dirs", "dep:rand", "dep:toml", "dep:tracing"]
+test-harness = []
+model-testing = []
 
 [dependencies]
 beads-core = { path = "../beads-core" }
@@ -19,7 +23,13 @@ minicbor = { version = "0.24", features = ["std"] }
 serde_json.workspace = true
 serde.workspace = true
 thiserror.workspace = true
-uuid = { workspace = true, optional = true }
+uuid.workspace = true
+dirs = { version = "6.0.0", optional = true }
+rand = { version = "0.9", optional = true }
+rusqlite = { version = "0.31", optional = true }
+toml = { version = "0.8", optional = true }
+tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
 uuid.workspace = true
+tempfile = "3"

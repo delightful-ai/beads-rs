@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::core::ActorId;
+use beads_core::ActorId;
 
 use super::{Config, ConfigLayer, LogFormat, LogRotation};
 
@@ -253,7 +253,7 @@ mod tests {
     use super::*;
 
     use crate::config::DefaultsConfig;
-    use crate::core::NamespaceId;
+    use beads_core::NamespaceId;
 
     #[test]
     fn merge_layers_respects_precedence() {

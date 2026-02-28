@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use beads_rs::{EventBody, encode_event_body_canonical, sha256_bytes};
+use beads_core::{EventBody, encode_event_body_canonical, sha256_bytes};
 
 use super::event_body;
 

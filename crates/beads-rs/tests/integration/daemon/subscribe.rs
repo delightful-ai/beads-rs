@@ -6,10 +6,10 @@ use std::io::ErrorKind;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use beads_rs::surface::ipc::{EmptyPayload, IpcError, ReadConsistency, ReadCtx, Request, Response};
-use beads_rs::{
+use beads_core::{
     Applied, CliErrorCode, HeadStatus, NamespaceId, ProtocolErrorCode, Seq0, Watermarks,
 };
+use beads_surface::ipc::{EmptyPayload, IpcError, ReadConsistency, ReadCtx, Request, Response};
 
 use crate::fixtures::admin_status::StatusCollector;
 use crate::fixtures::ipc_stream::{StreamClientError, StreamingClient};
@@ -173,7 +173,7 @@ fn run_load(
     repo: PathBuf,
     total: usize,
     namespace: &NamespaceId,
-    client: beads_rs::surface::ipc::IpcClient,
+    client: beads_surface::ipc::IpcClient,
 ) -> LoadReport {
     let mut generator = LoadGenerator::with_client(repo, client);
     let config = generator.config_mut();
@@ -187,8 +187,8 @@ fn run_load(
 fn current_origin_seq(
     repo: &PathBuf,
     namespace: &NamespaceId,
-    client: beads_rs::surface::ipc::IpcClient,
-) -> (beads_rs::ReplicaId, u64) {
+    client: beads_surface::ipc::IpcClient,
+) -> (beads_core::ReplicaId, u64) {
     let mut collector = StatusCollector::with_client(repo.clone(), client);
     let status = collector.sample().expect("admin status");
     let origin = status.replica_id;
@@ -202,7 +202,7 @@ fn current_origin_seq(
 
 fn require_min_seen(
     namespace: &NamespaceId,
-    origin: beads_rs::ReplicaId,
+    origin: beads_core::ReplicaId,
     seq: u64,
 ) -> Watermarks<Applied> {
     let mut required = Watermarks::<Applied>::new();
@@ -219,12 +219,12 @@ fn require_min_seen(
 
 fn collect_origin_seqs(
     client: &mut StreamingClient,
-    origin: beads_rs::ReplicaId,
+    origin: beads_core::ReplicaId,
     start_seq: u64,
     total: usize,
     repo: &PathBuf,
     read: &ReadConsistency,
-    ipc_client: &beads_rs::surface::ipc::IpcClient,
+    ipc_client: &beads_surface::ipc::IpcClient,
 ) -> Vec<u64> {
     const MAX_RECONNECTS: usize = 3;
     const MAX_WAIT: Duration = Duration::from_secs(30);

@@ -207,7 +207,33 @@ impl WalIndexTxn for MemoryWalIndexTxn {
         let key = (ns.clone(), eid.origin_replica_id, eid.origin_seq);
         if let Some(existing) = self.working.events.get(&key) {
             if existing.sha == sha {
-                return Ok(());
+                let mut mismatches = Vec::new();
+                if existing.prev_sha != prev_sha {
+                    mismatches.push("prev_sha");
+                }
+                if existing.event_time_ms != event_time_ms {
+                    mismatches.push("event_time_ms");
+                }
+                if existing.txn_id != txn_id {
+                    mismatches.push("txn_id");
+                }
+                if existing.client_request_id != client_request_id {
+                    mismatches.push("client_request_id");
+                }
+
+                if mismatches.is_empty() {
+                    return Ok(());
+                }
+
+                return Err(WalIndexError::EventConflict {
+                    namespace: ns.clone(),
+                    origin: eid.origin_replica_id,
+                    seq: eid.origin_seq.get(),
+                    reason: format!(
+                        "duplicate event id with mismatched fields: {}; run `bd store fsck --repair` and rebuild wal index",
+                        mismatches.join(", ")
+                    ),
+                });
             }
             return Err(WalIndexError::Equivocation {
                 namespace: ns.clone(),

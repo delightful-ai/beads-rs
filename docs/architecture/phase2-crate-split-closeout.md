@@ -21,6 +21,19 @@ for final parse/dispatch ownership and shim cleanup after the phased migration.
   - `crates/beads-cli/src`
 - Boundary lint remains required via `just dylint`.
 
+## Hard-Cutover API Notes (2026-02-26)
+
+These follow-up changes are intentionally breaking for boundary cleanup (`bd-6ea1`):
+
+- `beads-daemon` no longer re-exports store runtime/lock internals from
+  `beads_daemon::runtime::{StoreRuntime, StoreRuntimeError, StoreLock, StoreLockError, StoreLockMeta, StoreLockOperation, read_lock_meta}`.
+  - Use crate-internal daemon paths or `beads_daemon::testkit::store::*` for integration tests.
+- `beads-daemon-core` adds `WalIndexError::EventConflict { .. }` for same-EventId rows whose SHA matches but indexed metadata diverges.
+  - Callers matching `WalIndexError` must handle this variant.
+  - Operator guidance: run `bd store fsck --repair` and rebuild `wal.sqlite` when surfaced.
+
+This repository is currently on `0.2.0-alpha`; treat these as hard cutover alpha API changes.
+
 ## Verification Matrix
 
 Commands executed for closeout:

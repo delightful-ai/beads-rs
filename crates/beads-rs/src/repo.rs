@@ -5,9 +5,9 @@ use std::path::{Path, PathBuf};
 use git2::Repository;
 
 use crate::Error;
-use crate::core::CanonicalState;
-use crate::git::SyncError;
-use crate::git::sync::{LoadedStore, read_state_at_oid};
+use beads_core::CanonicalState;
+use beads_git::SyncError;
+use beads_git::sync::{LoadedStore, read_state_at_oid};
 
 /// Open the git repository containing the current directory.
 pub fn discover() -> Result<(Repository, PathBuf), Error> {

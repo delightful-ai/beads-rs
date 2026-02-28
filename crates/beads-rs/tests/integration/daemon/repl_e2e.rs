@@ -10,17 +10,17 @@ use crate::fixtures::repl_rig::{
     DurabilityEligibility, FaultProfile, ReplRig, ReplRigOptions, TailnetTraceConfig,
 };
 use crate::fixtures::tailnet_proxy::TailnetTraceMode;
-use beads_rs::api::QueryResult;
-use beads_rs::core::error::details::{DurabilityTimeoutDetails, RequireMinSeenUnsatisfiedDetails};
-use beads_rs::core::{
+use beads_api::QueryResult;
+use beads_core::error::details::{DurabilityTimeoutDetails, RequireMinSeenUnsatisfiedDetails};
+use beads_core::{
     BeadId, BeadType, DurabilityClass, HeadStatus, NamespaceId, Priority, ProtocolErrorCode,
     ReplicaDurabilityRole, ReplicaEntry, Seq0,
 };
-use beads_rs::surface::ipc::{
+use beads_surface::ipc::{
     AdminCheckpointWaitPayload, AdminOp, CreatePayload, IdPayload, IpcClient, MutationCtx,
     MutationMeta, ReadConsistency, ReadCtx, RepoCtx, Request, Response, ResponsePayload,
 };
-use beads_rs::surface::ops::OpResult;
+use beads_surface::ops::OpResult;
 use tempfile::TempDir;
 
 fn sample_ids<'a>(ids: &'a [String]) -> Vec<&'a String> {
@@ -241,9 +241,13 @@ fn repl_daemon_pathological_tailnet_roundtrip() {
         rig.create_issue(0, "pathology-0"),
         rig.create_issue(1, "pathology-1"),
     ];
+    for idx in 0..2 {
+        rig.reload_replication(idx);
+    }
 
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(180));
-    wait_for_sample(&rig, &ids, Duration::from_secs(20));
+    rig.assert_replication_ready(Duration::from_secs(60));
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(300));
+    wait_for_sample(&rig, &ids, Duration::from_secs(30));
 }
 
 #[test]
@@ -366,10 +370,12 @@ fn repl_daemon_crash_restart_tailnet_roundtrip() {
     wait_for_sample_on(&rig, &post, &[0], Duration::from_secs(20));
 
     rig.restart_node(1);
+    rig.wait_for_admin_ready(1, Duration::from_secs(30));
     rig.reload_replication(0);
     rig.reload_replication(1);
+    rig.assert_replication_ready(Duration::from_secs(90));
 
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(180));
     let combined: Vec<String> = initial.iter().chain(post.iter()).cloned().collect();
     wait_for_sample(&rig, &combined, Duration::from_secs(20));
 }
@@ -636,7 +642,7 @@ fn repl_daemon_replicated_fsync_timeout_receipt() {
             );
 
             let receipt = err
-                .receipt_as::<beads_rs::DurabilityReceipt>()
+                .receipt_as::<beads_core::DurabilityReceipt>()
                 .expect("receipt decode");
             let receipt = receipt.expect("receipt missing");
             assert!(receipt.outcome().is_pending());
@@ -650,7 +656,7 @@ fn create_issue_with_durability(
     node_idx: usize,
     title: &str,
     k: NonZeroU32,
-) -> (BeadId, beads_rs::DurabilityReceipt) {
+) -> (BeadId, beads_core::DurabilityReceipt) {
     let mut attempts = 0u8;
     loop {
         let response = create_issue_with_durability_result(rig, node_idx, title, k);

@@ -6,15 +6,15 @@ use std::path::Path;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-use beads_rs::core::{ContentHash, Dot};
-use beads_rs::git::checkpoint::{
-    CheckpointExport, CheckpointExportInput, CheckpointImportError, CheckpointSnapshotInput,
-    IncludedHeads, IncludedWatermarks, export_checkpoint, import_checkpoint,
-};
-use beads_rs::{
+use beads_core::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey, DepKind,
     Durable, HeadStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp, StoreEpoch, StoreId,
     StoreState, Tombstone, Watermarks, Workflow, WriteStamp,
+};
+use beads_core::{ContentHash, Dot};
+use beads_git::checkpoint::{
+    CheckpointExport, CheckpointExportInput, CheckpointImportError, CheckpointSnapshotInput,
+    IncludedHeads, IncludedWatermarks, export_checkpoint, import_checkpoint,
 };
 
 use crate::fixtures::checkpoint::{
@@ -56,7 +56,7 @@ fn checkpoint_import_rejects_corrupt_files() {
     let target = temp.path().join(path.to_path());
     corrupt_jsonl_preserving_syntax(&target).expect("corrupt file");
 
-    let err = import_checkpoint(temp.path(), &beads_rs::Limits::default()).unwrap_err();
+    let err = import_checkpoint(temp.path(), &beads_core::Limits::default()).unwrap_err();
     match err {
         CheckpointImportError::FileHashMismatch { .. } => {}
         other => panic!("expected FileHashMismatch, got {other:?}"),
@@ -71,7 +71,7 @@ fn checkpoint_round_trip_preserves_state_and_manifest() {
     let temp = TempDir::new().expect("temp checkpoint dir");
     write_checkpoint_tree(temp.path(), &expected_export).expect("write checkpoint");
 
-    let imported = import_checkpoint(temp.path(), &beads_rs::Limits::default()).expect("import");
+    let imported = import_checkpoint(temp.path(), &beads_core::Limits::default()).expect("import");
     assert_store_state_stats(&store_state, &imported.state);
 
     assert_eq!(
@@ -143,7 +143,7 @@ fn checkpoint_included_watermarks_match() {
 
     let temp = TempDir::new().expect("temp checkpoint dir");
     write_checkpoint_tree(temp.path(), &export).expect("write checkpoint");
-    let imported = import_checkpoint(temp.path(), &beads_rs::Limits::default()).expect("import");
+    let imported = import_checkpoint(temp.path(), &beads_core::Limits::default()).expect("import");
     assert_store_state_stats(&store_state, &imported.state);
 }
 
@@ -218,8 +218,8 @@ fn build_snapshot_from_state(
     args: SnapshotBuildArgs,
     state: &StoreState,
     watermarks: &Watermarks<Durable>,
-) -> beads_rs::git::checkpoint::CheckpointSnapshot {
-    beads_rs::git::checkpoint::build_snapshot(CheckpointSnapshotInput {
+) -> beads_git::checkpoint::CheckpointSnapshot {
+    beads_git::checkpoint::build_snapshot(CheckpointSnapshotInput {
         checkpoint_group: args.checkpoint_group,
         namespaces: args.namespaces.into(),
         store_id: args.store_id,

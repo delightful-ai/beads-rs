@@ -1,13 +1,13 @@
 use std::fs;
 use std::sync::Arc;
 
-use beads_rs::daemon::repl::{WalRangeError, WalRangeReader};
-use beads_rs::daemon::wal::{
+use beads_core::{Limits, NamespaceId, Seq0, StoreMeta, StoreMetaVersions};
+use beads_daemon::testkit::repl::{WalRangeError, WalRangeReader};
+use beads_daemon::testkit::wal::{
     IndexDurabilityMode, SegmentConfig, SegmentSyncMode, SegmentWriter, SqliteWalIndex,
     WAL_FORMAT_VERSION, rebuild_index,
 };
 use beads_rs::paths;
-use beads_rs::{Limits, NamespaceId, Seq0, StoreMeta, StoreMetaVersions};
 use rusqlite::params;
 use tempfile::TempDir;
 
@@ -34,7 +34,7 @@ fn write_records(
     store_dir: &std::path::Path,
     meta: &StoreMeta,
     namespace: &NamespaceId,
-    records: &[beads_rs::daemon::wal::VerifiedRecord],
+    records: &[beads_daemon::testkit::wal::VerifiedRecord],
     limits: &Limits,
 ) {
     let config = SegmentConfig::from_limits(limits).with_sync_mode(SegmentSyncMode::None);
@@ -64,7 +64,7 @@ fn wal_range_reader_returns_contiguous_frames() {
     let index =
         SqliteWalIndex::open(&store_dir, &meta, IndexDurabilityMode::Cache).expect("open index");
     rebuild_index(&store_dir, &meta, &index, &limits).expect("rebuild index");
-    let reader = WalRangeReader::new(meta.store_id(), Arc::new(index), limits.clone());
+    let reader = WalRangeReader::new(store_dir.clone(), Arc::new(index), limits.clone());
 
     let frames = reader
         .read_range(&namespace, &origin, Seq0::ZERO, limits.max_frame_bytes)
@@ -87,7 +87,7 @@ fn wal_range_reader_rejects_internal_gap() {
     let index =
         SqliteWalIndex::open(&store_dir, &meta, IndexDurabilityMode::Cache).expect("open index");
     rebuild_index(&store_dir, &meta, &index, &limits).expect("rebuild index");
-    let reader = WalRangeReader::new(meta.store_id(), Arc::new(index), limits.clone());
+    let reader = WalRangeReader::new(store_dir.clone(), Arc::new(index), limits.clone());
 
     let err = reader
         .read_range(&namespace, &origin, Seq0::ZERO, limits.max_frame_bytes)
@@ -119,7 +119,7 @@ fn wal_range_reader_rejects_prev_sha_mismatch() {
     )
     .expect("update prev sha");
 
-    let reader = WalRangeReader::new(meta.store_id(), Arc::new(index), limits.clone());
+    let reader = WalRangeReader::new(store_dir, Arc::new(index), limits.clone());
     let err = reader
         .read_range(&namespace, &origin, Seq0::ZERO, limits.max_frame_bytes)
         .expect_err("expected prev mismatch");

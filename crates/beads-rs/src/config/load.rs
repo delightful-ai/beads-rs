@@ -154,7 +154,7 @@ mod tests {
         CheckpointGroupConfig, DefaultsConfig, LogFormat, LogRotation, LoggingConfig, PathsConfig,
         ReplicationConfig, ReplicationPeerConfig,
     };
-    use crate::core::{NamespaceId, ReplicaId, ReplicaRole};
+    use beads_core::{NamespaceId, ReplicaId, ReplicaRole};
 
     #[test]
     fn config_roundtrip() {
@@ -194,7 +194,7 @@ mod tests {
                 },
             },
             paths: PathsConfig::default(),
-            limits: crate::core::Limits::default(),
+            limits: beads_core::Limits::default(),
             replication: ReplicationConfig {
                 listen_addr: "127.0.0.1:9999".to_string(),
                 max_connections: Some(7),

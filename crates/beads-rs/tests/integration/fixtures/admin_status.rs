@@ -5,14 +5,14 @@ use std::time::{Duration, Instant};
 
 use thiserror::Error;
 
-use beads_rs::api::AdminStatusOutput;
-use beads_rs::api::QueryResult;
-use beads_rs::surface::ipc::{
+use beads_api::AdminStatusOutput;
+use beads_api::QueryResult;
+use beads_core::{
+    ErrorCode, HeadStatus, NamespaceId, ProtocolErrorCode, Seq0, WatermarkError, Watermarks,
+};
+use beads_surface::ipc::{
     AdminOp, EmptyPayload, IpcClient, IpcConnection, IpcError, ReadConsistency, ReadCtx, Request,
     Response, ResponsePayload,
-};
-use beads_rs::{
-    ErrorCode, HeadStatus, NamespaceId, ProtocolErrorCode, Seq0, WatermarkError, Watermarks,
 };
 
 #[derive(Debug, Error)]
@@ -20,7 +20,7 @@ pub enum StatusError {
     #[error(transparent)]
     Ipc(#[from] IpcError),
     #[error("remote error: {0:?}")]
-    Remote(Box<beads_rs::ErrorPayload>),
+    Remote(Box<beads_core::ErrorPayload>),
     #[error("unexpected response payload: {0:?}")]
     Unexpected(Box<ResponsePayload>),
     #[error(transparent)]
@@ -140,8 +140,8 @@ impl StatusCollector {
 }
 
 pub fn assert_monotonic_watermarks(samples: &[AdminStatusOutput]) {
-    let mut prev_applied: Option<Watermarks<beads_rs::Applied>> = None;
-    let mut prev_durable: Option<Watermarks<beads_rs::Durable>> = None;
+    let mut prev_applied: Option<Watermarks<beads_core::Applied>> = None;
+    let mut prev_durable: Option<Watermarks<beads_core::Durable>> = None;
     for sample in samples {
         if let Some(prev) = &prev_applied {
             assert!(
@@ -175,7 +175,7 @@ fn wait_timeout_ms(wait_timeout: Duration) -> u64 {
     ms as u64
 }
 
-fn is_require_min_seen_timeout(err: &beads_rs::ErrorPayload) -> bool {
+fn is_require_min_seen_timeout(err: &beads_core::ErrorPayload) -> bool {
     matches!(
         err.code,
         ErrorCode::Protocol(ProtocolErrorCode::RequireMinSeenTimeout)
@@ -185,7 +185,7 @@ fn is_require_min_seen_timeout(err: &beads_rs::ErrorPayload) -> bool {
 fn next_applied_requirement(
     status: &AdminStatusOutput,
     read: &ReadConsistency,
-) -> Result<Watermarks<beads_rs::Applied>, StatusError> {
+) -> Result<Watermarks<beads_core::Applied>, StatusError> {
     let namespace = read.namespace.clone().unwrap_or_else(NamespaceId::core);
     let current_seq = status
         .watermarks_applied

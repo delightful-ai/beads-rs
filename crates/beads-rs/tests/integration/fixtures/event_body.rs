@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-use beads_rs::core::BranchName;
-use beads_rs::core::NoteAppendV1;
-use beads_rs::{
+use beads_core::BranchName;
+use beads_core::NoteAppendV1;
+use beads_core::{
     ActorId, BeadId, BeadType, ClientRequestId, EventBody, EventKindV1, HlcMax, NamespaceId,
     NoteId, Priority, ReplicaId, Seq1, StoreEpoch, StoreId, StoreIdentity, TraceId, TxnDeltaV1,
     TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch, WireNoteV1, WirePatch, WireStamp,

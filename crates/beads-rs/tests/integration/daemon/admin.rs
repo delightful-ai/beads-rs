@@ -12,23 +12,23 @@ use tempfile::TempDir;
 
 use crate::fixtures::daemon_runtime::shutdown_daemon;
 use crate::fixtures::git::{init_bare_repo, init_repo_with_origin};
-use beads_rs::api::{
+use beads_api::{
     AdminClockAnomaly, AdminClockAnomalyKind, AdminHealthReport, AdminHealthRisk, AdminHealthStats,
     AdminHealthSummary, AdminMetricsOutput, AdminReloadPoliciesOutput, AdminScrubOutput,
     AdminStatusOutput,
 };
-use beads_rs::api::{AdminFingerprintMode, AdminFingerprintOutput, AdminFingerprintSample};
-use beads_rs::core::BeadType;
-use beads_rs::surface::ipc::{
+use beads_api::{AdminFingerprintMode, AdminFingerprintOutput, AdminFingerprintSample};
+use beads_core::BeadType;
+use beads_core::{
+    Applied, Durable, NamespaceId, NamespacePolicies, NamespacePolicy, Priority, ReplicaId,
+    ReplicateMode, StoreId, Watermarks,
+};
+use beads_surface::ipc::{
     AdminDoctorPayload, AdminFingerprintPayload, AdminMaintenanceModePayload, AdminOp,
     AdminScrubPayload, CreatePayload, EmptyPayload, IpcClient, MutationCtx, MutationMeta,
     ReadConsistency, ReadCtx, RepoCtx, Request, Response, ResponsePayload,
 };
-use beads_rs::surface::ops::OpResult;
-use beads_rs::{
-    Applied, Durable, NamespaceId, NamespacePolicies, NamespacePolicy, Priority, ReplicaId,
-    ReplicateMode, StoreId, Watermarks,
-};
+use beads_surface::ops::OpResult;
 use uuid::Uuid;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -190,7 +190,7 @@ impl AdminFixture {
             ),
             payload: EmptyPayload {},
         })) {
-            beads_rs::api::QueryResult::AdminStatus(status) => status,
+            beads_api::QueryResult::AdminStatus(status) => status,
             other => panic!("unexpected admin status payload: {other:?}"),
         }
     }
@@ -203,12 +203,12 @@ impl AdminFixture {
             ),
             payload: EmptyPayload {},
         })) {
-            beads_rs::api::QueryResult::AdminMetrics(metrics) => metrics,
+            beads_api::QueryResult::AdminMetrics(metrics) => metrics,
             other => panic!("unexpected admin metrics payload: {other:?}"),
         }
     }
 
-    fn admin_doctor(&self) -> beads_rs::api::AdminDoctorOutput {
+    fn admin_doctor(&self) -> beads_api::AdminDoctorOutput {
         match self.send_query(Request::Admin(AdminOp::Doctor {
             ctx: ReadCtx::new(
                 self.repo_dir.path().to_path_buf(),
@@ -219,7 +219,7 @@ impl AdminFixture {
                 verify_checkpoint_cache: false,
             },
         })) {
-            beads_rs::api::QueryResult::AdminDoctor(output) => output,
+            beads_api::QueryResult::AdminDoctor(output) => output,
             other => panic!("unexpected admin doctor payload: {other:?}"),
         }
     }
@@ -235,7 +235,7 @@ impl AdminFixture {
                 verify_checkpoint_cache: false,
             },
         })) {
-            beads_rs::api::QueryResult::AdminScrub(output) => output,
+            beads_api::QueryResult::AdminScrub(output) => output,
             other => panic!("unexpected admin scrub payload: {other:?}"),
         }
     }
@@ -245,7 +245,7 @@ impl AdminFixture {
             ctx: RepoCtx::new(self.repo_dir.path().to_path_buf()),
             payload: EmptyPayload {},
         })) {
-            beads_rs::api::QueryResult::AdminReloadPolicies(output) => output,
+            beads_api::QueryResult::AdminReloadPolicies(output) => output,
             other => panic!("unexpected admin reload policies payload: {other:?}"),
         }
     }
@@ -262,7 +262,7 @@ impl AdminFixture {
             ),
             payload: AdminFingerprintPayload { mode, sample },
         })) {
-            beads_rs::api::QueryResult::AdminFingerprint(output) => output,
+            beads_api::QueryResult::AdminFingerprint(output) => output,
             other => panic!("unexpected admin fingerprint payload: {other:?}"),
         }
     }
@@ -281,7 +281,7 @@ impl AdminFixture {
         }))
     }
 
-    fn send_query(&self, request: Request) -> beads_rs::api::QueryResult {
+    fn send_query(&self, request: Request) -> beads_api::QueryResult {
         let response = self.send_request(&request);
         match response {
             Response::Ok {
@@ -396,9 +396,9 @@ fn admin_scrub_reports_segment_header_failure() {
     let wal_frames = report
         .checks
         .iter()
-        .find(|check| check.id == beads_rs::api::AdminHealthCheckId::WalFrames)
+        .find(|check| check.id == beads_api::AdminHealthCheckId::WalFrames)
         .expect("wal_frames check");
-    assert_eq!(wal_frames.status, beads_rs::api::AdminHealthStatus::Fail);
+    assert_eq!(wal_frames.status, beads_api::AdminHealthStatus::Fail);
 }
 
 #[test]
@@ -550,7 +550,7 @@ fn admin_maintenance_blocks_mutations() {
 
     match fixture.admin_maintenance(true) {
         Response::Ok {
-            ok: ResponsePayload::Query(beads_rs::api::QueryResult::AdminMaintenanceMode(_)),
+            ok: ResponsePayload::Query(beads_api::QueryResult::AdminMaintenanceMode(_)),
         } => {}
         other => panic!("unexpected maintenance on response: {other:?}"),
     }
@@ -562,7 +562,7 @@ fn admin_maintenance_blocks_mutations() {
 
     match fixture.admin_maintenance(false) {
         Response::Ok {
-            ok: ResponsePayload::Query(beads_rs::api::QueryResult::AdminMaintenanceMode(_)),
+            ok: ResponsePayload::Query(beads_api::QueryResult::AdminMaintenanceMode(_)),
         } => {}
         other => panic!("unexpected maintenance off response: {other:?}"),
     }
@@ -583,14 +583,14 @@ fn admin_rebuild_index_requires_maintenance() {
 
     match fixture.admin_maintenance(true) {
         Response::Ok {
-            ok: ResponsePayload::Query(beads_rs::api::QueryResult::AdminMaintenanceMode(_)),
+            ok: ResponsePayload::Query(beads_api::QueryResult::AdminMaintenanceMode(_)),
         } => {}
         other => panic!("unexpected maintenance on response: {other:?}"),
     }
 
     match fixture.admin_rebuild_index() {
         Response::Ok {
-            ok: ResponsePayload::Query(beads_rs::api::QueryResult::AdminRebuildIndex(_)),
+            ok: ResponsePayload::Query(beads_api::QueryResult::AdminRebuildIndex(_)),
         } => {}
         other => panic!("unexpected rebuild-index response: {other:?}"),
     }
@@ -600,7 +600,7 @@ fn ping_daemon(client: &IpcClient) -> bool {
     matches!(
         client.send_request_no_autostart(&Request::Ping),
         Ok(Response::Ok {
-            ok: ResponsePayload::Query(beads_rs::api::QueryResult::DaemonInfo(_)),
+            ok: ResponsePayload::Query(beads_api::QueryResult::DaemonInfo(_)),
         })
     )
 }

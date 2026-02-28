@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::core::{BeadSlug, WriteStamp};
+use crate::env_flags::env_flag_truthy;
 
 const DEFAULT_BACKOFF_BASE_MS: u64 = 500;
 const TEST_FAST_BACKOFF_BASE_MS: u64 = 50;
@@ -18,16 +19,6 @@ fn backoff_base_ms() -> u64 {
     } else {
         DEFAULT_BACKOFF_BASE_MS
     }
-}
-
-fn env_flag_truthy(name: &str) -> bool {
-    let Ok(raw) = std::env::var(name) else {
-        return false;
-    };
-    !matches!(
-        raw.trim().to_ascii_lowercase().as_str(),
-        "0" | "false" | "no" | "n" | "off"
-    )
 }
 
 #[derive(Clone, Debug)]
@@ -86,6 +77,9 @@ pub struct GitLaneState {
     /// Time of last successful refresh-from-remote.
     pub last_refresh: Option<Instant>,
 
+    /// Whether this lane has been initialized from a successful git load.
+    pub loaded_from_git: bool,
+
     /// Number of consecutive sync failures (for exponential backoff).
     pub consecutive_failures: u32,
 
@@ -103,11 +97,6 @@ pub struct GitLaneState {
 
     /// Last detected clock skew.
     pub last_clock_skew: Option<ClockSkewRecord>,
-
-    /// True only after the daemon successfully loaded state from git + WAL replay.
-    /// Used to gate Go-compat export and other operations that must not run
-    /// against uninitialized/empty state.
-    pub loaded_ok: bool,
 }
 
 impl GitLaneState {
@@ -123,32 +112,41 @@ impl GitLaneState {
             last_sync: None,
             last_sync_wall_ms: None,
             last_refresh: None,
+            loaded_from_git: false,
             consecutive_failures: 0,
             last_seen_stamp: None,
             last_fetch_error: None,
             last_divergence: None,
             last_force_push: None,
             last_clock_skew: None,
-            loaded_ok: false,
         }
     }
 
     /// Create a new GitLaneState with root slug and initial clone path.
     ///
-    /// Sets `loaded_ok = true` because this constructor is used after
-    /// successful git load in `apply_loaded_repo_state`.
+    /// This only seeds path metadata; callers must explicitly call
+    /// `mark_loaded_from_git()` after a successful git load/refresh.
     pub fn with_path(root_slug: Option<BeadSlug>, path: PathBuf) -> Self {
         let mut s = Self::new();
         s.root_slug = root_slug;
         s.known_paths.insert(path);
-        s.last_refresh = Some(Instant::now());
-        s.loaded_ok = true;
         s
     }
 
     /// Register another clone path for this remote.
     pub fn register_path(&mut self, path: PathBuf) {
         self.known_paths.insert(path);
+    }
+
+    /// Mark this lane as successfully initialized from git state.
+    pub fn mark_loaded_from_git(&mut self) {
+        self.loaded_from_git = true;
+        self.last_refresh = Some(Instant::now());
+    }
+
+    /// Whether this lane has completed at least one successful git load.
+    pub fn is_loaded_from_git(&self) -> bool {
+        self.loaded_from_git
     }
 
     /// Pick any existing clone path to run git ops against.
@@ -232,7 +230,17 @@ mod tests {
         assert!(!state.dirty);
         assert!(!state.sync_in_progress);
         assert!(!state.refresh_in_progress);
+        assert!(!state.loaded_from_git);
         assert_eq!(state.consecutive_failures, 0);
+    }
+
+    #[test]
+    fn with_path_starts_unloaded_until_git_load_succeeds() {
+        let path = PathBuf::from("/tmp/repo");
+        let state = GitLaneState::with_path(None, path.clone());
+        assert!(state.known_paths.contains(&path));
+        assert!(!state.is_loaded_from_git());
+        assert!(state.last_refresh.is_none());
     }
 
     #[test]

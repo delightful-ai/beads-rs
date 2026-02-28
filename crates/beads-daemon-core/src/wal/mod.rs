@@ -16,9 +16,51 @@ pub use crate::core::{ReplicaDurabilityRole, ReplicaDurabilityRoleError};
 #[cfg(any(feature = "test-harness", test))]
 pub mod contract;
 
+#[cfg(feature = "wal-fs")]
+pub mod event_wal;
+#[cfg(feature = "wal-fs")]
+pub mod frame;
+#[cfg(all(feature = "wal-fs", feature = "wal-sqlite"))]
+pub mod fsck;
+#[cfg(feature = "wal-sqlite")]
+pub mod index;
 pub mod memory_index;
+#[cfg(feature = "wal-fs")]
+pub mod memory_wal;
+#[cfg(feature = "wal-fs")]
+pub mod record;
+#[cfg(feature = "wal-fs")]
+pub mod replay;
+#[cfg(feature = "wal-fs")]
+pub(crate) mod seams;
+#[cfg(feature = "wal-fs")]
+pub mod segment;
 
+#[cfg(feature = "wal-fs")]
+pub use event_wal::{EventWal, SegmentSnapshot};
+#[cfg(feature = "wal-fs")]
+pub use frame::{FRAME_CRC_OFFSET, FRAME_HEADER_LEN, FrameReader, FrameWriter};
+#[cfg(feature = "wal-sqlite")]
+pub use index::SqliteWalIndex;
 pub use memory_index::{MemoryWalIndex, MemoryWalIndexSnapshot};
+#[cfg(feature = "wal-fs")]
+pub use memory_wal::MemoryEventWal;
+#[cfg(feature = "wal-fs")]
+pub use record::{
+    Record, RecordFlags, RecordHeader, RecordHeaderMismatch, RecordVerifyError, RequestProof,
+    Unverified, UnverifiedRecord, Verified, VerifiedRecord,
+};
+#[cfg(feature = "wal-fs")]
+pub use replay::{
+    RecordShaMismatchInfo, ReplayMode, ReplayStats, WalReplayError, catch_up_index, rebuild_index,
+};
+#[cfg(feature = "wal-fs")]
+pub use seams::{WalAppend, WalIndexTxnProvider, WalReadRange};
+#[cfg(feature = "wal-fs")]
+pub use segment::{
+    AppendOutcome, SEGMENT_HEADER_PREFIX_LEN, SegmentConfig, SegmentHeader, SegmentSyncMode,
+    SegmentWriter, WAL_FORMAT_VERSION,
+};
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ClientRequestEventIdsError {
@@ -80,6 +122,13 @@ pub enum WalIndexError {
         existing_sha256: [u8; 32],
         new_sha256: [u8; 32],
     },
+    #[error("event conflict for {namespace} {origin} seq {seq}: {reason}")]
+    EventConflict {
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        seq: u64,
+        reason: String,
+    },
     #[error("client_request_id reuse mismatch for {namespace} {origin} {client_request_id}")]
     ClientRequestIdReuseMismatch {
         namespace: NamespaceId,
@@ -105,6 +154,7 @@ impl WalIndexError {
                 ProtocolErrorCode::IndexRebuildRequired.into()
             }
             WalIndexError::Equivocation { .. } => ProtocolErrorCode::Equivocation.into(),
+            WalIndexError::EventConflict { .. } => ProtocolErrorCode::IndexCorrupt.into(),
             WalIndexError::ClientRequestIdReuseMismatch { .. } => {
                 ProtocolErrorCode::ClientRequestIdReuseMismatch.into()
             }
@@ -140,6 +190,7 @@ impl WalIndexError {
             } => Transience::Permanent,
             WalIndexError::MetaMismatch { .. } => Transience::Retryable,
             WalIndexError::Equivocation { .. }
+            | WalIndexError::EventConflict { .. }
             | WalIndexError::ClientRequestIdReuseMismatch { .. } => Transience::Permanent,
             WalIndexError::ConcurrentWrite { .. } => Transience::Retryable,
             _ => Transience::Retryable,
@@ -199,6 +250,10 @@ impl WalIndexError {
                 expected_request_sha256: hex::encode(expected_request_sha256),
                 got_request_sha256: hex::encode(got_request_sha256),
             }),
+            WalIndexError::EventConflict { reason, .. } => {
+                ErrorPayload::new(ProtocolErrorCode::IndexCorrupt.into(), message, retryable)
+                    .with_details(error_details::IndexCorruptDetails { reason })
+            }
             WalIndexError::MetaMismatch {
                 key: "store_id",
                 expected,
@@ -676,5 +731,125 @@ impl ClientRequestEventIds {
 
     pub fn first_event_id(&self) -> EventId {
         EventId::new(self.origin, self.namespace.clone(), self.seqs[0])
+    }
+}
+
+#[cfg(feature = "wal-fs")]
+pub type EventWalResult<T> = Result<T, EventWalError>;
+
+#[cfg(feature = "wal-fs")]
+pub trait ReadSeek: std::io::Read + std::io::Seek {}
+
+#[cfg(feature = "wal-fs")]
+impl<T: std::io::Read + std::io::Seek> ReadSeek for T {}
+
+#[cfg(feature = "wal-fs")]
+pub fn open_segment_reader(path: &Path) -> EventWalResult<Box<dyn ReadSeek>> {
+    if let Some(bytes) = memory_wal::read_segment_bytes(path) {
+        return Ok(Box::new(std::io::Cursor::new(bytes)));
+    }
+    let file = std::fs::File::open(path).map_err(|source| EventWalError::Io {
+        path: Some(path.to_path_buf()),
+        source,
+    })?;
+    Ok(Box::new(file))
+}
+
+#[cfg(feature = "wal-fs")]
+#[derive(Debug, Error)]
+pub enum EventWalError {
+    #[error("io error at {path:?}: {source}")]
+    Io {
+        path: Option<PathBuf>,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("path is a symlink: {path:?}")]
+    Symlink { path: PathBuf },
+    #[error("record exceeds max bytes {max_bytes} (got {got_bytes})")]
+    RecordTooLarge { max_bytes: usize, got_bytes: usize },
+    #[error("frame magic mismatch: got {got:#x}")]
+    FrameMagicMismatch { got: u32 },
+    #[error("frame length invalid: {reason}")]
+    FrameLengthInvalid { reason: String },
+    #[error("frame crc32c mismatch: expected {expected:#x}, got {got:#x}")]
+    FrameCrcMismatch { expected: u32, got: u32 },
+    #[error("record header invalid: {reason}")]
+    RecordHeaderInvalid { reason: String },
+    #[error("segment header invalid: {reason}")]
+    SegmentHeaderInvalid { reason: String },
+    #[error("segment header wal format unsupported: got {got}, supported {supported}")]
+    SegmentHeaderUnsupportedVersion { got: u32, supported: u32 },
+    #[error("segment header magic mismatch: got {got:?}")]
+    SegmentHeaderMagicMismatch { got: [u8; 5] },
+    #[error("segment header crc32c mismatch: expected {expected:#x}, got {got:#x}")]
+    SegmentHeaderCrcMismatch { expected: u32, got: u32 },
+}
+
+#[cfg(feature = "wal-fs")]
+impl EventWalError {
+    pub fn code(&self) -> ErrorCode {
+        match self {
+            EventWalError::RecordTooLarge { .. } => ProtocolErrorCode::WalRecordTooLarge.into(),
+            EventWalError::SegmentHeaderUnsupportedVersion { .. } => {
+                ProtocolErrorCode::WalFormatUnsupported.into()
+            }
+            EventWalError::Symlink { .. } => ProtocolErrorCode::PathSymlinkRejected.into(),
+            EventWalError::Io { source, .. } => {
+                if source.kind() == std::io::ErrorKind::PermissionDenied {
+                    ProtocolErrorCode::PermissionDenied.into()
+                } else {
+                    CliErrorCode::IoError.into()
+                }
+            }
+            _ => ProtocolErrorCode::WalCorrupt.into(),
+        }
+    }
+
+    pub fn transience(&self) -> Transience {
+        match self {
+            EventWalError::Symlink { .. } => Transience::Permanent,
+            EventWalError::Io { source, .. } => {
+                if source.kind() == std::io::ErrorKind::PermissionDenied {
+                    Transience::Permanent
+                } else {
+                    Transience::Retryable
+                }
+            }
+            _ => Transience::Permanent,
+        }
+    }
+}
+
+#[cfg(feature = "wal-fs")]
+impl IntoErrorPayload for EventWalError {
+    fn into_error_payload(self) -> ErrorPayload {
+        let message = self.to_string();
+        let retryable = self.transience().is_retryable();
+        let code = self.code();
+        match self {
+            EventWalError::RecordTooLarge {
+                max_bytes,
+                got_bytes,
+            } => ErrorPayload::new(
+                ProtocolErrorCode::WalRecordTooLarge.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::WalRecordTooLargeDetails {
+                max_wal_record_bytes: max_bytes as u64,
+                estimated_bytes: got_bytes as u64,
+            }),
+            EventWalError::Symlink { path } => ErrorPayload::new(
+                ProtocolErrorCode::PathSymlinkRejected.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PathSymlinkRejectedDetails {
+                path: path.display().to_string(),
+            }),
+            _ => ErrorPayload::new(code, message.clone(), retryable)
+                .with_details(error_details::WalErrorDetails { message }),
+        }
     }
 }

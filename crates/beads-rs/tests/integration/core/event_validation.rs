@@ -1,6 +1,6 @@
 //! Event validation fixtures.
 
-use beads_rs::{Limits, ValidatedEventBody};
+use beads_core::{Limits, ValidatedEventBody};
 
 use crate::fixtures::event_body::sample_event_body;
 

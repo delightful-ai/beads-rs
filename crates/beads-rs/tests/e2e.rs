@@ -2,21 +2,21 @@
 
 use std::num::NonZeroU32;
 
-use beads_rs::api::QueryResult;
-use beads_rs::core::error::details::{DurabilityTimeoutDetails, RequireMinSeenUnsatisfiedDetails};
-use beads_rs::core::{
+use beads_api::QueryResult;
+use beads_core::error::details::{DurabilityTimeoutDetails, RequireMinSeenUnsatisfiedDetails};
+use beads_core::{
     BeadId, BeadType, DurabilityClass, HeadStatus, NamespaceId, Priority, ProtocolErrorCode, Seq0,
     StoreId,
 };
-use beads_rs::surface::ipc::{
-    CreatePayload, IdPayload, MutationCtx, MutationMeta, ReadConsistency, ReadCtx, Request,
-    Response, ResponsePayload,
-};
-use beads_rs::surface::ops::OpResult;
 use beads_rs::test_harness::{
     Direction, NetworkProfile, NodeOptions, ReplicationRig, TestWorld, latency_budget_ms,
     measure_latency, replication_latency_budget_ms,
 };
+use beads_surface::ipc::{
+    CreatePayload, IdPayload, MutationCtx, MutationMeta, ReadConsistency, ReadCtx, Request,
+    Response, ResponsePayload,
+};
+use beads_surface::ops::OpResult;
 use uuid::Uuid;
 
 const DURABILITY_STEPS: usize = 2_000;
@@ -302,7 +302,7 @@ fn e2e_replicated_fsync_timeout_receipt() {
             );
 
             let receipt = err
-                .receipt_as::<beads_rs::DurabilityReceipt>()
+                .receipt_as::<beads_core::DurabilityReceipt>()
                 .expect("receipt decode");
             let receipt = receipt.expect("receipt missing");
             assert!(receipt.outcome().is_pending());
@@ -316,7 +316,7 @@ fn create_issue_with_durability(
     node_idx: usize,
     title: &str,
     k: NonZeroU32,
-) -> (BeadId, beads_rs::DurabilityReceipt) {
+) -> (BeadId, beads_core::DurabilityReceipt) {
     let response = create_issue_with_durability_result(rig, node_idx, title, k);
     match response {
         Response::Ok {
