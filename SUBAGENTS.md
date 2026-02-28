@@ -6,8 +6,8 @@
 - workspace: current_workspace
 - close_scope: p0_children_only
 - clean_every_closed_beads: 4
-- closed_count: 4
-- current_bead: bd-q6o7
+- closed_count: 5
+- current_bead: bd-r39f
 
 ## Bead Ledger
 | order | bead | stage | planner_id | sanity_id | implementer_id | reviewer_id | plan_file | jj_change | verify_status | close_status | last_update_utc |
@@ -16,7 +16,7 @@
 | 2 | bd-ooe2 | closed | 019ca253-b508-78c0-acdb-c64083ec32b4 | 019ca256-2f48-7ae1-a236-8b800b0ca482 | 019ca257-2780-7462-8099-4804f625aad0 | 019ca25f-d3b7-7f41-8165-1fa74b679a5a | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-ooe2-implementation.md | ozmlwmyn | pass | closed | 2026-02-28T03:56:17Z |
 | 3 | bd-a3hl | closed | 019ca264-6693-7833-974a-7a498c2be3d0 | 019ca269-0cbd-7480-bfe0-223fcca93357 | 019ca26b-2851-7383-b54f-9f05ba71dc88 | 019ca272-bb45-79a2-b27b-0aa622ed8cd0 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-a3hl-implementation.md | kyqkwxro | pass | closed | 2026-02-28T04:17:06Z |
 | 4 | bd-ub8m | closed | 019ca277-7825-79c0-9d6a-0729659f3dcd | 019ca27b-e24a-7641-9cbd-7f569a9b5b04 | 019ca27e-7e8e-7ac1-8e18-2719d610ef52 | 019ca286-984e-7052-870d-6d504f4d468e | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-ub8m-implementation.md | oxoskrvp | pass | closed | 2026-02-28T04:40:13Z |
-| 5 | bd-q6o7 | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-q6o7-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
+| 5 | bd-q6o7 | closed | 019ca28c-e0bc-7173-93cf-9e9a5d69907d | 019ca290-f64e-7ec3-af8b-e40b506a35ab | 019ca293-884f-7f60-a890-28b762a5e691 | 019ca29d-b3e6-77a0-8c04-b8156f49dc79 | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-q6o7-implementation.md | rnoyzppv | pass | closed | 2026-02-28T05:06:11Z |
 | 6 | bd-r39f | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-r39f-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 | 7 | bd-jzxt | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-jzxt-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
 | 8 | bd-642h | planned |  |  |  |  | /Users/darin/src/personal/beads-rs/docs/plans/2026-02-28-bd-642h-implementation.md |  | pending | open | 2026-02-28T02:24:58Z |
@@ -73,3 +73,14 @@ planned | sanity_failed | sanity_passed | implementing | review_failed | review_
 | 2026-02-28T04:40:13Z | bd-ub8m | verification_completed | pass | controller ran fmt+dylint+clippy(-D warnings)+test successfully |
 | 2026-02-28T04:40:13Z | bd-ub8m | close_confirmed | ok | bd close executed and bd show reports status=closed; closed_count=4 |
 | 2026-02-28T04:40:13Z | campaign | maintenance | ok | cadence hit (4 closed): ran cargo clean && cargo check |
+| 2026-02-28T04:40:50Z | bd-q6o7 | bead_claimed | ok | bd claim succeeded; jj new created yvowyslv (bd-q6o7: start) |
+| 2026-02-28T04:45:18Z | bd-q6o7 | planner_completed | ok | plan saved to docs/plans/2026-02-28-bd-q6o7-implementation.md |
+| 2026-02-28T04:48:05Z | bd-q6o7 | sanity_completed | pass | explicit gap-state plan accepted; allocator next-seq non-commit guaranteed on gaps |
+| 2026-02-28T04:48:26Z | bd-q6o7 | implementer_started | ok | worker agent spawned for explicit gap-state replay cutover |
+| 2026-02-28T04:57:50Z | bd-q6o7 | implementer_completed | fail | full gate failed at repl::range::wal_range_reader_rejects_internal_gap; follow-up bead bd-x9uy filed |
+| 2026-02-28T04:59:15Z | bd-q6o7 | fix_applied | ok | updated repl range integration expectation to match hard-cutover rebuild gap rejection |
+| 2026-02-28T04:59:34Z | bd-q6o7 | reviewer_started | ok | reviewer agent spawned after integration expectation adjustment |
+| 2026-02-28T05:04:36Z | bd-q6o7 | reviewer_completed | pass | reviewer found no blocking correctness issues after test adjustment |
+| 2026-02-28T05:06:11Z | bd-q6o7 | verification_completed | pass | controller reran fmt+dylint+clippy(-D warnings)+test successfully |
+| 2026-02-28T05:06:11Z | bd-q6o7 | close_confirmed | ok | bd close executed and bd show reports status=closed; closed_count=5 |
+| 2026-02-28T05:06:11Z | bd-q6o7 | subagents_closed | ok | implementer/reviewer closed; planner/sanity already finalized |
