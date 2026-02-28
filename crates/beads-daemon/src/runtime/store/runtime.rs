@@ -17,11 +17,11 @@ use crate::broadcast::{BroadcasterLimits, EventBroadcaster};
 use crate::core::error::details as error_details;
 use crate::core::error::details::WalTailTruncatedDetails;
 use crate::core::{
-    ActorId, Applied, ApplyOutcome, CliErrorCode, ContentHash, Durable, ErrorCode, ErrorPayload,
-    HeadStatus, IntoErrorPayload, Limits, NamespaceId, NamespacePolicies, NamespacePolicy,
-    ProtocolErrorCode, ReplicaId, ReplicaRoster, ReplicaRosterError, SegmentId, StoreEpoch,
-    StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, StoreState, Transience, WatermarkError,
-    Watermarks, WriteStamp,
+    ActorId, Applied, ApplyOutcome, CanonicalState, CliErrorCode, ContentHash, Durable, ErrorCode,
+    ErrorPayload, HeadStatus, IntoErrorPayload, Limits, NamespaceId, NamespacePolicies,
+    NamespacePolicy, ProtocolErrorCode, ReplicaId, ReplicaRoster, ReplicaRosterError, SegmentId,
+    StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, StoreState, Transience,
+    WatermarkError, Watermarks, WriteStamp,
 };
 use crate::git::checkpoint::{
     CheckpointFileKind, CheckpointShardPath, CheckpointSnapshot, CheckpointSnapshotError,
@@ -85,6 +85,67 @@ pub struct StoreRuntime {
 pub struct StoreRuntimeOpen {
     pub runtime: StoreRuntime,
     pub replay_stats: ReplayStats,
+}
+
+pub(crate) fn checkpoint_dirty_paths_for_outcome(
+    namespace: &NamespaceId,
+    state: &CanonicalState,
+    outcome: &ApplyOutcome,
+) -> BTreeSet<CheckpointShardPath> {
+    let mut dirty = BTreeSet::new();
+    if outcome.changed_beads.is_empty()
+        && outcome.changed_deps.is_empty()
+        && outcome.changed_notes.is_empty()
+    {
+        return dirty;
+    }
+    for bead_id in &outcome.changed_beads {
+        if state.bead_view(bead_id).is_some() {
+            let shard = shard_for_bead(bead_id);
+            dirty.insert(CheckpointShardPath::new(
+                namespace.clone(),
+                CheckpointFileKind::State,
+                shard,
+            ));
+        }
+        if state.get_tombstone(bead_id).is_some() || state.has_collision_tombstone(bead_id) {
+            let tombstone_shard = shard_for_tombstone(bead_id);
+            dirty.insert(CheckpointShardPath::new(
+                namespace.clone(),
+                CheckpointFileKind::Tombstones,
+                tombstone_shard,
+            ));
+        }
+    }
+    for dep_key in &outcome.changed_deps {
+        let shard = shard_for_dep(dep_key.from(), dep_key.to(), dep_key.kind());
+        dirty.insert(CheckpointShardPath::new(
+            namespace.clone(),
+            CheckpointFileKind::Deps,
+            shard,
+        ));
+    }
+    for note_key in &outcome.changed_notes {
+        if state.bead_view(&note_key.bead_id).is_some() {
+            let shard = shard_for_bead(&note_key.bead_id);
+            dirty.insert(CheckpointShardPath::new(
+                namespace.clone(),
+                CheckpointFileKind::State,
+                shard,
+            ));
+        }
+        if state.get_tombstone(&note_key.bead_id).is_some()
+            || state.has_collision_tombstone(&note_key.bead_id)
+        {
+            let tombstone_shard = shard_for_tombstone(&note_key.bead_id);
+            dirty.insert(CheckpointShardPath::new(
+                namespace.clone(),
+                CheckpointFileKind::Tombstones,
+                tombstone_shard,
+            ));
+        }
+    }
+    dirty
 }
 
 impl StoreRuntime {
@@ -400,65 +461,25 @@ impl StoreRuntime {
         namespace: &NamespaceId,
         outcome: &ApplyOutcome,
     ) {
-        if outcome.changed_beads.is_empty()
-            && outcome.changed_deps.is_empty()
-            && outcome.changed_notes.is_empty()
-        {
-            return;
-        }
-        let dirty = self
-            .checkpoint_dirty_shards
-            .entry(namespace.clone())
-            .or_default();
         let Some(state) = self.state.get(namespace) else {
             return;
         };
-        for bead_id in &outcome.changed_beads {
-            if state.bead_view(bead_id).is_some() {
-                let shard = shard_for_bead(bead_id);
-                dirty.insert(CheckpointShardPath::new(
-                    namespace.clone(),
-                    CheckpointFileKind::State,
-                    shard,
-                ));
-            }
-            if state.get_tombstone(bead_id).is_some() || state.has_collision_tombstone(bead_id) {
-                let tombstone_shard = shard_for_tombstone(bead_id);
-                dirty.insert(CheckpointShardPath::new(
-                    namespace.clone(),
-                    CheckpointFileKind::Tombstones,
-                    tombstone_shard,
-                ));
-            }
+        let paths = checkpoint_dirty_paths_for_outcome(namespace, state, outcome);
+        self.record_checkpoint_dirty_paths(namespace, paths);
+    }
+
+    pub(crate) fn record_checkpoint_dirty_paths(
+        &mut self,
+        namespace: &NamespaceId,
+        paths: BTreeSet<CheckpointShardPath>,
+    ) {
+        if paths.is_empty() {
+            return;
         }
-        for dep_key in &outcome.changed_deps {
-            let shard = shard_for_dep(dep_key.from(), dep_key.to(), dep_key.kind());
-            dirty.insert(CheckpointShardPath::new(
-                namespace.clone(),
-                CheckpointFileKind::Deps,
-                shard,
-            ));
-        }
-        for note_key in &outcome.changed_notes {
-            if state.bead_view(&note_key.bead_id).is_some() {
-                let shard = shard_for_bead(&note_key.bead_id);
-                dirty.insert(CheckpointShardPath::new(
-                    namespace.clone(),
-                    CheckpointFileKind::State,
-                    shard,
-                ));
-            }
-            if state.get_tombstone(&note_key.bead_id).is_some()
-                || state.has_collision_tombstone(&note_key.bead_id)
-            {
-                let tombstone_shard = shard_for_tombstone(&note_key.bead_id);
-                dirty.insert(CheckpointShardPath::new(
-                    namespace.clone(),
-                    CheckpointFileKind::Tombstones,
-                    tombstone_shard,
-                ));
-            }
-        }
+        self.checkpoint_dirty_shards
+            .entry(namespace.clone())
+            .or_default()
+            .extend(paths);
     }
 
     pub(crate) fn commit_checkpoint_dirty_shards(&mut self, checkpoint_group: &str) {

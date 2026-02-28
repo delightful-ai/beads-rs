@@ -20,7 +20,7 @@ use housekeeping::ExportPending;
 #[cfg(any(test, feature = "test-harness"))]
 #[allow(unused_imports)]
 pub use helpers::insert_store_for_tests;
-pub use helpers::replay_event_wal;
+pub use helpers::{PendingReplayApply, ReplayApplyOutcome, replay_event_wal};
 pub(crate) use helpers::{detect_clock_skew, max_write_stamp};
 pub use loaded_store::LoadedStore;
 pub(crate) use read::{ReadGateStatus, ReadScope};
@@ -96,8 +96,8 @@ use crate::core::{
 };
 use crate::git::SyncError;
 use crate::git::checkpoint::{
-    CheckpointCache, CheckpointImport, IncludedHeads, import_checkpoint, merge_store_states,
-    policy_hash, roster_hash, store_state_from_legacy,
+    CheckpointCache, CheckpointImport, CheckpointShardPath, IncludedHeads, import_checkpoint,
+    merge_store_states, policy_hash, roster_hash, store_state_from_legacy,
 };
 
 const LOAD_TIMEOUT_SECS: u64 = 30;
@@ -415,9 +415,9 @@ mod tests {
     };
     use crate::git::checkpoint::{
         CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointFileKind, CheckpointImport,
-        CheckpointShardPath,
-        CheckpointSnapshotInput, CheckpointStoreMeta, IncludedWatermarks, build_snapshot,
-        export_checkpoint, policy_hash, publish_checkpoint, shard_for_bead, store_state_from_legacy,
+        CheckpointShardPath, CheckpointSnapshotInput, CheckpointStoreMeta, IncludedWatermarks,
+        build_snapshot, export_checkpoint, policy_hash, publish_checkpoint, shard_for_bead,
+        store_state_from_legacy,
     };
     use crate::runtime::OpResult;
     use crate::runtime::git_worker::LoadResult;

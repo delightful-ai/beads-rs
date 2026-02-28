@@ -243,19 +243,68 @@ pub(super) fn write_checkpoint_tree(
     outcome
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplayApplyOutcome {
+    pub replayed_any: bool,
+    pub max_write_stamp: Option<WriteStamp>,
+}
+
+/// ```compile_fail
+/// use beads_daemon::runtime::core::PendingReplayApply;
+///
+/// fn bypass_ack(pending: PendingReplayApply) {
+///     let _ = pending.state;
+/// }
+/// ```
+#[must_use = "must acknowledge replay checkpoint-dirty effects before using recovered replay state"]
+#[derive(Clone, Debug)]
+pub struct PendingReplayApply {
+    state: StoreState,
+    replayed_any: bool,
+    checkpoint_dirty_paths: BTreeMap<NamespaceId, std::collections::BTreeSet<CheckpointShardPath>>,
+}
+
+impl PendingReplayApply {
+    pub fn acknowledge_checkpoint_dirty(self, store: &mut StoreRuntime) -> ReplayApplyOutcome {
+        let PendingReplayApply {
+            state,
+            replayed_any,
+            checkpoint_dirty_paths,
+        } = self;
+        let max_write_stamp = state.max_write_stamp();
+        store.state = state;
+        for (namespace, paths) in checkpoint_dirty_paths {
+            store.record_checkpoint_dirty_paths(&namespace, paths);
+        }
+        ReplayApplyOutcome {
+            replayed_any,
+            max_write_stamp,
+        }
+    }
+}
+
 pub fn replay_event_wal(
     store_dir: &Path,
     wal_index: &dyn WalIndex,
-    state: &mut StoreState,
+    state: StoreState,
     limits: &Limits,
-) -> Result<bool, StoreRuntimeError> {
+) -> Result<PendingReplayApply, StoreRuntimeError> {
+    let mut state = state;
     let rows = wal_index.reader().load_watermarks()?;
     if rows.is_empty() {
-        return Ok(false);
+        return Ok(PendingReplayApply {
+            state,
+            replayed_any: false,
+            checkpoint_dirty_paths: BTreeMap::new(),
+        });
     }
 
     let mut segment_cache: HashMap<NamespaceId, HashMap<SegmentId, PathBuf>> = HashMap::new();
     let mut applied_any = false;
+    let mut checkpoint_dirty_paths: BTreeMap<
+        NamespaceId,
+        std::collections::BTreeSet<CheckpointShardPath>,
+    > = BTreeMap::new();
 
     for row in rows {
         if row.applied().seq().get() == 0 {
@@ -305,7 +354,7 @@ pub fn replay_event_wal(
                     )))
                 })?;
                 let event_body = load_event_body_at(segment_path, item.offset, limits)?;
-                apply_event(state_for_namespace, &event_body).map_err(|err| {
+                let outcome = apply_event(state_for_namespace, &event_body).map_err(|err| {
                     StoreRuntimeError::WalReplay(Box::new(WalReplayError::RecordDecode {
                         path: segment_path.clone(),
                         source: EventWalError::RecordHeaderInvalid {
@@ -313,13 +362,29 @@ pub fn replay_event_wal(
                         },
                     }))
                 })?;
+                let dirty_paths =
+                    crate::runtime::store::runtime::checkpoint_dirty_paths_for_outcome(
+                        &namespace,
+                        state_for_namespace,
+                        &outcome,
+                    );
+                if !dirty_paths.is_empty() {
+                    checkpoint_dirty_paths
+                        .entry(namespace.clone())
+                        .or_default()
+                        .extend(dirty_paths);
+                }
                 from_seq_excl = Seq0::new(seq);
                 applied_any = true;
             }
         }
     }
 
-    Ok(applied_any)
+    Ok(PendingReplayApply {
+        state,
+        replayed_any: applied_any,
+        checkpoint_dirty_paths,
+    })
 }
 
 pub(super) fn segment_paths_for_namespace(

@@ -217,32 +217,30 @@ impl Daemon {
             }
         }
 
-        let replayed_event_wal = {
+        let pending_replay = {
             let store_dir = self.layout().store_dir(&store_id);
             let store = self
                 .stores
                 .get(&store_id)
                 .expect("loaded store missing from state");
-            replay_event_wal(
-                &store_dir,
-                store.wal_index.as_ref(),
-                &mut state,
-                self.limits(),
-            )?
+            replay_event_wal(&store_dir, store.wal_index.as_ref(), state, self.limits())?
         };
-        if replayed_event_wal {
-            needs_sync = true;
-        }
 
-        if !checkpoint_imports.is_empty() {
+        {
             let store = self
                 .stores
                 .get_mut(&store_id)
                 .expect("loaded store missing from state");
-            apply_checkpoint_watermarks(store, &checkpoint_imports)?;
+            if !checkpoint_imports.is_empty() {
+                apply_checkpoint_watermarks(store, &checkpoint_imports)?;
+            }
+            let replay = pending_replay.acknowledge_checkpoint_dirty(store);
+            if replay.replayed_any {
+                needs_sync = true;
+            }
+            last_seen_stamp = max_write_stamp(last_seen_stamp, replay.max_write_stamp);
         }
 
-        last_seen_stamp = max_write_stamp(last_seen_stamp, state.max_write_stamp());
         if let Some(max_stamp) = last_seen_stamp.as_ref() {
             self.clock.receive(max_stamp);
         }
@@ -282,7 +280,6 @@ impl Daemon {
             .stores
             .get_mut(&store_id)
             .expect("loaded store missing from state");
-        store.state = state;
         self.git_lanes.insert(store_id, repo_state);
         if store.primary_remote != *remote {
             store.primary_remote = remote.clone();

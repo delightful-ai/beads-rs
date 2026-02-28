@@ -8,7 +8,8 @@ pub use crate::runtime::GitOp;
 
 pub mod core {
     pub use crate::runtime::core::{
-        Daemon, HandleOutcome, insert_store_for_tests, replay_event_wal,
+        Daemon, HandleOutcome, PendingReplayApply, ReplayApplyOutcome, insert_store_for_tests,
+        replay_event_wal,
     };
 }
 
