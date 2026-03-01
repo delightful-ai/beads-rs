@@ -1,8 +1,0 @@
-warning: `ReplayMode::CatchUp` in `replay_index` uses multiple transaction lifecycles
-  --> $DIR/replay.rs:LL:CC
-   |
-LL |             let mut frontier_txn = index.begin_txn();
-   |                                    ^^^^^^^^^^^^^^^^^
-   |
-   = help: keep catch-up rows/segments and frontier updates in one transaction with a single terminal commit
-

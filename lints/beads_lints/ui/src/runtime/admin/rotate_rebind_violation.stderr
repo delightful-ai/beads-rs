@@ -1,8 +1,0 @@
-warning: `admin_rotate_replica_id` returns success without reloading replication runtime after rotation
-  --> $DIR/rotate_rebind_violation.rs:LL:CC
-   |
-LL |         Response::ok()
-   |         ^^^^^^^^^^^^^^
-   |
-   = help: call `reload_replication_runtime(store_id)` after `rotate_replica_id` and before `Response::ok(...)`
-
