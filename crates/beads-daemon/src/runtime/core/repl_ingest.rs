@@ -190,19 +190,16 @@ impl Daemon {
         })?;
         let commit_watermarks =
             tip_watermark_pair(tip_seq, tip_sha).map_err(|err| wal_index_error_payload(&err))?;
-        atomic_txn
-            .commit_with_watermarks(commit_watermarks)
-            .map_err(|err| wal_index_error_payload(&err))?;
-
         let (remote, max_stamp, durable, applied) = {
             let mut max_stamp = git_lane.last_seen_stamp.clone();
+            let mut staged_namespace_state = store.state.get_or_default(&namespace);
+            let mut apply_outcomes = Vec::with_capacity(batch.len());
+            let mut broadcasts = Vec::with_capacity(batch.len());
+            let mut watermark_advances = Vec::with_capacity(batch.len());
             for (event, canonical_sha) in batch.events().iter().zip(canonical_shas.iter().copied())
             {
                 let apply_start = Instant::now();
-                let apply_result = {
-                    let state = store.state.ensure_namespace(namespace.clone());
-                    apply_event(state, &event.body)
-                };
+                let apply_result = apply_event(&mut staged_namespace_state, &event.body);
                 let outcome = match apply_result {
                     Ok(outcome) => {
                         metrics::apply_ok(apply_start.elapsed());
@@ -213,7 +210,7 @@ impl Daemon {
                         return Err(apply_event_error_payload(&namespace, &origin, err));
                     }
                 };
-                store.record_checkpoint_dirty_shards(&namespace, &outcome);
+                apply_outcomes.push(outcome);
 
                 let EventKindV1::TxnV1(txn_body) = &event.body.kind;
                 let stamp = WriteStamp::new(txn_body.hlc_max.physical_ms, txn_body.hlc_max.logical);
@@ -228,17 +225,33 @@ impl Daemon {
                     prev_sha,
                     event.bytes.clone().into(),
                 );
+                broadcasts.push(broadcast);
+                watermark_advances.push((event.body.origin_seq, canonical_sha.0));
+            }
+
+            atomic_txn
+                .commit_with_watermarks(commit_watermarks)
+                .map_err(|err| wal_index_error_payload(&err))?;
+
+            store
+                .state
+                .set_namespace_state(namespace.clone(), staged_namespace_state);
+            for outcome in &apply_outcomes {
+                store.record_checkpoint_dirty_shards(&namespace, outcome);
+            }
+            for broadcast in broadcasts {
                 if let Err(err) = store.broadcaster.publish(broadcast) {
                     tracing::warn!("event broadcast failed: {err}");
                 }
-
+            }
+            for (origin_seq, head_sha) in watermark_advances {
                 store
                     .watermarks_applied
-                    .advance_contiguous(&namespace, &origin, event.body.origin_seq, canonical_sha.0)
+                    .advance_contiguous(&namespace, &origin, origin_seq, head_sha)
                     .map_err(|err| watermark_error_payload(&namespace, &origin, err))?;
                 store
                     .watermarks_durable
-                    .advance_contiguous(&namespace, &origin, event.body.origin_seq, canonical_sha.0)
+                    .advance_contiguous(&namespace, &origin, origin_seq, head_sha)
                     .map_err(|err| watermark_error_payload(&namespace, &origin, err))?;
             }
 

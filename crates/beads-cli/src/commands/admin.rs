@@ -578,10 +578,18 @@ pub fn render_admin_reload_limits(out: &AdminReloadLimitsOutput) -> String {
 }
 
 pub fn render_admin_rotate_replica_id(out: &AdminRotateReplicaIdOutput) -> String {
-    format!(
+    let mut rendered = format!(
         "replica_id rotated: {} -> {}",
         out.old_replica_id, out.new_replica_id
-    )
+    );
+    if !out.replication_runtime_reloaded {
+        let reason = out
+            .replication_runtime_reload_error
+            .as_deref()
+            .unwrap_or("unknown");
+        rendered.push_str(&format!(" (replication runtime reload pending: {reason})"));
+    }
+    rendered
 }
 
 pub fn render_admin_maintenance(out: &AdminMaintenanceModeOutput) -> String {

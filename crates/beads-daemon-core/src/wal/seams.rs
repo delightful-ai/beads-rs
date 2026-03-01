@@ -9,6 +9,9 @@ use super::{
     AppendOutcome, EventWal, EventWalResult, VerifiedRecord, WalIndex, WalIndexError, WalIndexTxn,
 };
 
+// Intentionally modeled as an enum even with one active variant: follow-up
+// durability milestones will add non-sync-boundary effects and callers should
+// keep exhaustiveness at the type level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WalAppendDurabilityEffect {
     SyncBoundaryCrossed,

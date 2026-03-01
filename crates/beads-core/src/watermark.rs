@@ -203,10 +203,6 @@ impl WatermarkPair {
         applied: Watermark<Applied>,
         durable: Watermark<Durable>,
     ) -> Result<Self, WatermarkPairError> {
-        let applied = Watermark::new(applied.seq(), applied.head())
-            .map_err(WatermarkPairError::InvalidApplied)?;
-        let durable = Watermark::new(durable.seq(), durable.head())
-            .map_err(WatermarkPairError::InvalidDurable)?;
         if durable.seq() > applied.seq() {
             return Err(WatermarkPairError::DurableAhead {
                 durable: durable.seq(),
@@ -286,10 +282,6 @@ pub enum WatermarkError {
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum WatermarkPairError {
-    #[error("applied watermark invalid: {0}")]
-    InvalidApplied(WatermarkError),
-    #[error("durable watermark invalid: {0}")]
-    InvalidDurable(WatermarkError),
     #[error("durable watermark seq {durable} exceeds applied seq {applied}")]
     DurableAhead { durable: Seq0, applied: Seq0 },
     #[error(

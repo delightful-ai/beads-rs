@@ -325,6 +325,9 @@ pub fn fsck_store_dir(
                 options.repair,
             )?;
             builder.stats.records += result.records;
+            if result.quarantined {
+                continue;
+            }
             segment.file_len = result.final_file_len;
 
             segments_by_id.insert(segment.header.segment_id, segment.clone());
@@ -381,12 +384,21 @@ struct SegmentInfo {
 struct SegmentScanResult {
     records: usize,
     final_file_len: u64,
+    quarantined: bool,
 }
 
 const REPAIR_ACTION_PREFIX_SALVAGE_TRUNCATE: &str =
     "run `bd store fsck --repair` to salvage valid prefix and truncate corrupted suffix";
 const REPAIR_ACTION_QUARANTINE_NO_VALID_PREFIX: &str =
     "run `bd store fsck --repair` to quarantine segments with unreadable headers (no valid prefix)";
+
+fn suggested_scan_repair_action(offset: u64, header_len: u64) -> &'static str {
+    if offset > header_len {
+        REPAIR_ACTION_PREFIX_SALVAGE_TRUNCATE
+    } else {
+        REPAIR_ACTION_QUARANTINE_NO_VALID_PREFIX
+    }
+}
 
 fn scan_segment(
     segment: &SegmentInfo,
@@ -413,6 +425,7 @@ fn scan_segment(
     let mut offset = segment.header_len;
     let mut records = 0usize;
     let mut final_file_len = segment.file_len;
+    let mut quarantine_no_valid_prefix: Option<FsckEvidenceCode> = None;
 
     while offset < segment.file_len {
         let remaining = segment.file_len - offset;
@@ -430,15 +443,16 @@ fn scan_segment(
                     seq: None,
                     offset: Some(offset),
                 },
-                Some(REPAIR_ACTION_PREFIX_SALVAGE_TRUNCATE),
+                Some(suggested_scan_repair_action(offset, segment.header_len)),
             );
             if repair {
-                final_file_len = repair_prefix_salvage_truncate(
+                final_file_len = repair_prefix_salvage_or_quarantine(
                     &mut file,
                     segment,
                     offset,
                     FsckEvidenceCode::FrameTruncated,
                     builder,
+                    &mut quarantine_no_valid_prefix,
                 )?;
             }
             break;
@@ -470,15 +484,16 @@ fn scan_segment(
                     seq: None,
                     offset: Some(offset),
                 },
-                Some(REPAIR_ACTION_PREFIX_SALVAGE_TRUNCATE),
+                Some(suggested_scan_repair_action(offset, segment.header_len)),
             );
             if repair {
-                final_file_len = repair_prefix_salvage_truncate(
+                final_file_len = repair_prefix_salvage_or_quarantine(
                     &mut file,
                     segment,
                     offset,
                     FsckEvidenceCode::FrameHeaderInvalid,
                     builder,
+                    &mut quarantine_no_valid_prefix,
                 )?;
             }
             break;
@@ -498,15 +513,16 @@ fn scan_segment(
                     seq: None,
                     offset: Some(offset),
                 },
-                Some(REPAIR_ACTION_PREFIX_SALVAGE_TRUNCATE),
+                Some(suggested_scan_repair_action(offset, segment.header_len)),
             );
             if repair {
-                final_file_len = repair_prefix_salvage_truncate(
+                final_file_len = repair_prefix_salvage_or_quarantine(
                     &mut file,
                     segment,
                     offset,
                     FsckEvidenceCode::FrameTruncated,
                     builder,
+                    &mut quarantine_no_valid_prefix,
                 )?;
             }
             break;
@@ -533,15 +549,16 @@ fn scan_segment(
                     seq: None,
                     offset: Some(offset),
                 },
-                Some(REPAIR_ACTION_PREFIX_SALVAGE_TRUNCATE),
+                Some(suggested_scan_repair_action(offset, segment.header_len)),
             );
             if repair {
-                final_file_len = repair_prefix_salvage_truncate(
+                final_file_len = repair_prefix_salvage_or_quarantine(
                     &mut file,
                     segment,
                     offset,
                     FsckEvidenceCode::FrameCrcMismatch,
                     builder,
+                    &mut quarantine_no_valid_prefix,
                 )?;
             }
             break;
@@ -563,15 +580,16 @@ fn scan_segment(
                         seq: None,
                         offset: Some(offset),
                     },
-                    Some(REPAIR_ACTION_PREFIX_SALVAGE_TRUNCATE),
+                    Some(suggested_scan_repair_action(offset, segment.header_len)),
                 );
                 if repair {
-                    final_file_len = repair_prefix_salvage_truncate(
+                    final_file_len = repair_prefix_salvage_or_quarantine(
                         &mut file,
                         segment,
                         offset,
                         FsckEvidenceCode::RecordDecodeInvalid,
                         builder,
+                        &mut quarantine_no_valid_prefix,
                     )?;
                 }
                 break;
@@ -595,15 +613,16 @@ fn scan_segment(
                         seq: Some(header.origin_seq.get()),
                         offset: Some(offset),
                     },
-                    Some(REPAIR_ACTION_PREFIX_SALVAGE_TRUNCATE),
+                    Some(suggested_scan_repair_action(offset, segment.header_len)),
                 );
                 if repair {
-                    final_file_len = repair_prefix_salvage_truncate(
+                    final_file_len = repair_prefix_salvage_or_quarantine(
                         &mut file,
                         segment,
                         offset,
                         FsckEvidenceCode::RecordDecodeInvalid,
                         builder,
+                        &mut quarantine_no_valid_prefix,
                     )?;
                 }
                 break;
@@ -626,15 +645,16 @@ fn scan_segment(
                         seq: Some(header.origin_seq.get()),
                         offset: Some(offset),
                     },
-                    Some(REPAIR_ACTION_PREFIX_SALVAGE_TRUNCATE),
+                    Some(suggested_scan_repair_action(offset, segment.header_len)),
                 );
                 if repair {
-                    final_file_len = repair_prefix_salvage_truncate(
+                    final_file_len = repair_prefix_salvage_or_quarantine(
                         &mut file,
                         segment,
                         offset,
                         FsckEvidenceCode::RecordHeaderMismatch,
                         builder,
+                        &mut quarantine_no_valid_prefix,
                     )?;
                 }
                 break;
@@ -692,9 +712,22 @@ fn scan_segment(
         offset = offset.saturating_add(frame_len);
     }
 
+    let mut quarantined = false;
+    if repair && let Some(cause) = quarantine_no_valid_prefix {
+        drop(file);
+        let quarantined_path = quarantine_segment(&segment.path)?;
+        builder.repairs.push(FsckRepair::QuarantineNoValidPrefix {
+            original_segment_path: segment.path.clone(),
+            quarantined_path,
+            cause,
+        });
+        quarantined = true;
+    }
+
     Ok(SegmentScanResult {
         records,
         final_file_len,
+        quarantined,
     })
 }
 
@@ -1010,7 +1043,8 @@ fn list_segments(
                     },
                     Some(REPAIR_ACTION_QUARANTINE_NO_VALID_PREFIX),
                 );
-                if repair && let Ok(quarantined_path) = quarantine_segment(&path) {
+                if repair {
+                    let quarantined_path = quarantine_segment(&path)?;
                     builder.repairs.push(FsckRepair::QuarantineNoValidPrefix {
                         original_segment_path: path.clone(),
                         quarantined_path,
@@ -1600,6 +1634,21 @@ fn repair_prefix_salvage_truncate(
         cause,
     });
     Ok(truncate_to_offset)
+}
+
+fn repair_prefix_salvage_or_quarantine(
+    file: &mut std::fs::File,
+    segment: &SegmentInfo,
+    offset: u64,
+    cause: FsckEvidenceCode,
+    builder: &mut FsckReportBuilder,
+    quarantine_no_valid_prefix: &mut Option<FsckEvidenceCode>,
+) -> Result<u64, FsckError> {
+    if offset > segment.header_len {
+        return repair_prefix_salvage_truncate(file, segment, offset, cause, builder);
+    }
+    *quarantine_no_valid_prefix = Some(cause);
+    Ok(segment.file_len)
 }
 
 fn quarantine_segment(path: &Path) -> Result<PathBuf, FsckError> {

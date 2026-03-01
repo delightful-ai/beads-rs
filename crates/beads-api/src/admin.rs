@@ -448,6 +448,10 @@ pub struct AdminPolicyChange {
 pub struct AdminRotateReplicaIdOutput {
     pub old_replica_id: ReplicaId,
     pub new_replica_id: ReplicaId,
+    #[serde(default)]
+    pub replication_runtime_reloaded: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replication_runtime_reload_error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

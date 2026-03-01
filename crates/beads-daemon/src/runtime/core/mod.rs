@@ -427,13 +427,13 @@ mod tests {
 
     use crate::core::{
         ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, CanonicalState,
-        CheckpointContentSha256, Claim, ContentHash, Durable, EventBody, EventKindV1, HeadStatus,
-        HlcMax, Limits, Lww, NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, PrevVerified,
-        Priority, ReplicaDurabilityRole, ReplicaEntry, ReplicaId, ReplicaRoster, SegmentId, Seq0,
-        Seq1, Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions,
-        StoreState, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, VerifiedEvent, WallClock, Watermarks,
-        WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp, encode_event_body_canonical,
-        hash_event_body,
+        CheckpointContentSha256, Claim, ContentHash, DepKey, DepKind, Durable, EventBody,
+        EventKindV1, HeadStatus, HlcMax, Limits, Lww, NamespaceId, NamespacePolicy, NoteAppendV1,
+        NoteId, PrevVerified, Priority, ReplicaDurabilityRole, ReplicaEntry, ReplicaId,
+        ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity,
+        StoreMeta, StoreMetaVersions, StoreState, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, VerifiedEvent,
+        WallClock, Watermarks, WireBeadPatch, WireDepAddV1, WireDotV1, WireNoteV1, WireStamp,
+        Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
     };
     use crate::git::checkpoint::{
         CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointFileKind,
@@ -2315,7 +2315,14 @@ mod tests {
         let store_id = StoreId::new(Uuid::from_bytes([32u8; 16]));
         let store = StoreIdentity::new(store_id, StoreEpoch::ZERO);
         let now_ms = 1_700_000_000_000u64;
-        let event = verified_event_for_seq(store, &namespace, origin, 1, None);
+        let bead_id = BeadId::parse("bd-repl-failpoint").expect("bead id");
+        let mut patch = WireBeadPatch::new(bead_id.clone());
+        patch.title = Some("repl failpoint".to_string());
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
+            .expect("bead upsert op");
+        let event = verified_event_with_delta(store, &namespace, origin, 1, None, delta);
         let canonical_sha = hash_event_body(&event.bytes).0;
 
         let mut daemon = Daemon::new_with_limits(test_actor(), Limits::default());
@@ -2363,6 +2370,14 @@ mod tests {
                 .get(),
             0
         );
+        let failed_state = store_runtime
+            .state
+            .get(&namespace)
+            .expect("namespace state");
+        assert!(
+            failed_state.get_live(&bead_id).is_none(),
+            "state mutation must not survive failed durability commit"
+        );
 
         let retry_batch = ContiguousBatch::try_new(vec![event]).expect("contiguous batch");
         daemon
@@ -2397,6 +2412,142 @@ mod tests {
                 .get(),
             1
         );
+        let committed_state = store_runtime
+            .state
+            .get(&namespace)
+            .expect("namespace state");
+        assert!(committed_state.get_live(&bead_id).is_some());
+    }
+
+    #[test]
+    fn repl_ingest_apply_failure_does_not_commit_event_or_watermark() {
+        let tmp = TempStoreDir::new();
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([33u8; 16]));
+        let store_id = StoreId::new(Uuid::from_bytes([34u8; 16]));
+        let store = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+        let now_ms = 1_700_000_000_000u64;
+
+        let bead_a = BeadId::parse("bd-cycle-a").expect("bead a");
+        let bead_b = BeadId::parse("bd-cycle-b").expect("bead b");
+
+        let mut patch_a = WireBeadPatch::new(bead_a.clone());
+        patch_a.title = Some("a".to_string());
+        let mut patch_b = WireBeadPatch::new(bead_b.clone());
+        patch_b.title = Some("b".to_string());
+
+        let mut seed_delta = TxnDeltaV1::new();
+        seed_delta
+            .insert(TxnOpV1::BeadUpsert(Box::new(patch_a)))
+            .expect("seed patch a");
+        seed_delta
+            .insert(TxnOpV1::BeadUpsert(Box::new(patch_b)))
+            .expect("seed patch b");
+        let seed_event = verified_event_with_delta(store, &namespace, origin, 1, None, seed_delta);
+
+        let mut dep_ab_delta = TxnDeltaV1::new();
+        dep_ab_delta
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
+                key: DepKey::new(bead_a.clone(), bead_b.clone(), DepKind::Blocks)
+                    .expect("dep key a->b"),
+                dot: WireDotV1 {
+                    replica: origin,
+                    counter: 1,
+                },
+            }))
+            .expect("dep add a->b");
+        let dep_ab_event = verified_event_with_delta(
+            store,
+            &namespace,
+            origin,
+            2,
+            Some(seed_event.sha256),
+            dep_ab_delta,
+        );
+
+        let mut daemon = Daemon::new_with_limits(test_actor(), Limits::default());
+        let remote = test_remote();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo path");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let seed_batch =
+            ContiguousBatch::try_new(vec![seed_event, dep_ab_event.clone()]).expect("seed batch");
+        daemon
+            .ingest_remote_batch(session_token(&daemon, store_id), seed_batch, now_ms)
+            .expect("seed ingest should succeed");
+
+        let mut dep_ba_delta = TxnDeltaV1::new();
+        dep_ba_delta
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
+                key: DepKey::new(bead_b.clone(), bead_a.clone(), DepKind::Blocks)
+                    .expect("dep key b->a"),
+                dot: WireDotV1 {
+                    replica: origin,
+                    counter: 2,
+                },
+            }))
+            .expect("dep add b->a");
+        let failing_event = verified_event_with_delta(
+            store,
+            &namespace,
+            origin,
+            3,
+            Some(dep_ab_event.sha256),
+            dep_ba_delta,
+        );
+        let failing_batch = ContiguousBatch::try_new(vec![failing_event]).expect("failing batch");
+        let err = daemon
+            .ingest_remote_batch(session_token(&daemon, store_id), failing_batch, now_ms)
+            .expect_err("cycle should fail apply");
+        assert!(
+            !err.message.is_empty(),
+            "apply failure should return structured error payload"
+        );
+
+        let store_runtime = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store runtime")
+            .runtime();
+        let reader = store_runtime.wal_index.reader();
+        let failed_event_id = event_id_for(
+            origin,
+            namespace.clone(),
+            Seq1::from_u64(3).expect("failed origin seq"),
+        );
+        assert_eq!(
+            reader
+                .lookup_event_sha(&namespace, &failed_event_id)
+                .expect("lookup failed event"),
+            None
+        );
+        assert_eq!(
+            reader
+                .max_origin_seq(&namespace, &origin)
+                .expect("max origin seq")
+                .get(),
+            2
+        );
+        let watermark = reader
+            .load_watermarks()
+            .expect("load watermarks")
+            .into_iter()
+            .find(|row| row.namespace == namespace && row.origin == origin)
+            .expect("watermark row");
+        assert_eq!(watermark.applied_seq(), 2);
+        assert_eq!(watermark.durable_seq(), 2);
+
+        let state = store_runtime
+            .state
+            .get(&namespace)
+            .expect("namespace state");
+        assert!(state.dep_contains(
+            &DepKey::new(bead_a.clone(), bead_b.clone(), DepKind::Blocks).expect("dep key a->b")
+        ));
+        assert!(!state.dep_contains(
+            &DepKey::new(bead_b.clone(), bead_a.clone(), DepKind::Blocks).expect("dep key b->a")
+        ));
     }
 
     #[test]

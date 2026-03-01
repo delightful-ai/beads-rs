@@ -519,13 +519,26 @@ impl Daemon {
         );
         drop(proof);
 
-        if let Err(err) = self.reload_replication_runtime(store_id) {
-            return Response::err_from(err);
-        }
+        let (replication_runtime_reloaded, replication_runtime_reload_error) =
+            match self.reload_replication_runtime(store_id) {
+                Ok(()) => (true, None),
+                Err(err) => {
+                    tracing::warn!(
+                        store_id = %store_id,
+                        old_replica_id = %rotation.old_replica_id,
+                        new_replica_id = %rotation.new_replica_id,
+                        error = ?err,
+                        "replica_id rotation persisted but replication runtime reload failed"
+                    );
+                    (false, Some(err.to_string()))
+                }
+            };
 
         let output = AdminRotateReplicaIdOutput {
             old_replica_id: rotation.old_replica_id,
             new_replica_id: rotation.new_replica_id,
+            replication_runtime_reloaded,
+            replication_runtime_reload_error,
         };
         Response::ok(ResponsePayload::query(QueryResult::AdminRotateReplicaId(
             output,
