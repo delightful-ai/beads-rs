@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use git2::Repository;
+use thiserror::Error;
 
 use super::{
     CheckpointCache, CheckpointImport, ContentHash, Daemon, StoreId, checkpoint_ref_oid,
@@ -8,15 +9,63 @@ use super::{
 };
 use crate::runtime::checkpoint_scheduler::CheckpointGroupSnapshot;
 
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub(super) enum CheckpointCompatibilityError {
+    #[error(
+        "checkpoint policy hash mismatch for group {checkpoint_group}: local={local_policy_hash:?} checkpoint={checkpoint_policy_hash}"
+    )]
+    PolicyHashMismatch {
+        checkpoint_group: String,
+        local_policy_hash: Option<ContentHash>,
+        checkpoint_policy_hash: ContentHash,
+    },
+    #[error(
+        "checkpoint roster hash mismatch for group {checkpoint_group}: local={local_roster_hash:?} checkpoint={checkpoint_roster_hash}"
+    )]
+    RosterHashMismatch {
+        checkpoint_group: String,
+        local_roster_hash: Option<ContentHash>,
+        checkpoint_roster_hash: ContentHash,
+    },
+}
+
+fn ensure_checkpoint_compatible(
+    import: &CheckpointImport,
+    local_policy_hash: Option<ContentHash>,
+    local_roster_hash: Option<ContentHash>,
+) -> Result<(), CheckpointCompatibilityError> {
+    if let Some(local_policy_hash) = local_policy_hash
+        && import.policy_hash != local_policy_hash
+    {
+        return Err(CheckpointCompatibilityError::PolicyHashMismatch {
+            checkpoint_group: import.checkpoint_group.clone(),
+            local_policy_hash: Some(local_policy_hash),
+            checkpoint_policy_hash: import.policy_hash,
+        });
+    }
+
+    if let Some(checkpoint_roster_hash) = import.roster_hash
+        && Some(checkpoint_roster_hash) != local_roster_hash
+    {
+        return Err(CheckpointCompatibilityError::RosterHashMismatch {
+            checkpoint_group: import.checkpoint_group.clone(),
+            local_roster_hash,
+            checkpoint_roster_hash,
+        });
+    }
+
+    Ok(())
+}
+
 impl Daemon {
     pub(super) fn load_checkpoint_imports(
         &self,
         store_id: StoreId,
         repo: &Path,
-    ) -> Vec<CheckpointImport> {
+    ) -> Result<Vec<CheckpointImport>, CheckpointCompatibilityError> {
         let groups = self.checkpoint_group_snapshots(store_id);
         if groups.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         let local_policy_hash = self.local_policy_hash(store_id);
@@ -38,33 +87,23 @@ impl Daemon {
         let mut imports = Vec::new();
         for group in groups {
             if let Some(import) = self.import_checkpoint_from_cache(store_id, &group) {
-                self.warn_on_checkpoint_hash_mismatch(
-                    store_id,
-                    &import,
-                    local_policy_hash,
-                    local_roster_hash,
-                );
+                ensure_checkpoint_compatible(&import, local_policy_hash, local_roster_hash)?;
                 imports.push(import);
                 continue;
             }
             if let Some(repo) = repo_handle.as_ref()
                 && let Some(import) = self.import_checkpoint_from_git(repo, &group)
             {
-                self.warn_on_checkpoint_hash_mismatch(
-                    store_id,
-                    &import,
-                    local_policy_hash,
-                    local_roster_hash,
-                );
+                ensure_checkpoint_compatible(&import, local_policy_hash, local_roster_hash)?;
                 imports.push(import);
             }
         }
 
-        imports
+        Ok(imports)
     }
 
     fn local_policy_hash(&self, store_id: StoreId) -> Option<ContentHash> {
-        let store = self.stores.get(&store_id)?;
+        let store = self.store_sessions.get(&store_id)?.runtime();
         match policy_hash(&store.policies) {
             Ok(hash) => Some(hash),
             Err(err) => {
@@ -102,40 +141,6 @@ impl Daemon {
                 );
                 None
             }
-        }
-    }
-
-    pub(super) fn warn_on_checkpoint_hash_mismatch(
-        &self,
-        store_id: StoreId,
-        import: &CheckpointImport,
-        local_policy_hash: Option<ContentHash>,
-        local_roster_hash: Option<ContentHash>,
-    ) {
-        if let Some(local_policy_hash) = local_policy_hash
-            && import.policy_hash != local_policy_hash
-        {
-            let checkpoint_policy_hash = import.policy_hash.to_hex();
-            let local_policy_hash = local_policy_hash.to_hex();
-            tracing::warn!(
-                store_id = %store_id,
-                checkpoint_group = %import.checkpoint_group,
-                local_policy_hash = %local_policy_hash,
-                checkpoint_policy_hash = %checkpoint_policy_hash,
-                "checkpoint policy hash mismatch"
-            );
-        }
-
-        if import.roster_hash.is_some() && import.roster_hash != local_roster_hash {
-            let checkpoint_roster_hash = import.roster_hash.map(|hash| hash.to_hex());
-            let local_roster_hash = local_roster_hash.map(|hash| hash.to_hex());
-            tracing::warn!(
-                store_id = %store_id,
-                checkpoint_group = %import.checkpoint_group,
-                local_roster_hash = ?local_roster_hash,
-                checkpoint_roster_hash = ?checkpoint_roster_hash,
-                "checkpoint roster hash mismatch"
-            );
         }
     }
 

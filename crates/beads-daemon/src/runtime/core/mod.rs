@@ -13,6 +13,7 @@ mod repl_ingest;
 mod replication;
 mod repo_access;
 mod repo_load;
+mod store_session;
 
 use helpers::*;
 use housekeeping::ExportPending;
@@ -20,10 +21,11 @@ use housekeeping::ExportPending;
 #[cfg(any(test, feature = "test-harness"))]
 #[allow(unused_imports)]
 pub use helpers::insert_store_for_tests;
-pub use helpers::replay_event_wal;
+pub use helpers::{PendingReplayApply, ReplayApplyOutcome, replay_event_wal};
 pub(crate) use helpers::{detect_clock_skew, max_write_stamp};
-pub use loaded_store::LoadedStore;
+pub(crate) use loaded_store::LoadedStore;
 pub(crate) use read::{ReadGateStatus, ReadScope};
+pub(crate) use store_session::{StoreGeneration, StoreSession, StoreSessionToken};
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
@@ -52,11 +54,13 @@ use super::repl::{
 };
 #[cfg(any(test, feature = "test-harness"))]
 use super::store::discovery::{StoreIdResolution, StoreIdSource};
-use super::store::runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
+use super::store::runtime::{
+    ReplicationRuntimeVersion, StoreRuntime, StoreRuntimeError, load_replica_roster,
+};
 use super::store::{ResolvedStore, StoreCaches};
 use super::wal::{
     EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof, SegmentRow, VerifiedRecord,
-    WalAppend, WalIndex, WalIndexError, WalIndexTxnProvider, WalReplayError, open_segment_reader,
+    WalAppend, WalIndex, WalIndexError, WalReplayError, open_segment_reader,
 };
 use crate::broadcast::BroadcastEvent;
 use crate::config::{
@@ -96,8 +100,8 @@ use crate::core::{
 };
 use crate::git::SyncError;
 use crate::git::checkpoint::{
-    CheckpointCache, CheckpointImport, IncludedHeads, import_checkpoint, merge_store_states,
-    policy_hash, roster_hash, store_state_from_legacy,
+    CheckpointCache, CheckpointImport, CheckpointShardPath, IncludedHeads, import_checkpoint,
+    merge_store_states, policy_hash, roster_hash, store_state_from_legacy,
 };
 
 const LOAD_TIMEOUT_SECS: u64 = 30;
@@ -131,10 +135,10 @@ pub struct Daemon {
     /// Filesystem layout injected by the host crate.
     layout: DaemonLayout,
 
-    /// Per-store runtime, keyed by StoreId.
-    stores: BTreeMap<StoreId, StoreRuntime>,
-    /// Per-store git/checkpoint lane state, keyed by StoreId.
-    git_lanes: BTreeMap<StoreId, GitLaneState>,
+    /// Generation-scoped per-store session state keyed by StoreId.
+    store_sessions: BTreeMap<StoreId, StoreSession>,
+    /// Monotonic generation allocator for `StoreSessionToken`.
+    next_store_generation: u64,
     /// Store discovery caches.
     store_caches: StoreCaches,
 
@@ -172,19 +176,21 @@ pub struct Daemon {
     /// Replication ingest channel (set by run_state_loop).
     repl_ingest_tx: Option<Sender<ReplIngestRequest>>,
 
-    /// Replication runtime handles per store.
-    repl_handles: BTreeMap<StoreId, ReplicationHandles>,
-
     /// Shutdown gate to stop accepting new mutations.
     shutting_down: bool,
 }
 
-struct ReplicationHandles {
+pub(crate) struct ReplicationHandles {
+    runtime_version: ReplicationRuntimeVersion,
     manager: Option<ReplicationManagerHandle>,
     server: Option<ReplicationServerHandle>,
 }
 
 impl ReplicationHandles {
+    fn runtime_version(&self) -> ReplicationRuntimeVersion {
+        self.runtime_version
+    }
+
     fn shutdown(self) {
         if let Some(handle) = self.manager {
             handle.shutdown();
@@ -234,8 +240,8 @@ impl Daemon {
 
         Daemon {
             layout,
-            stores: BTreeMap::new(),
-            git_lanes: BTreeMap::new(),
+            store_sessions: BTreeMap::new(),
+            next_store_generation: 1,
             store_caches: StoreCaches::new(),
             clock: Clock::new_with_max_forward_drift(limits.hlc_max_forward_drift_ms),
             actor_clocks: BTreeMap::new(),
@@ -253,7 +259,6 @@ impl Daemon {
             checkpoint_groups: config.checkpoint_groups,
             namespace_defaults: config.namespace_defaults,
             repl_ingest_tx: None,
-            repl_handles: BTreeMap::new(),
             shutting_down: false,
         }
     }
@@ -300,11 +305,11 @@ impl Daemon {
         self.checkpoint_scheduler
             .set_max_queue_per_store(limits.max_checkpoint_job_queue);
 
-        for store in self.stores.values_mut() {
-            store.reload_limits(&limits);
+        for session in self.store_sessions.values_mut() {
+            session.runtime_mut().reload_limits(&limits);
         }
 
-        let store_ids: Vec<StoreId> = self.stores.keys().copied().collect();
+        let store_ids: Vec<StoreId> = self.store_sessions.keys().copied().collect();
         for store_id in store_ids {
             self.reload_replication_runtime(store_id)?;
         }
@@ -329,6 +334,23 @@ impl Daemon {
 
     pub(crate) fn set_repl_ingest_tx(&mut self, tx: Sender<ReplIngestRequest>) {
         self.repl_ingest_tx = Some(tx);
+    }
+
+    fn alloc_store_session_token(&mut self, store_id: StoreId) -> StoreSessionToken {
+        let generation = StoreGeneration::new(self.next_store_generation);
+        self.next_store_generation = self.next_store_generation.saturating_add(1);
+        StoreSessionToken::new(store_id, generation)
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn session_token_for_store(&self, store_id: StoreId) -> Option<StoreSessionToken> {
+        self.store_sessions.get(&store_id).map(StoreSession::token)
+    }
+
+    pub(crate) fn session_matches(&self, token: StoreSessionToken) -> bool {
+        self.store_sessions
+            .get(&token.store_id())
+            .is_some_and(|session| session.token() == token)
     }
 
     /// Get mutable clock for the daemon actor.
@@ -356,9 +378,9 @@ impl Daemon {
     }
 
     fn ipc_inflight_total(&self) -> usize {
-        self.stores
+        self.store_sessions
             .values()
-            .map(|store| store.admission.ipc_inflight())
+            .map(|session| session.runtime().admission.ipc_inflight())
             .sum()
     }
 
@@ -371,12 +393,16 @@ impl Daemon {
 
     /// Get iterator over all stores.
     pub fn repos(&self) -> impl Iterator<Item = (&StoreId, &GitLaneState)> {
-        self.git_lanes.iter()
+        self.store_sessions
+            .iter()
+            .map(|(store_id, session)| (store_id, session.lane()))
     }
 
     /// Get mutable iterator over all stores.
     pub fn repos_mut(&mut self) -> impl Iterator<Item = (&StoreId, &mut GitLaneState)> {
-        self.git_lanes.iter_mut()
+        self.store_sessions
+            .iter_mut()
+            .map(|(store_id, session)| (store_id, session.lane_mut()))
     }
 }
 
@@ -391,31 +417,29 @@ mod tests {
     use crate::runtime::store::discovery::store_id_from_remote;
     use beads_api::QueryResult;
     use std::collections::BTreeMap;
-    use std::io::Write;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
-    use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
-    use git2::Repository;
-    use tracing::{Dispatch, Level};
-    use tracing_subscriber::fmt::MakeWriter;
+    use git2::{Oid, Repository};
     use uuid::Uuid;
 
     use crate::core::{
         ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, CanonicalState,
-        Claim, ContentHash, Durable, EventBody, EventKindV1, HeadStatus, HlcMax, Limits, Lww,
-        NamespaceId, NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority,
-        ReplicaDurabilityRole, ReplicaEntry, ReplicaId, ReplicaRoster, SegmentId, Seq0, Seq1,
-        Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions,
-        TxnDeltaV1, TxnId, TxnOpV1, TxnV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch,
-        WireNoteV1, WireStamp, Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
+        CheckpointContentSha256, Claim, ContentHash, DepKey, DepKind, Durable, EventBody,
+        EventKindV1, HeadStatus, HlcMax, Limits, Lww, NamespaceId, NamespacePolicy, NoteAppendV1,
+        NoteId, PrevVerified, Priority, ReplicaDurabilityRole, ReplicaEntry, ReplicaId,
+        ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity,
+        StoreMeta, StoreMetaVersions, StoreState, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, VerifiedEvent,
+        WallClock, Watermarks, WireBeadPatch, WireDepAddV1, WireDotV1, WireNoteV1, WireStamp,
+        Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
     };
     use crate::git::checkpoint::{
-        CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointImport,
-        CheckpointSnapshotInput, CheckpointStoreMeta, IncludedWatermarks, build_snapshot,
-        export_checkpoint, policy_hash, publish_checkpoint, store_state_from_legacy,
+        CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointFileKind,
+        CheckpointPublishOutcome, CheckpointShardPath, CheckpointSnapshotInput,
+        CheckpointStoreMeta, build_snapshot, export_checkpoint, policy_hash, publish_checkpoint,
+        shard_for_bead, store_state_from_legacy,
     };
     use crate::runtime::OpResult;
     use crate::runtime::git_worker::LoadResult;
@@ -431,39 +455,6 @@ mod tests {
 
     fn test_remote() -> RemoteUrl {
         RemoteUrl::new("example.com/test/repo")
-    }
-
-    #[derive(Clone)]
-    struct TestWriter {
-        buffer: Arc<Mutex<Vec<u8>>>,
-    }
-
-    struct TestWriterGuard {
-        buffer: Arc<Mutex<Vec<u8>>>,
-    }
-
-    impl<'a> MakeWriter<'a> for TestWriter {
-        type Writer = TestWriterGuard;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            TestWriterGuard {
-                buffer: self.buffer.clone(),
-            }
-        }
-    }
-
-    impl Write for TestWriterGuard {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.buffer
-                .lock()
-                .expect("log buffer")
-                .extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
     }
 
     struct TempStoreDir {
@@ -513,9 +504,27 @@ mod tests {
             remote.clone(),
             StoreIdResolution::unverified(store_id, StoreIdSource::RemoteFallback),
         );
-        daemon.stores.insert(store_id, runtime);
-        daemon.git_lanes.insert(store_id, GitLaneState::new());
+        let token = daemon.alloc_store_session_token(store_id);
+        daemon.store_sessions.insert(
+            store_id,
+            StoreSession::new(token, runtime, GitLaneState::new()),
+        );
         store_id
+    }
+
+    fn session_token(daemon: &Daemon, store_id: StoreId) -> StoreSessionToken {
+        daemon
+            .session_token_for_store(store_id)
+            .expect("store session token")
+    }
+
+    fn bound_repl_runtime_version(daemon: &Daemon, store_id: StoreId) -> ReplicationRuntimeVersion {
+        daemon
+            .store_sessions
+            .get(&store_id)
+            .and_then(StoreSession::repl_handles)
+            .map(ReplicationHandles::runtime_version)
+            .expect("replication runtime handles")
     }
 
     #[test]
@@ -580,8 +589,8 @@ mod tests {
         worker.join().expect("worker join");
 
         assert!(matches!(err, OpError::RepoNotInitialized(path) if path == repo_path));
-        assert!(!daemon.stores.contains_key(&store_id));
-        assert!(!daemon.git_lanes.contains_key(&store_id));
+        assert!(!daemon.store_sessions.contains_key(&store_id));
+        assert!(!daemon.store_sessions.contains_key(&store_id));
         assert!(daemon.export_pending.get(&store_id).is_none());
         assert!(!daemon.scheduler.is_pending(&remote));
         assert!(
@@ -607,9 +616,10 @@ mod tests {
         assert!(daemon.export_pending.get(&store_id).is_none());
 
         daemon
-            .git_lanes
+            .store_sessions
             .get_mut(&store_id)
-            .expect("lane")
+            .expect("store session")
+            .lane_mut()
             .mark_loaded_from_git();
         daemon.export_go_compat(store_id, &remote);
 
@@ -657,46 +667,6 @@ mod tests {
             .expect("read lock meta")
             .expect("lock meta");
         assert_eq!(after.last_heartbeat_ms, Some(now_ms));
-    }
-
-    #[test]
-    fn checkpoint_roster_hash_mismatch_warns() {
-        let _tmp = test_store_dir();
-        let daemon = Daemon::new_with_limits(test_actor(), Limits::default());
-        let store_id = StoreId::new(Uuid::from_bytes([99u8; 16]));
-        let import = CheckpointImport {
-            checkpoint_group: "core".to_string(),
-            policy_hash: ContentHash::from_bytes([1u8; 32]),
-            roster_hash: Some(ContentHash::from_bytes([2u8; 32])),
-            state: StoreState::new(),
-            included: IncludedWatermarks::new(),
-            included_heads: None,
-        };
-        let local_policy_hash = Some(ContentHash::from_bytes([1u8; 32]));
-        let local_roster_hash = Some(ContentHash::from_bytes([3u8; 32]));
-
-        let buffer = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(TestWriter {
-                buffer: buffer.clone(),
-            })
-            .with_max_level(Level::WARN)
-            .with_ansi(false)
-            .finish();
-
-        let dispatch = Dispatch::new(subscriber);
-        tracing::dispatcher::with_default(&dispatch, || {
-            daemon.warn_on_checkpoint_hash_mismatch(
-                store_id,
-                &import,
-                local_policy_hash,
-                local_roster_hash,
-            );
-        });
-
-        let logs =
-            String::from_utf8(buffer.lock().expect("log buffer").clone()).expect("utf8 logs");
-        assert!(logs.contains("checkpoint roster hash mismatch"));
     }
 
     #[cfg(unix)]
@@ -794,7 +764,7 @@ mod tests {
         let remote = RemoteUrl::new("example.com/test/repo");
         insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
 
-        let lane = daemon.git_lanes.get(&store_id).expect("lane");
+        let lane = daemon.store_sessions.get(&store_id).expect("lane").lane();
         assert!(lane.is_loaded_from_git());
     }
 
@@ -908,7 +878,11 @@ mod tests {
         // Manually insert a repo in refresh_in_progress state
         let mut repo_state = GitLaneState::new();
         repo_state.refresh_in_progress = true;
-        daemon.git_lanes.insert(store_id, repo_state);
+        *daemon
+            .store_sessions
+            .get_mut(&store_id)
+            .expect("store session")
+            .lane_mut() = repo_state;
 
         // Complete refresh with success
         let result = Ok(LoadResult {
@@ -920,9 +894,9 @@ mod tests {
             divergence: None,
             force_push: None,
         });
-        daemon.complete_refresh(&remote, result);
+        daemon.complete_refresh(session_token(&daemon, store_id), &remote, result);
 
-        let repo_state = daemon.git_lanes.get(&store_id).unwrap();
+        let repo_state = daemon.store_sessions.get(&store_id).unwrap().lane();
         assert!(!repo_state.refresh_in_progress);
         assert!(repo_state.last_refresh.is_some());
     }
@@ -968,9 +942,10 @@ mod tests {
         let store_id = insert_store(&mut daemon, &remote);
         let namespace = NamespaceId::core();
         let origin = daemon
-            .stores
+            .store_sessions
             .get(&store_id)
-            .expect("store runtime")
+            .expect("store session")
+            .runtime()
             .meta
             .replica_id;
         let proof = daemon.loaded_store(store_id, remote.clone());
@@ -1034,7 +1009,11 @@ mod tests {
         }
 
         drop(proof);
-        let runtime = daemon.stores.get_mut(&store_id).expect("store runtime");
+        let runtime = daemon
+            .store_sessions
+            .get_mut(&store_id)
+            .expect("store runtime")
+            .runtime_mut();
         runtime
             .watermarks_applied
             .observe_at_least(
@@ -1066,13 +1045,17 @@ mod tests {
 
         let mut repo_state = GitLaneState::new();
         repo_state.refresh_in_progress = true;
-        daemon.git_lanes.insert(store_id, repo_state);
+        *daemon
+            .store_sessions
+            .get_mut(&store_id)
+            .expect("store session")
+            .lane_mut() = repo_state;
 
         // Complete refresh with error
         let result = Err(SyncError::NoLocalRef("/test".to_string()));
-        daemon.complete_refresh(&remote, result);
+        daemon.complete_refresh(session_token(&daemon, store_id), &remote, result);
 
-        let repo_state = daemon.git_lanes.get(&store_id).unwrap();
+        let repo_state = daemon.store_sessions.get(&store_id).unwrap().lane();
         assert!(!repo_state.refresh_in_progress);
         // last_refresh should NOT be updated on error
         assert!(repo_state.last_refresh.is_none());
@@ -1088,7 +1071,11 @@ mod tests {
         let mut repo_state = GitLaneState::new();
         repo_state.refresh_in_progress = true;
         repo_state.dirty = false; // Clean state
-        daemon.git_lanes.insert(store_id, repo_state);
+        *daemon
+            .store_sessions
+            .get_mut(&store_id)
+            .expect("store session")
+            .lane_mut() = repo_state;
 
         // Create fresh state with some content
         let fresh_state = CanonicalState::new();
@@ -1101,9 +1088,9 @@ mod tests {
             divergence: None,
             force_push: None,
         });
-        daemon.complete_refresh(&remote, result);
+        daemon.complete_refresh(session_token(&daemon, store_id), &remote, result);
 
-        let repo_state = daemon.git_lanes.get(&store_id).unwrap();
+        let repo_state = daemon.store_sessions.get(&store_id).unwrap().lane();
         assert_eq!(
             repo_state.root_slug,
             Some(BeadSlug::parse("fresh-slug").unwrap())
@@ -1121,7 +1108,11 @@ mod tests {
         repo_state.refresh_in_progress = true;
         repo_state.dirty = true; // Dirty - mutations happened during refresh
         repo_state.root_slug = Some(BeadSlug::parse("original-slug").unwrap());
-        daemon.git_lanes.insert(store_id, repo_state);
+        *daemon
+            .store_sessions
+            .get_mut(&store_id)
+            .expect("store session")
+            .lane_mut() = repo_state;
 
         // Try to apply refresh
         let result = Ok(LoadResult {
@@ -1133,9 +1124,9 @@ mod tests {
             divergence: None,
             force_push: None,
         });
-        daemon.complete_refresh(&remote, result);
+        daemon.complete_refresh(session_token(&daemon, store_id), &remote, result);
 
-        let repo_state = daemon.git_lanes.get(&store_id).unwrap();
+        let repo_state = daemon.store_sessions.get(&store_id).unwrap().lane();
         // Should keep original slug since dirty
         assert_eq!(
             repo_state.root_slug,
@@ -1155,7 +1146,11 @@ mod tests {
         let mut repo_state = GitLaneState::new();
         repo_state.refresh_in_progress = true;
         repo_state.dirty = false;
-        daemon.git_lanes.insert(store_id, repo_state);
+        *daemon
+            .store_sessions
+            .get_mut(&store_id)
+            .expect("store session")
+            .lane_mut() = repo_state;
 
         // Refresh shows local has changes remote doesn't
         let result = Ok(LoadResult {
@@ -1167,9 +1162,9 @@ mod tests {
             divergence: None,
             force_push: None,
         });
-        daemon.complete_refresh(&remote, result);
+        daemon.complete_refresh(session_token(&daemon, store_id), &remote, result);
 
-        let repo_state = daemon.git_lanes.get(&store_id).unwrap();
+        let repo_state = daemon.store_sessions.get(&store_id).unwrap().lane();
         // Should mark dirty to trigger sync
         assert!(repo_state.dirty);
         // And scheduler should have it pending
@@ -1181,6 +1176,7 @@ mod tests {
         let _tmp = test_store_dir();
         let mut daemon = Daemon::new(test_actor());
         let unknown = RemoteUrl::new("unknown.com/repo");
+        let token = StoreSessionToken::new(StoreId::new(Uuid::nil()), StoreGeneration::new(0));
 
         // Should not panic on unknown remote
         let result = Ok(LoadResult {
@@ -1192,9 +1188,564 @@ mod tests {
             divergence: None,
             force_push: None,
         });
-        daemon.complete_refresh(&unknown, result);
+        daemon.complete_refresh(token, &unknown, result);
         // Just verify no panic and daemon is still valid
-        assert!(daemon.stores.is_empty());
+        assert!(daemon.store_sessions.is_empty());
+    }
+
+    #[test]
+    fn reload_invalidates_generation_atomically_and_rejects_stale_handles() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("insert store");
+
+        let token_v1 = session_token(&daemon, store_id);
+        daemon.drop_store_state(store_id);
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("reload store");
+        let token_v2 = session_token(&daemon, store_id);
+        assert_ne!(token_v1, token_v2);
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("bind replication runtime");
+        let runtime_version = bound_repl_runtime_version(&daemon, store_id);
+
+        {
+            let mut loaded = daemon.loaded_store(store_id, remote.clone());
+            let lane = loaded.lane_mut();
+            lane.refresh_in_progress = true;
+            lane.root_slug = Some(BeadSlug::parse("fresh-slug").expect("slug"));
+        }
+        let lane_before = {
+            let loaded = daemon.loaded_store(store_id, remote.clone());
+            (
+                loaded.lane().refresh_in_progress,
+                loaded.lane().root_slug.clone(),
+            )
+        };
+
+        let stale_refresh = Ok(LoadResult {
+            state: CanonicalState::new(),
+            root_slug: Some(BeadSlug::parse("stale-slug").expect("slug")),
+            needs_sync: true,
+            last_seen_stamp: None,
+            fetch_error: None,
+            divergence: None,
+            force_push: None,
+        });
+        daemon.complete_refresh(token_v1, &remote, stale_refresh);
+
+        let loaded = daemon.loaded_store(store_id, remote.clone());
+        assert_eq!(loaded.lane().refresh_in_progress, lane_before.0);
+        assert_eq!(loaded.lane().root_slug, lane_before.1);
+        drop(loaded);
+
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([90u8; 16]));
+        let store = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+        let bead_id = BeadId::parse("bd-stale-repl").expect("bead id");
+        let mut patch = WireBeadPatch::new(bead_id.clone());
+        patch.title = Some("replicated".to_string());
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
+            .expect("delta insert");
+        let event = verified_event_with_delta(store, &namespace, origin, 1, None, delta);
+        let batch = ContiguousBatch::try_new(vec![event]).expect("batch");
+        let now_ms = 1_700_000_000_000u64;
+
+        let (stale_tx, stale_rx) = crossbeam::channel::bounded(1);
+        daemon.handle_repl_ingest(ReplIngestRequest {
+            session: token_v1,
+            runtime_version,
+            batch: batch.clone(),
+            now_ms,
+            respond: stale_tx,
+        });
+        let stale = stale_rx.recv().expect("stale response");
+        match stale {
+            Ok(_) => panic!("stale ingest unexpectedly succeeded"),
+            Err(err) => assert!(err.retryable),
+        }
+
+        let (fresh_tx, fresh_rx) = crossbeam::channel::bounded(1);
+        daemon.handle_repl_ingest(ReplIngestRequest {
+            session: token_v2,
+            runtime_version,
+            batch,
+            now_ms,
+            respond: fresh_tx,
+        });
+        assert!(fresh_rx.recv().expect("fresh response").is_ok());
+        let state = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store session")
+            .runtime()
+            .state
+            .get(&namespace)
+            .expect("namespace state");
+        assert!(state.get_live(&bead_id).is_some());
+    }
+
+    #[test]
+    fn ensure_replication_runtime_rebinds_when_binding_version_changes() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("initial bind");
+        let runtime_version_v1 = bound_repl_runtime_version(&daemon, store_id);
+
+        let rotation = daemon
+            .store_sessions
+            .get_mut(&store_id)
+            .expect("store session")
+            .runtime_mut()
+            .rotate_replica_id()
+            .expect("rotate replica id");
+        assert!(rotation.runtime_version > runtime_version_v1);
+
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("rebind replication runtime");
+        let runtime_version_v2 = bound_repl_runtime_version(&daemon, store_id);
+        assert_eq!(runtime_version_v2, rotation.runtime_version);
+    }
+
+    #[test]
+    fn replica_id_rotation_invalidates_old_replication_runtime_and_requires_rebind_before_ingest() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("initial bind");
+        let runtime_version_v1 = bound_repl_runtime_version(&daemon, store_id);
+
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([91u8; 16]));
+        let store = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+        let bead_id = BeadId::parse("bd-rotate-repl").expect("bead id");
+        let mut patch_v1 = WireBeadPatch::new(bead_id.clone());
+        patch_v1.title = Some("replicated v1".to_string());
+        let mut delta_v1 = TxnDeltaV1::new();
+        delta_v1
+            .insert(TxnOpV1::BeadUpsert(Box::new(patch_v1)))
+            .expect("delta insert");
+        let event_v1 = verified_event_with_delta(store, &namespace, origin, 1, None, delta_v1);
+        let mut patch_v2 = WireBeadPatch::new(bead_id.clone());
+        patch_v2.title = Some("replicated v2".to_string());
+        let mut delta_v2 = TxnDeltaV1::new();
+        delta_v2
+            .insert(TxnOpV1::BeadUpsert(Box::new(patch_v2)))
+            .expect("delta insert");
+        let event_v2 = verified_event_with_delta(
+            store,
+            &namespace,
+            origin,
+            2,
+            Some(event_v1.sha256.clone()),
+            delta_v2,
+        );
+        let batch_v1 = ContiguousBatch::try_new(vec![event_v1]).expect("batch v1");
+        let batch_v2 = ContiguousBatch::try_new(vec![event_v2]).expect("batch v2");
+        let now_ms = 1_700_000_000_000u64;
+        let token = session_token(&daemon, store_id);
+
+        let (initial_tx, initial_rx) = crossbeam::channel::bounded(1);
+        daemon.handle_repl_ingest(ReplIngestRequest {
+            session: token,
+            runtime_version: runtime_version_v1,
+            batch: batch_v1,
+            now_ms,
+            respond: initial_tx,
+        });
+        assert!(initial_rx.recv().expect("initial ingest response").is_ok());
+
+        let rotation = daemon
+            .store_sessions
+            .get_mut(&store_id)
+            .expect("store session")
+            .runtime_mut()
+            .rotate_replica_id()
+            .expect("rotate replica id");
+        let stale_handles = daemon
+            .store_sessions
+            .get_mut(&store_id)
+            .and_then(StoreSession::take_repl_handles)
+            .expect("bound handles");
+        stale_handles.shutdown();
+        assert!(
+            daemon
+                .store_sessions
+                .get(&store_id)
+                .and_then(StoreSession::repl_handles)
+                .is_none()
+        );
+
+        let (stale_v1_tx, stale_v1_rx) = crossbeam::channel::bounded(1);
+        daemon.handle_repl_ingest(ReplIngestRequest {
+            session: token,
+            runtime_version: runtime_version_v1,
+            batch: batch_v2.clone(),
+            now_ms,
+            respond: stale_v1_tx,
+        });
+        let stale_v1 = stale_v1_rx
+            .recv()
+            .expect("stale v1 response")
+            .expect_err("stale v1 should fail");
+
+        let (stale_v2_tx, stale_v2_rx) = crossbeam::channel::bounded(1);
+        daemon.handle_repl_ingest(ReplIngestRequest {
+            session: token,
+            runtime_version: rotation.runtime_version,
+            batch: batch_v2.clone(),
+            now_ms,
+            respond: stale_v2_tx,
+        });
+        let stale_v2 = stale_v2_rx
+            .recv()
+            .expect("stale v2 response")
+            .expect_err("stale v2 should fail");
+        assert!(stale_v1.retryable);
+        assert!(stale_v2.retryable);
+        assert_eq!(stale_v1.code, stale_v2.code);
+        assert_eq!(stale_v1.message, stale_v2.message);
+
+        daemon
+            .reload_replication_runtime(store_id)
+            .expect("explicit rebind");
+        assert_eq!(
+            bound_repl_runtime_version(&daemon, store_id),
+            rotation.runtime_version
+        );
+
+        let (rebound_tx, rebound_rx) = crossbeam::channel::bounded(1);
+        daemon.handle_repl_ingest(ReplIngestRequest {
+            session: token,
+            runtime_version: rotation.runtime_version,
+            batch: batch_v2,
+            now_ms,
+            respond: rebound_tx,
+        });
+        assert!(rebound_rx.recv().expect("rebound response").is_ok());
+    }
+
+    #[test]
+    fn complete_sync_ignores_stale_session_token() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("insert store");
+        let token_v1 = session_token(&daemon, store_id);
+
+        daemon.drop_store_state(store_id);
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("reload store");
+        let token_v2 = session_token(&daemon, store_id);
+        assert_ne!(token_v1, token_v2);
+
+        let live = make_bead("bd-current", 2_000, "alice");
+        let mut current = CanonicalState::new();
+        current.insert_live(live.clone());
+        {
+            let mut loaded = daemon.loaded_store(store_id, remote.clone());
+            loaded.runtime_mut().state.set_core_state(current);
+            loaded.lane_mut().sync_in_progress = true;
+        }
+
+        let stale = make_bead("bd-stale", 1_000, "bob");
+        let mut stale_state = CanonicalState::new();
+        stale_state.insert_live(stale);
+        daemon.complete_sync(
+            token_v1,
+            &remote,
+            Ok(SyncOutcome {
+                last_seen_stamp: stale_state.max_write_stamp(),
+                state: stale_state,
+                divergence: None,
+                force_push: None,
+            }),
+        );
+
+        let loaded = daemon.loaded_store(store_id, remote);
+        let core_state = loaded
+            .runtime()
+            .state
+            .get(&NamespaceId::core())
+            .expect("core state");
+        assert!(core_state.get_live(&live.core.id).is_some());
+        assert!(loaded.lane().sync_in_progress);
+    }
+
+    #[test]
+    fn complete_checkpoint_ignores_stale_session_token_after_reload() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("insert store");
+        let token_v1 = session_token(&daemon, store_id);
+
+        daemon.drop_store_state(store_id);
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("reload store");
+        let token_v2 = session_token(&daemon, store_id);
+        assert_ne!(token_v1, token_v2);
+
+        let namespace = NamespaceId::core();
+        let bead_id = BeadId::parse("bd-checkpoint-stale").expect("bead id");
+        let dirty_shard = CheckpointShardPath::new(
+            namespace.clone(),
+            CheckpointFileKind::State,
+            shard_for_bead(&bead_id),
+        );
+        {
+            let mut loaded = daemon.loaded_store(store_id, remote.clone());
+            let mut core_state = CanonicalState::new();
+            core_state.insert_live(make_bead("bd-checkpoint-stale", 1_700_000_000_000, "alice"));
+            loaded.runtime_mut().state.set_core_state(core_state);
+            loaded.runtime_mut().record_checkpoint_dirty_paths(
+                &namespace,
+                std::iter::once(dirty_shard.clone()).collect(),
+            );
+            let snapshot = loaded.runtime_mut().checkpoint_snapshot(
+                "core",
+                std::slice::from_ref(&namespace),
+                1_700_000_000_000,
+            );
+            assert!(
+                snapshot
+                    .expect("checkpoint snapshot")
+                    .dirty_shards
+                    .contains(&dirty_shard)
+            );
+        }
+
+        let key = crate::runtime::checkpoint_scheduler::CheckpointGroupKey {
+            store_id,
+            group: "core".to_string(),
+        };
+        daemon
+            .checkpoint_scheduler
+            .start_in_flight(&key, Instant::now());
+
+        daemon.complete_checkpoint(
+            token_v1,
+            "core",
+            Ok(CheckpointPublishOutcome {
+                checkpoint_id: CheckpointContentSha256::from_checkpoint_preimage_bytes(b"stale"),
+                checkpoint_commit: Oid::zero(),
+                store_meta_commit: Oid::zero(),
+            }),
+        );
+
+        let snapshots = daemon.checkpoint_group_snapshots(store_id);
+        let core_snapshot = snapshots
+            .iter()
+            .find(|snapshot| snapshot.group == "core")
+            .expect("core checkpoint snapshot");
+        assert!(core_snapshot.in_flight);
+        assert!(core_snapshot.last_checkpoint_wall_ms.is_none());
+
+        let mut loaded = daemon.loaded_store(store_id, remote);
+        let snapshot = loaded.runtime_mut().checkpoint_snapshot(
+            "core",
+            std::slice::from_ref(&namespace),
+            1_700_000_000_001,
+        );
+        assert!(
+            snapshot
+                .expect("checkpoint snapshot")
+                .dirty_shards
+                .contains(&dirty_shard)
+        );
+    }
+
+    fn store_policy_hash(daemon: &Daemon, store_id: StoreId) -> ContentHash {
+        let policies = &daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store session")
+            .runtime()
+            .policies;
+        policy_hash(policies).expect("policy hash")
+    }
+
+    fn empty_load_result() -> LoadResult {
+        LoadResult {
+            state: CanonicalState::new(),
+            root_slug: None,
+            needs_sync: false,
+            last_seen_stamp: None,
+            fetch_error: None,
+            divergence: None,
+            force_push: None,
+        }
+    }
+
+    fn setup_checkpoint_import_fixture(
+        checkpoint_policy_hash: Option<ContentHash>,
+        checkpoint_roster_hash: Option<ContentHash>,
+        bead_slug: &str,
+    ) -> (Daemon, RemoteUrl, TempDir, StoreId, BeadId) {
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init(repo_dir.path()).unwrap();
+
+        let store_id = store_id_from_remote(&remote);
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), repo_dir.path())
+            .expect("store init");
+        let checkpoint_policy_hash =
+            checkpoint_policy_hash.unwrap_or_else(|| store_policy_hash(&daemon, store_id));
+
+        let bead = make_bead(bead_slug, 1_700_000_000_000, "checkpoint@test");
+        let bead_id = bead.core.id.clone();
+        let mut legacy_state = CanonicalState::new();
+        legacy_state.insert_live(bead);
+        let store_state = store_state_from_legacy(legacy_state);
+
+        let origin = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store session")
+            .runtime()
+            .meta
+            .replica_id;
+        let watermarks = Watermarks::<Durable>::new();
+
+        let snapshot = build_snapshot(CheckpointSnapshotInput {
+            checkpoint_group: "core".to_string(),
+            namespaces: vec![NamespaceId::core()].into(),
+            store_id,
+            store_epoch: StoreEpoch::ZERO,
+            created_at_ms: 1_700_000_000_000,
+            created_by_replica_id: origin,
+            policy_hash: checkpoint_policy_hash,
+            roster_hash: checkpoint_roster_hash,
+            dirty_shards: None,
+            state: &store_state,
+            watermarks_durable: &watermarks,
+        })
+        .expect("checkpoint snapshot");
+
+        let export = export_checkpoint(CheckpointExportInput {
+            snapshot: &snapshot,
+            previous: None,
+        })
+        .expect("checkpoint export");
+
+        let git_ref = format!("refs/beads/{store_id}/core");
+        let mut checkpoint_groups = BTreeMap::new();
+        checkpoint_groups.insert("core".to_string(), git_ref.clone());
+        let store_meta = CheckpointStoreMeta::new(
+            store_id,
+            StoreEpoch::ZERO,
+            CHECKPOINT_FORMAT_VERSION,
+            checkpoint_groups,
+        );
+        publish_checkpoint(&repo, &export, &git_ref, &store_meta).expect("checkpoint publish");
+
+        (daemon, remote, repo_dir, store_id, bead_id)
+    }
+
+    #[test]
+    fn load_from_checkpoint_ref_rejects_policy_hash_mismatch_pre_merge() {
+        let _tmp = test_store_dir();
+        let checkpoint_policy_hash = ContentHash::from_bytes([9u8; 32]);
+
+        let (mut daemon, remote, repo_dir, store_id, checkpoint_bead_id) =
+            setup_checkpoint_import_fixture(
+                Some(checkpoint_policy_hash),
+                None,
+                "bd-checkpoint-policy-mismatch",
+            );
+        let err = daemon
+            .apply_loaded_repo_state(store_id, &remote, repo_dir.path(), empty_load_result())
+            .expect_err("policy mismatch should fail before merge");
+
+        match err {
+            OpError::ValidationFailed { field, reason } => {
+                assert_eq!(field, "checkpoint_compatibility");
+                assert!(
+                    reason.contains("policy hash mismatch"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let store = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store runtime")
+            .runtime();
+        assert!(store.state.core().get_live(&checkpoint_bead_id).is_none());
+    }
+
+    #[test]
+    fn load_from_checkpoint_ref_rejects_roster_hash_mismatch_pre_merge() {
+        let _tmp = test_store_dir();
+        let (mut daemon, remote, repo_dir, store_id, checkpoint_bead_id) =
+            setup_checkpoint_import_fixture(
+                None,
+                Some(ContentHash::from_bytes([8u8; 32])),
+                "bd-checkpoint-roster-mismatch",
+            );
+        let err = daemon
+            .apply_loaded_repo_state(store_id, &remote, repo_dir.path(), empty_load_result())
+            .expect_err("roster mismatch should fail before merge");
+
+        match err {
+            OpError::ValidationFailed { field, reason } => {
+                assert_eq!(field, "checkpoint_compatibility");
+                assert!(
+                    reason.contains("roster hash mismatch"),
+                    "unexpected reason: {reason}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let store = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store runtime")
+            .runtime();
+        assert!(store.state.core().get_live(&checkpoint_bead_id).is_none());
     }
 
     #[test]
@@ -1217,9 +1768,10 @@ mod tests {
         let store_state = store_state_from_legacy(legacy_state);
 
         let origin = daemon
-            .stores
+            .store_sessions
             .get(&store_id)
-            .expect("store runtime")
+            .expect("store session")
+            .runtime()
             .meta
             .replica_id;
         let mut watermarks = Watermarks::<Durable>::new();
@@ -1233,9 +1785,7 @@ mod tests {
             )
             .expect("watermark");
 
-        let mut policies = BTreeMap::new();
-        policies.insert(NamespaceId::core(), NamespacePolicy::core_default());
-        let policy_hash = policy_hash(&policies).expect("policy hash");
+        let policy_hash = store_policy_hash(&daemon, store_id);
 
         let snapshot = build_snapshot(CheckpointSnapshotInput {
             checkpoint_group: "core".to_string(),
@@ -1269,20 +1819,16 @@ mod tests {
         );
         publish_checkpoint(&repo, &export, &git_ref, &store_meta).expect("checkpoint publish");
 
-        let loaded = LoadResult {
-            state: CanonicalState::new(),
-            root_slug: None,
-            needs_sync: false,
-            last_seen_stamp: None,
-            fetch_error: None,
-            divergence: None,
-            force_push: None,
-        };
+        let loaded = empty_load_result();
         daemon
             .apply_loaded_repo_state(store_id, &remote, repo_dir.path(), loaded)
             .expect("load repo");
 
-        let store = daemon.stores.get(&store_id).expect("store runtime");
+        let store = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store runtime")
+            .runtime();
         let core = store.state.core();
         assert!(core.get_live(&bead_id).is_some());
 
@@ -1311,6 +1857,100 @@ mod tests {
     }
 
     #[test]
+    fn apply_loaded_repo_state_replay_marks_checkpoint_dirty_shards() {
+        let tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+
+        let store_id = store_id_from_remote(&remote);
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("insert store");
+        let (git_tx, _git_rx) = crossbeam::channel::unbounded();
+        let create = daemon.handle_request(
+            Request::Create {
+                ctx: MutationCtx::new(repo_path.clone(), MutationMeta::default()),
+                payload: CreatePayload {
+                    id: None,
+                    parent: None,
+                    title: "replay dirty shard".to_string(),
+                    bead_type: BeadType::Task,
+                    priority: Priority::MEDIUM,
+                    description: None,
+                    design: None,
+                    acceptance_criteria: None,
+                    assignee: None,
+                    external_ref: None,
+                    estimated_minutes: None,
+                    labels: Vec::new(),
+                    dependencies: Vec::new(),
+                },
+            },
+            &git_tx,
+        );
+        let bead_id = match create {
+            HandleOutcome::Response(Response::Ok {
+                ok: ResponsePayload::Op(op),
+            }) => match op.result {
+                OpResult::Created { id } => id,
+                other => panic!("unexpected op result: {other:?}"),
+            },
+            other => panic!("unexpected create outcome: {other:?}"),
+        };
+
+        let namespace = NamespaceId::core();
+        {
+            let store = daemon
+                .store_sessions
+                .get_mut(&store_id)
+                .expect("store runtime")
+                .runtime_mut();
+            let _ = store
+                .checkpoint_snapshot("core", std::slice::from_ref(&namespace), 1_700_000_000_000)
+                .expect("initial snapshot");
+            store.commit_checkpoint_dirty_shards("core");
+            store.state = StoreState::new();
+        }
+
+        let loaded = LoadResult {
+            state: CanonicalState::new(),
+            root_slug: None,
+            needs_sync: false,
+            last_seen_stamp: None,
+            fetch_error: None,
+            divergence: None,
+            force_push: None,
+        };
+        daemon
+            .apply_loaded_repo_state(store_id, &remote, &repo_path, loaded)
+            .expect("apply loaded state");
+
+        let lane = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("git lane")
+            .lane();
+        assert!(lane.dirty);
+
+        let store = daemon
+            .store_sessions
+            .get_mut(&store_id)
+            .expect("store runtime")
+            .runtime_mut();
+        assert!(store.state.core().get_live(&bead_id).is_some());
+        let snapshot = store
+            .checkpoint_snapshot("core", std::slice::from_ref(&namespace), 1_700_000_000_001)
+            .expect("checkpoint snapshot");
+        let expected_state_path = CheckpointShardPath::new(
+            namespace,
+            CheckpointFileKind::State,
+            shard_for_bead(&bead_id),
+        );
+        assert!(snapshot.dirty_shards.contains(&expected_state_path));
+    }
+
+    #[test]
     fn non_core_mutation_and_query_use_namespace_state() {
         let tmp = test_store_dir();
         let mut daemon = Daemon::new(test_actor());
@@ -1322,7 +1962,11 @@ mod tests {
 
         let tmp_ns = NamespaceId::parse("tmp").unwrap();
         {
-            let runtime = daemon.stores.get_mut(&store_id).unwrap();
+            let runtime = daemon
+                .store_sessions
+                .get_mut(&store_id)
+                .unwrap()
+                .runtime_mut();
             runtime
                 .policies
                 .insert(tmp_ns.clone(), NamespacePolicy::tmp_default());
@@ -1381,7 +2025,12 @@ mod tests {
             other => panic!("unexpected query response: {other:?}"),
         }
 
-        let store_state = &daemon.stores.get(&store_id).unwrap().state;
+        let store_state = &daemon
+            .store_sessions
+            .get(&store_id)
+            .unwrap()
+            .runtime()
+            .state;
         let core_count = store_state
             .get(&NamespaceId::core())
             .map(|state| state.live_count())
@@ -1408,7 +2057,7 @@ mod tests {
             let mut daemon = Daemon::new(test_actor());
             insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path).unwrap();
 
-            let runtime = daemon.stores.get(&store_id).unwrap();
+            let runtime = daemon.store_sessions.get(&store_id).unwrap().runtime();
             let mut txn = runtime.wal_index.writer().begin_txn().unwrap();
             txn.update_hlc(&HlcRow {
                 actor_id: actor.clone(),
@@ -1458,7 +2107,7 @@ mod tests {
             other => panic!("unexpected outcome: {other:?}"),
         }
 
-        let runtime = daemon.stores.get(&store_id).unwrap();
+        let runtime = daemon.store_sessions.get(&store_id).unwrap().runtime();
         let rows = runtime.wal_index.reader().load_hlc().unwrap();
         let row = rows
             .iter()
@@ -1490,9 +2139,19 @@ mod tests {
         let repo_path = tmp.data_dir().join("repo");
         std::fs::create_dir_all(&repo_path).unwrap();
         insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("bind replication runtime");
+        let runtime_version = bound_repl_runtime_version(&daemon, store_id);
 
         {
-            let runtime = daemon.stores.get_mut(&store_id).unwrap();
+            let runtime = daemon
+                .store_sessions
+                .get_mut(&store_id)
+                .unwrap()
+                .runtime_mut();
             runtime
                 .policies
                 .insert(namespace.clone(), NamespacePolicy::core_default());
@@ -1501,7 +2160,8 @@ mod tests {
         let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
         let batch = ContiguousBatch::try_new(vec![event]).expect("contiguous batch");
         daemon.handle_repl_ingest(ReplIngestRequest {
-            store_id,
+            session: session_token(&daemon, store_id),
+            runtime_version,
             batch,
             now_ms,
             respond: respond_tx,
@@ -1511,9 +2171,10 @@ mod tests {
         assert!(outcome.is_ok());
 
         let state = daemon
-            .stores
+            .store_sessions
             .get(&store_id)
-            .unwrap()
+            .expect("store session")
+            .runtime()
             .state
             .get(&namespace)
             .expect("namespace state");
@@ -1538,11 +2199,15 @@ mod tests {
         local_state.insert_live(loser);
 
         {
-            let store = daemon.stores.get_mut(&store_id).unwrap();
+            let store = daemon
+                .store_sessions
+                .get_mut(&store_id)
+                .unwrap()
+                .runtime_mut();
             store.state.set_core_state(local_state);
         }
         {
-            let repo_state = daemon.git_lanes.get_mut(&store_id).unwrap();
+            let repo_state = daemon.store_sessions.get_mut(&store_id).unwrap().lane_mut();
             repo_state.dirty = true;
             repo_state.sync_in_progress = true;
         }
@@ -1553,12 +2218,13 @@ mod tests {
             divergence: None,
             force_push: None,
         };
-        daemon.complete_sync(&remote, Ok(outcome));
+        daemon.complete_sync(session_token(&daemon, store_id), &remote, Ok(outcome));
 
         let core_state = daemon
-            .stores
+            .store_sessions
             .get(&store_id)
-            .unwrap()
+            .expect("store session")
+            .runtime()
             .state
             .get(&NamespaceId::core())
             .expect("core state");
@@ -1568,7 +2234,7 @@ mod tests {
         let merged = core_state.get_live(&id).unwrap();
         assert_eq!(merged.core.created(), &loser_created);
 
-        let repo_state = daemon.git_lanes.get(&store_id).unwrap();
+        let repo_state = daemon.store_sessions.get(&store_id).unwrap().lane();
         assert!(repo_state.dirty);
         assert!(!repo_state.sync_in_progress);
     }
@@ -1617,10 +2283,14 @@ mod tests {
         let event2 = verified_event_for_seq(store, &namespace, origin, 2, Some(event1.sha256));
         let batch = ContiguousBatch::try_new(vec![event1, event2]).expect("contiguous batch");
         daemon
-            .ingest_remote_batch(store_id, batch, now_ms)
+            .ingest_remote_batch(session_token(&daemon, store_id), batch, now_ms)
             .expect("ingest");
 
-        let store_runtime = daemon.stores.get(&store_id).expect("store runtime");
+        let store_runtime = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store runtime")
+            .runtime();
         let segments = store_runtime
             .wal_index
             .reader()
@@ -1635,6 +2305,249 @@ mod tests {
             .expect("sealed segment metadata")
             .len();
         assert_eq!(sealed.final_len(), Some(sealed_len));
+    }
+
+    #[test]
+    fn repl_ingest_atomic_commit_failpoint_rolls_back_event_and_watermark() {
+        let tmp = TempStoreDir::new();
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([31u8; 16]));
+        let store_id = StoreId::new(Uuid::from_bytes([32u8; 16]));
+        let store = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+        let now_ms = 1_700_000_000_000u64;
+        let bead_id = BeadId::parse("bd-repl-failpoint").expect("bead id");
+        let mut patch = WireBeadPatch::new(bead_id.clone());
+        patch.title = Some("repl failpoint".to_string());
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::BeadUpsert(Box::new(patch)))
+            .expect("bead upsert op");
+        let event = verified_event_with_delta(store, &namespace, origin, 1, None, delta);
+        let canonical_sha = hash_event_body(&event.bytes).0;
+
+        let mut daemon = Daemon::new_with_limits(test_actor(), Limits::default());
+        let remote = test_remote();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo path");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let failpoint = crate::runtime::test_hooks::set_atomic_commit_fail_stage_for_tests(
+            "wal_repl_ingest_before_atomic_commit",
+        );
+        let failed_batch = ContiguousBatch::try_new(vec![event.clone()]).expect("contiguous batch");
+        let err = daemon
+            .ingest_remote_batch(session_token(&daemon, store_id), failed_batch, now_ms)
+            .expect_err("failpoint should abort ingest");
+        drop(failpoint);
+        assert!(!err.message.is_empty(), "expected indexed error payload");
+
+        let event_id = event_id_for(origin, namespace.clone(), Seq1::from_u64(1).expect("seq"));
+        let store_runtime = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store runtime")
+            .runtime();
+        let reader = store_runtime.wal_index.reader();
+        assert_eq!(
+            reader
+                .lookup_event_sha(&namespace, &event_id)
+                .expect("lookup event sha"),
+            None
+        );
+        let watermark = reader
+            .load_watermarks()
+            .expect("load watermarks")
+            .into_iter()
+            .find(|row| row.namespace == namespace && row.origin == origin);
+        assert!(
+            watermark.is_none(),
+            "watermark must not advance on rollback"
+        );
+        assert_eq!(
+            reader
+                .max_origin_seq(&namespace, &origin)
+                .expect("max origin seq")
+                .get(),
+            0
+        );
+        let failed_state = store_runtime
+            .state
+            .get(&namespace)
+            .expect("namespace state");
+        assert!(
+            failed_state.get_live(&bead_id).is_none(),
+            "state mutation must not survive failed durability commit"
+        );
+
+        let retry_batch = ContiguousBatch::try_new(vec![event]).expect("contiguous batch");
+        daemon
+            .ingest_remote_batch(session_token(&daemon, store_id), retry_batch, now_ms)
+            .expect("retry ingest should commit");
+
+        let store_runtime = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store runtime")
+            .runtime();
+        let reader = store_runtime.wal_index.reader();
+        let indexed_sha = reader
+            .lookup_event_sha(&namespace, &event_id)
+            .expect("lookup event sha")
+            .expect("event row");
+        assert_eq!(indexed_sha, canonical_sha);
+        let watermark = reader
+            .load_watermarks()
+            .expect("load watermarks")
+            .into_iter()
+            .find(|row| row.namespace == namespace && row.origin == origin)
+            .expect("watermark row");
+        assert_eq!(watermark.applied_seq(), 1);
+        assert_eq!(watermark.durable_seq(), 1);
+        assert_eq!(watermark.applied_head_sha(), Some(canonical_sha));
+        assert_eq!(watermark.durable_head_sha(), Some(canonical_sha));
+        assert_eq!(
+            reader
+                .max_origin_seq(&namespace, &origin)
+                .expect("max origin seq")
+                .get(),
+            1
+        );
+        let committed_state = store_runtime
+            .state
+            .get(&namespace)
+            .expect("namespace state");
+        assert!(committed_state.get_live(&bead_id).is_some());
+    }
+
+    #[test]
+    fn repl_ingest_apply_failure_does_not_commit_event_or_watermark() {
+        let tmp = TempStoreDir::new();
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([33u8; 16]));
+        let store_id = StoreId::new(Uuid::from_bytes([34u8; 16]));
+        let store = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+        let now_ms = 1_700_000_000_000u64;
+
+        let bead_a = BeadId::parse("bd-cycle-a").expect("bead a");
+        let bead_b = BeadId::parse("bd-cycle-b").expect("bead b");
+
+        let mut patch_a = WireBeadPatch::new(bead_a.clone());
+        patch_a.title = Some("a".to_string());
+        let mut patch_b = WireBeadPatch::new(bead_b.clone());
+        patch_b.title = Some("b".to_string());
+
+        let mut seed_delta = TxnDeltaV1::new();
+        seed_delta
+            .insert(TxnOpV1::BeadUpsert(Box::new(patch_a)))
+            .expect("seed patch a");
+        seed_delta
+            .insert(TxnOpV1::BeadUpsert(Box::new(patch_b)))
+            .expect("seed patch b");
+        let seed_event = verified_event_with_delta(store, &namespace, origin, 1, None, seed_delta);
+
+        let mut dep_ab_delta = TxnDeltaV1::new();
+        dep_ab_delta
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
+                key: DepKey::new(bead_a.clone(), bead_b.clone(), DepKind::Blocks)
+                    .expect("dep key a->b"),
+                dot: WireDotV1 {
+                    replica: origin,
+                    counter: 1,
+                },
+            }))
+            .expect("dep add a->b");
+        let dep_ab_event = verified_event_with_delta(
+            store,
+            &namespace,
+            origin,
+            2,
+            Some(seed_event.sha256),
+            dep_ab_delta,
+        );
+
+        let mut daemon = Daemon::new_with_limits(test_actor(), Limits::default());
+        let remote = test_remote();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo path");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let seed_batch =
+            ContiguousBatch::try_new(vec![seed_event, dep_ab_event.clone()]).expect("seed batch");
+        daemon
+            .ingest_remote_batch(session_token(&daemon, store_id), seed_batch, now_ms)
+            .expect("seed ingest should succeed");
+
+        let mut dep_ba_delta = TxnDeltaV1::new();
+        dep_ba_delta
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
+                key: DepKey::new(bead_b.clone(), bead_a.clone(), DepKind::Blocks)
+                    .expect("dep key b->a"),
+                dot: WireDotV1 {
+                    replica: origin,
+                    counter: 2,
+                },
+            }))
+            .expect("dep add b->a");
+        let failing_event = verified_event_with_delta(
+            store,
+            &namespace,
+            origin,
+            3,
+            Some(dep_ab_event.sha256),
+            dep_ba_delta,
+        );
+        let failing_batch = ContiguousBatch::try_new(vec![failing_event]).expect("failing batch");
+        let err = daemon
+            .ingest_remote_batch(session_token(&daemon, store_id), failing_batch, now_ms)
+            .expect_err("cycle should fail apply");
+        assert!(
+            !err.message.is_empty(),
+            "apply failure should return structured error payload"
+        );
+
+        let store_runtime = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store runtime")
+            .runtime();
+        let reader = store_runtime.wal_index.reader();
+        let failed_event_id = event_id_for(
+            origin,
+            namespace.clone(),
+            Seq1::from_u64(3).expect("failed origin seq"),
+        );
+        assert_eq!(
+            reader
+                .lookup_event_sha(&namespace, &failed_event_id)
+                .expect("lookup failed event"),
+            None
+        );
+        assert_eq!(
+            reader
+                .max_origin_seq(&namespace, &origin)
+                .expect("max origin seq")
+                .get(),
+            2
+        );
+        let watermark = reader
+            .load_watermarks()
+            .expect("load watermarks")
+            .into_iter()
+            .find(|row| row.namespace == namespace && row.origin == origin)
+            .expect("watermark row");
+        assert_eq!(watermark.applied_seq(), 2);
+        assert_eq!(watermark.durable_seq(), 2);
+
+        let state = store_runtime
+            .state
+            .get(&namespace)
+            .expect("namespace state");
+        assert!(state.dep_contains(
+            &DepKey::new(bead_a.clone(), bead_b.clone(), DepKind::Blocks).expect("dep key a->b")
+        ));
+        assert!(!state.dep_contains(
+            &DepKey::new(bead_b.clone(), bead_a.clone(), DepKind::Blocks).expect("dep key b->a")
+        ));
     }
 
     #[test]
@@ -1660,10 +2573,14 @@ mod tests {
 
         let batch = ContiguousBatch::try_new(vec![event]).expect("contiguous batch");
         daemon
-            .ingest_remote_batch(store_id, batch, now_ms)
+            .ingest_remote_batch(session_token(&daemon, store_id), batch, now_ms)
             .expect("ingest");
 
-        let store_runtime = daemon.stores.get(&store_id).expect("store runtime");
+        let store_runtime = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store runtime")
+            .runtime();
         let event_id = event_id_for(origin, namespace.clone(), Seq1::from_u64(1).unwrap());
         let indexed_sha = store_runtime
             .wal_index
@@ -1717,10 +2634,14 @@ mod tests {
 
         let batch = ContiguousBatch::try_new(vec![event]).expect("contiguous batch");
         let _outcome = daemon
-            .ingest_remote_batch(store_id, batch, now_ms)
+            .ingest_remote_batch(session_token(&daemon, store_id), batch, now_ms)
             .expect("ingest should accept orphan note");
 
-        let store_runtime = daemon.stores.get(&store_id).expect("store runtime");
+        let store_runtime = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store runtime")
+            .runtime();
         let segments = store_runtime
             .wal_index
             .reader()

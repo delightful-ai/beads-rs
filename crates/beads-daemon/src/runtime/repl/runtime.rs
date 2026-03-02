@@ -15,10 +15,12 @@ use crate::core::error::details::{
 use crate::core::{
     Applied, CliErrorCode, Durable, ErrorPayload, EventBytes, EventFrameV1, EventId,
     EventShaLookupError, Limits, NamespaceId, Opaque, ProtocolErrorCode, ReplicaId, SegmentId,
-    Seq0, Seq1, Sha256, StoreId, decode_event_body,
+    Seq0, Seq1, Sha256, decode_event_body,
 };
+use crate::runtime::core::StoreSessionToken;
 use crate::runtime::repl::error::{ReplError, ReplErrorDetails};
 use crate::runtime::repl::{ContiguousBatch, IngestOutcome, SessionStore, WatermarkSnapshot};
+use crate::runtime::store::runtime::ReplicationRuntimeVersion;
 use crate::runtime::wal::{
     EventWalError, FrameReader, IndexedRangeItem, ReplicaDurabilityRole, ReplicaLivenessRow,
     VerifiedRecord, WalIndex, WalIndexError, WalIndexTxnProvider, WalReadRange,
@@ -28,28 +30,32 @@ use beads_daemon_core::repl::proto::WatermarkState;
 
 const DEFAULT_RETRY_AFTER_MS: u64 = 100;
 
-pub struct ReplIngestRequest {
-    pub store_id: StoreId,
-    pub batch: ContiguousBatch,
-    pub now_ms: u64,
-    pub respond: Sender<Result<IngestOutcome, ReplError>>,
+pub(crate) struct ReplIngestRequest {
+    pub(crate) session: StoreSessionToken,
+    pub(crate) runtime_version: ReplicationRuntimeVersion,
+    pub(crate) batch: ContiguousBatch,
+    pub(crate) now_ms: u64,
+    pub(crate) respond: Sender<Result<IngestOutcome, ReplError>>,
 }
 
 #[derive(Clone)]
 pub struct ReplSessionStore {
-    store_id: StoreId,
+    session: StoreSessionToken,
+    runtime_version: ReplicationRuntimeVersion,
     wal_index: Arc<dyn WalIndex>,
     ingest_tx: Sender<ReplIngestRequest>,
 }
 
 impl ReplSessionStore {
-    pub fn new(
-        store_id: StoreId,
+    pub(crate) fn new(
+        session: StoreSessionToken,
+        runtime_version: ReplicationRuntimeVersion,
         wal_index: Arc<dyn WalIndex>,
         ingest_tx: Sender<ReplIngestRequest>,
     ) -> Self {
         Self {
-            store_id,
+            session,
+            runtime_version,
             wal_index,
             ingest_tx,
         }
@@ -83,7 +89,7 @@ impl SessionStore for ReplSessionStore {
             Err(err) => {
                 tracing::warn!(
                     "replication watermark snapshot failed for {}: {err}",
-                    self.store_id
+                    self.session.store_id()
                 );
                 return WatermarkSnapshot { durable, applied };
             }
@@ -101,8 +107,8 @@ impl SessionStore for ReplSessionStore {
             durable
                 .entry(ns.clone())
                 .or_default()
-                .insert(origin, row.durable);
-            applied.entry(ns).or_default().insert(origin, row.applied);
+                .insert(origin, row.durable());
+            applied.entry(ns).or_default().insert(origin, row.applied());
         }
 
         WatermarkSnapshot { durable, applied }
@@ -123,7 +129,8 @@ impl SessionStore for ReplSessionStore {
     ) -> Result<IngestOutcome, ReplError> {
         let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
         let request = ReplIngestRequest {
-            store_id: self.store_id,
+            session: self.session,
+            runtime_version: self.runtime_version,
             batch: batch.clone(),
             now_ms,
             respond: respond_tx,

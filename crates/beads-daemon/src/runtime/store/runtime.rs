@@ -17,11 +17,11 @@ use crate::broadcast::{BroadcasterLimits, EventBroadcaster};
 use crate::core::error::details as error_details;
 use crate::core::error::details::WalTailTruncatedDetails;
 use crate::core::{
-    ActorId, Applied, ApplyOutcome, CliErrorCode, ContentHash, Durable, ErrorCode, ErrorPayload,
-    HeadStatus, IntoErrorPayload, Limits, NamespaceId, NamespacePolicies, NamespacePolicy,
-    ProtocolErrorCode, ReplicaId, ReplicaRoster, ReplicaRosterError, SegmentId, StoreEpoch,
-    StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, StoreState, Transience, WatermarkError,
-    Watermarks, WriteStamp,
+    ActorId, Applied, ApplyOutcome, CanonicalState, CliErrorCode, ContentHash, Durable, ErrorCode,
+    ErrorPayload, HeadStatus, IntoErrorPayload, Limits, NamespaceId, NamespacePolicies,
+    NamespacePolicy, ProtocolErrorCode, ReplicaId, ReplicaRoster, ReplicaRosterError, SegmentId,
+    StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, StoreState, Transience,
+    WatermarkError, Watermarks, WriteStamp,
 };
 use crate::git::checkpoint::{
     CheckpointFileKind, CheckpointShardPath, CheckpointSnapshot, CheckpointSnapshotError,
@@ -59,10 +59,33 @@ pub struct WalTailTruncatedRecord {
     pub wall_ms: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(crate) struct ReplicationRuntimeVersion(u64);
+
+impl ReplicationRuntimeVersion {
+    const INITIAL: Self = Self(1);
+
+    fn next(self) -> Self {
+        Self(
+            self.0
+                .checked_add(1)
+                .expect("replication runtime version overflow"),
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ReplicaIdRotation {
+    pub old_replica_id: ReplicaId,
+    pub new_replica_id: ReplicaId,
+    pub runtime_version: ReplicationRuntimeVersion,
+}
+
 pub struct StoreRuntime {
     layout: DaemonLayout,
     pub primary_remote: RemoteUrl,
     pub meta: StoreMeta,
+    replication_runtime_version: ReplicationRuntimeVersion,
     pub policies: BTreeMap<NamespaceId, NamespacePolicy>,
     pub state: StoreState,
     pub last_wal_tail_truncated: Option<WalTailTruncatedRecord>,
@@ -87,6 +110,67 @@ pub struct StoreRuntimeOpen {
     pub replay_stats: ReplayStats,
 }
 
+pub(crate) fn checkpoint_dirty_paths_for_outcome(
+    namespace: &NamespaceId,
+    state: &CanonicalState,
+    outcome: &ApplyOutcome,
+) -> BTreeSet<CheckpointShardPath> {
+    let mut dirty = BTreeSet::new();
+    if outcome.changed_beads.is_empty()
+        && outcome.changed_deps.is_empty()
+        && outcome.changed_notes.is_empty()
+    {
+        return dirty;
+    }
+    for bead_id in &outcome.changed_beads {
+        if state.bead_view(bead_id).is_some() {
+            let shard = shard_for_bead(bead_id);
+            dirty.insert(CheckpointShardPath::new(
+                namespace.clone(),
+                CheckpointFileKind::State,
+                shard,
+            ));
+        }
+        if state.get_tombstone(bead_id).is_some() || state.has_collision_tombstone(bead_id) {
+            let tombstone_shard = shard_for_tombstone(bead_id);
+            dirty.insert(CheckpointShardPath::new(
+                namespace.clone(),
+                CheckpointFileKind::Tombstones,
+                tombstone_shard,
+            ));
+        }
+    }
+    for dep_key in &outcome.changed_deps {
+        let shard = shard_for_dep(dep_key.from(), dep_key.to(), dep_key.kind());
+        dirty.insert(CheckpointShardPath::new(
+            namespace.clone(),
+            CheckpointFileKind::Deps,
+            shard,
+        ));
+    }
+    for note_key in &outcome.changed_notes {
+        if state.bead_view(&note_key.bead_id).is_some() {
+            let shard = shard_for_bead(&note_key.bead_id);
+            dirty.insert(CheckpointShardPath::new(
+                namespace.clone(),
+                CheckpointFileKind::State,
+                shard,
+            ));
+        }
+        if state.get_tombstone(&note_key.bead_id).is_some()
+            || state.has_collision_tombstone(&note_key.bead_id)
+        {
+            let tombstone_shard = shard_for_tombstone(&note_key.bead_id);
+            dirty.insert(CheckpointShardPath::new(
+                namespace.clone(),
+                CheckpointFileKind::Tombstones,
+                tombstone_shard,
+            ));
+        }
+    }
+    dirty
+}
+
 impl StoreRuntime {
     pub fn open(
         layout: &DaemonLayout,
@@ -101,7 +185,7 @@ impl StoreRuntime {
         let existing = read_store_meta_optional(&meta_path)?;
 
         let expected_versions = StoreMetaVersions::current();
-        let meta = match existing.as_ref() {
+        let (meta, write_meta) = match existing.as_ref() {
             Some(meta) => {
                 if meta.store_id() != store_id {
                     return Err(StoreRuntimeError::MetaMismatch {
@@ -110,23 +194,31 @@ impl StoreRuntime {
                     });
                 }
                 let got_versions = meta.versions();
-                if got_versions != expected_versions {
+                if got_versions == expected_versions {
+                    (meta.clone(), false)
+                } else if can_upgrade_index_schema_only(got_versions, expected_versions) {
+                    let mut upgraded = meta.clone();
+                    upgraded.index_schema_version = expected_versions.index_schema_version;
+                    (upgraded, true)
+                } else {
                     return Err(StoreRuntimeError::UnsupportedStoreMetaVersion {
                         expected: expected_versions,
                         got: got_versions,
                     });
                 }
-                meta.clone()
             }
             None => {
                 let identity = StoreIdentity::new(store_id, StoreEpoch::ZERO);
-                StoreMeta::new(identity, new_replica_id(), expected_versions, now_ms)
+                (
+                    StoreMeta::new(identity, new_replica_id(), expected_versions, now_ms),
+                    true,
+                )
             }
         };
 
         let lock = StoreLock::acquire(layout, store_id, meta.replica_id, now_ms, daemon_version)?;
 
-        if existing.is_none() {
+        if write_meta {
             write_store_meta(&meta_path, &meta)?;
         }
 
@@ -189,6 +281,7 @@ impl StoreRuntime {
             layout: layout.clone(),
             primary_remote,
             meta,
+            replication_runtime_version: ReplicationRuntimeVersion::INITIAL,
             policies: load_namespace_policies_with_layout(layout, store_id, namespace_defaults)?,
             state: StoreState::new(),
             last_wal_tail_truncated,
@@ -392,69 +485,33 @@ impl StoreRuntime {
         namespace: &NamespaceId,
         outcome: &ApplyOutcome,
     ) {
-        if outcome.changed_beads.is_empty()
-            && outcome.changed_deps.is_empty()
-            && outcome.changed_notes.is_empty()
-        {
-            return;
-        }
-        let dirty = self
-            .checkpoint_dirty_shards
-            .entry(namespace.clone())
-            .or_default();
         let Some(state) = self.state.get(namespace) else {
             return;
         };
-        for bead_id in &outcome.changed_beads {
-            if state.bead_view(bead_id).is_some() {
-                let shard = shard_for_bead(bead_id);
-                dirty.insert(CheckpointShardPath::new(
-                    namespace.clone(),
-                    CheckpointFileKind::State,
-                    shard,
-                ));
-            }
-            if state.get_tombstone(bead_id).is_some() || state.has_collision_tombstone(bead_id) {
-                let tombstone_shard = shard_for_tombstone(bead_id);
-                dirty.insert(CheckpointShardPath::new(
-                    namespace.clone(),
-                    CheckpointFileKind::Tombstones,
-                    tombstone_shard,
-                ));
-            }
+        let paths = checkpoint_dirty_paths_for_outcome(namespace, state, outcome);
+        self.record_checkpoint_dirty_paths(namespace, paths);
+    }
+
+    pub(crate) fn record_checkpoint_dirty_paths(
+        &mut self,
+        namespace: &NamespaceId,
+        paths: BTreeSet<CheckpointShardPath>,
+    ) {
+        if paths.is_empty() {
+            return;
         }
-        for dep_key in &outcome.changed_deps {
-            let shard = shard_for_dep(dep_key.from(), dep_key.to(), dep_key.kind());
-            dirty.insert(CheckpointShardPath::new(
-                namespace.clone(),
-                CheckpointFileKind::Deps,
-                shard,
-            ));
-        }
-        for note_key in &outcome.changed_notes {
-            if state.bead_view(&note_key.bead_id).is_some() {
-                let shard = shard_for_bead(&note_key.bead_id);
-                dirty.insert(CheckpointShardPath::new(
-                    namespace.clone(),
-                    CheckpointFileKind::State,
-                    shard,
-                ));
-            }
-            if state.get_tombstone(&note_key.bead_id).is_some()
-                || state.has_collision_tombstone(&note_key.bead_id)
-            {
-                let tombstone_shard = shard_for_tombstone(&note_key.bead_id);
-                dirty.insert(CheckpointShardPath::new(
-                    namespace.clone(),
-                    CheckpointFileKind::Tombstones,
-                    tombstone_shard,
-                ));
-            }
-        }
+        self.checkpoint_dirty_shards
+            .entry(namespace.clone())
+            .or_default()
+            .extend(paths);
     }
 
     pub(crate) fn commit_checkpoint_dirty_shards(&mut self, checkpoint_group: &str) {
         self.checkpoint_dirty_inflight.remove(checkpoint_group);
+    }
+
+    pub(crate) fn replication_runtime_version(&self) -> ReplicationRuntimeVersion {
+        self.replication_runtime_version
     }
 
     pub(crate) fn rollback_checkpoint_dirty_shards(&mut self, checkpoint_group: &str) {
@@ -501,13 +558,18 @@ impl StoreRuntime {
         dirty_shards
     }
 
-    pub fn rotate_replica_id(&mut self) -> Result<(ReplicaId, ReplicaId), StoreRuntimeError> {
-        let old = self.meta.replica_id;
-        let new = new_replica_id();
-        self.meta.replica_id = new;
+    pub(crate) fn rotate_replica_id(&mut self) -> Result<ReplicaIdRotation, StoreRuntimeError> {
+        let old_replica_id = self.meta.replica_id;
+        let new_replica_id = new_replica_id();
+        self.meta.replica_id = new_replica_id;
         let path = self.layout.store_meta_path(&self.meta.store_id());
         write_store_meta(&path, &self.meta)?;
-        Ok((old, new))
+        self.replication_runtime_version = self.replication_runtime_version.next();
+        Ok(ReplicaIdRotation {
+            old_replica_id,
+            new_replica_id,
+            runtime_version: self.replication_runtime_version,
+        })
     }
 
     pub fn next_orset_counter(&mut self) -> Result<u64, StoreRuntimeError> {
@@ -941,6 +1003,14 @@ fn open_wal_index_with_layout(
     }
 }
 
+fn can_upgrade_index_schema_only(got: StoreMetaVersions, expected: StoreMetaVersions) -> bool {
+    got.store_format_version == expected.store_format_version
+        && got.wal_format_version == expected.wal_format_version
+        && got.checkpoint_format_version == expected.checkpoint_format_version
+        && got.replication_protocol_version == expected.replication_protocol_version
+        && got.index_schema_version < expected.index_schema_version
+}
+
 fn load_store_config_with_layout(
     layout: &DaemonLayout,
     store_id: StoreId,
@@ -1121,11 +1191,13 @@ fn load_watermarks(
     let mut durable = Watermarks::<Durable>::new();
 
     for row in rows {
-        let namespace = row.namespace;
+        let namespace = row.namespace.clone();
         let origin = row.origin;
+        let applied_row = row.applied();
+        let durable_row = row.durable();
 
         applied
-            .observe_at_least(&namespace, &origin, row.applied.seq(), row.applied.head())
+            .observe_at_least(&namespace, &origin, applied_row.seq(), applied_row.head())
             .map_err(|source| StoreRuntimeError::WatermarkInvalid {
                 kind: "applied",
                 namespace: namespace.clone(),
@@ -1134,7 +1206,7 @@ fn load_watermarks(
             })?;
 
         durable
-            .observe_at_least(&namespace, &origin, row.durable.seq(), row.durable.head())
+            .observe_at_least(&namespace, &origin, durable_row.seq(), durable_row.head())
             .map_err(|source| StoreRuntimeError::WatermarkInvalid {
                 kind: "durable",
                 namespace: namespace.clone(),
@@ -1313,13 +1385,11 @@ mod tests {
     use crate::core::identity::BeadId;
     use crate::core::time::{Stamp, WriteStamp};
     use crate::core::{
-        ActorId, CanonicalState, DepKey, Dot, ReplicaId, Seq0, StoreState, Watermark,
+        ActorId, CanonicalState, DepKey, Dot, ReplicaId, Seq0, StoreState, Watermark, WatermarkPair,
     };
     use crate::paths;
     use crate::remote::RemoteUrl;
-    use crate::runtime::wal::{
-        IndexDurabilityMode, SqliteWalIndex, WalIndex, WalIndexError, WalReplayError,
-    };
+    use crate::runtime::wal::{IndexDurabilityMode, SqliteWalIndex, WalIndex};
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
     use uuid::Uuid;
@@ -1330,6 +1400,61 @@ mod tests {
         let meta = StoreMeta::new(identity, replica_id, versions, now_ms);
         write_store_meta(&paths::store_meta_path(store_id), &meta).expect("write meta");
         meta
+    }
+
+    fn write_meta_with_versions_for(
+        store_id: StoreId,
+        replica_id: ReplicaId,
+        now_ms: u64,
+        versions: StoreMetaVersions,
+    ) -> StoreMeta {
+        let identity = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+        let meta = StoreMeta::new(identity, replica_id, versions, now_ms);
+        write_store_meta(&paths::store_meta_path(store_id), &meta).expect("write meta");
+        meta
+    }
+
+    fn write_legacy_index_with_sentinel(store_id: StoreId, meta: &StoreMeta) {
+        let db_path = paths::store_dir(store_id).join("index").join("wal.sqlite");
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent).expect("create index dir");
+        }
+        let conn = rusqlite::Connection::open(&db_path).expect("open legacy sqlite");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS meta (
+               key TEXT PRIMARY KEY,
+               value TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS legacy_sentinel (
+               id INTEGER PRIMARY KEY
+             );",
+        )
+        .expect("create legacy schema");
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["store_id", meta.store_id().to_string()],
+        )
+        .expect("insert store_id");
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["store_epoch", meta.store_epoch().get().to_string()],
+        )
+        .expect("insert store_epoch");
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params![
+                "index_schema_version",
+                meta.index_schema_version.to_string()
+            ],
+        )
+        .expect("insert index_schema_version");
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            rusqlite::params!["wal_format_version", meta.wal_format_version.to_string()],
+        )
+        .expect("insert wal_format_version");
+        conn.execute("INSERT INTO legacy_sentinel (id) VALUES (1)", [])
+            .expect("insert sentinel");
     }
 
     #[test]
@@ -1356,7 +1481,8 @@ mod tests {
             Watermark::<Applied>::new(Seq0::new(2), HeadStatus::Known(head)).expect("watermark");
         let durable =
             Watermark::<Durable>::new(Seq0::new(2), HeadStatus::Known(head)).expect("watermark");
-        txn.update_watermark(&namespace, &origin, applied, durable)
+        let watermarks = WatermarkPair::new(applied, durable).expect("watermark pair");
+        txn.update_watermark(&namespace, &origin, watermarks)
             .expect("update watermark");
         txn.commit().expect("commit watermark");
 
@@ -1395,43 +1521,22 @@ mod tests {
     }
 
     #[test]
-    fn phase3_head_sha_rejects_missing_head() {
+    fn runtime_upgrades_stale_index_meta_and_rebuilds_legacy_index() {
         let temp = TempDir::new().expect("temp dir");
         let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
 
         let store_id = StoreId::new(Uuid::from_bytes([20u8; 16]));
         let replica_id = ReplicaId::new(Uuid::from_bytes([21u8; 16]));
         let now_ms = 1_700_000_000_000;
-        let meta = write_meta_for(store_id, replica_id, now_ms);
-        let _index = SqliteWalIndex::open(
-            &paths::store_dir(store_id),
-            &meta,
-            IndexDurabilityMode::Cache,
-        )
-        .expect("open wal index");
-
-        let namespace = NamespaceId::core();
-        let origin = ReplicaId::new(Uuid::from_bytes([22u8; 16]));
-        let db_path = paths::store_dir(store_id).join("index").join("wal.sqlite");
-        let conn = rusqlite::Connection::open(&db_path).expect("open wal sqlite");
-        conn.execute(
-            "INSERT INTO watermarks (namespace, origin_replica_id, applied_seq, durable_seq, applied_head_sha, durable_head_sha) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![
-                namespace.as_str(),
-                origin.as_uuid().as_bytes().to_vec(),
-                1i64,
-                0i64,
-                Option::<Vec<u8>>::None,
-                Option::<Vec<u8>>::None,
-            ],
-        )
-        .expect("insert invalid watermark");
+        let mut stale_versions = StoreMetaVersions::current();
+        stale_versions.index_schema_version = stale_versions.index_schema_version.saturating_sub(1);
+        let stale_meta = write_meta_with_versions_for(store_id, replica_id, now_ms, stale_versions);
+        write_legacy_index_with_sentinel(store_id, &stale_meta);
 
         let namespace_defaults = crate::config::Config::default()
             .namespace_defaults
             .namespaces;
-        let result = StoreRuntime::open(
+        let _runtime = StoreRuntime::open(
             &crate::daemon_layout_from_paths(),
             store_id,
             RemoteUrl::new("example.com/test/repo"),
@@ -1439,16 +1544,49 @@ mod tests {
             "test",
             &Limits::default(),
             &namespace_defaults,
+        )
+        .expect("open runtime with stale index schema")
+        .runtime;
+
+        let persisted_meta = read_store_meta_optional(&paths::store_meta_path(store_id))
+            .expect("read store meta")
+            .expect("store meta exists");
+        assert_eq!(
+            persisted_meta.index_schema_version,
+            StoreMetaVersions::INDEX_SCHEMA_VERSION
         );
 
-        assert!(matches!(
-            result,
-            Err(StoreRuntimeError::WalReplay(err))
-                if matches!(
-                    &*err,
-                    WalReplayError::Index(WalIndexError::WatermarkRowDecode(_))
-                )
-        ));
+        let db_path = paths::store_dir(store_id).join("index").join("wal.sqlite");
+        let conn = rusqlite::Connection::open(&db_path).expect("open rebuilt wal sqlite");
+        let sentinel_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                rusqlite::params!["legacy_sentinel"],
+                |row| row.get(0),
+            )
+            .expect("query sqlite_master");
+        assert_eq!(sentinel_count, 0, "legacy index should be replaced");
+
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([22u8; 16]));
+        let insert_err = conn
+            .execute(
+                "INSERT INTO watermarks (namespace, origin_replica_id, applied_seq, durable_seq, applied_head_sha, durable_head_sha) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    namespace.as_str(),
+                    origin.as_uuid().as_bytes().to_vec(),
+                    1i64,
+                    0i64,
+                    Option::<Vec<u8>>::None,
+                    Option::<Vec<u8>>::None,
+                ],
+            )
+            .expect_err("invalid watermark insert should fail");
+        assert!(
+            insert_err.to_string().contains("CHECK constraint failed"),
+            "expected CHECK constraint failure, got {insert_err}"
+        );
     }
 
     #[test]
@@ -1465,6 +1603,42 @@ mod tests {
         versions.wal_format_version = versions.wal_format_version.saturating_add(1);
         let meta = StoreMeta::new(identity, replica_id, versions, now_ms);
         write_store_meta(&paths::store_meta_path(store_id), &meta).expect("write meta");
+
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let err = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            now_ms + 1,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .err()
+        .expect("expected version mismatch");
+
+        let expected = StoreMetaVersions::current();
+        assert!(matches!(
+            err,
+            StoreRuntimeError::UnsupportedStoreMetaVersion { expected: got_expected, got }
+                if got_expected == expected && got == versions
+        ));
+    }
+
+    #[test]
+    fn store_runtime_rejects_newer_index_schema_version() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([33u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([34u8; 16]));
+        let now_ms = 1_700_000_000_000;
+
+        let mut versions = StoreMetaVersions::current();
+        versions.index_schema_version = versions.index_schema_version.saturating_add(1);
+        write_meta_with_versions_for(store_id, replica_id, now_ms, versions);
 
         let namespace_defaults = crate::config::Config::default()
             .namespace_defaults
@@ -1520,6 +1694,46 @@ mod tests {
             .expect("read meta")
             .expect("meta exists");
         assert_eq!(meta.orset_counter, 2);
+    }
+
+    #[test]
+    fn rotate_replica_id_bumps_replication_runtime_version() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([35u8; 16]));
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let mut runtime = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_000,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("open runtime")
+        .runtime;
+
+        let version_v1 = runtime.replication_runtime_version();
+        let old_replica_id = runtime.meta.replica_id;
+        let rotation = runtime.rotate_replica_id().expect("rotate replica id");
+
+        assert_eq!(rotation.old_replica_id, old_replica_id);
+        assert_ne!(rotation.old_replica_id, rotation.new_replica_id);
+        assert!(rotation.runtime_version > version_v1);
+        assert_eq!(
+            rotation.runtime_version,
+            runtime.replication_runtime_version()
+        );
+
+        let meta_path = paths::store_meta_path(store_id);
+        let meta = read_store_meta_optional(&meta_path)
+            .expect("read meta")
+            .expect("meta exists");
+        assert_eq!(meta.replica_id, rotation.new_replica_id);
     }
 
     #[test]

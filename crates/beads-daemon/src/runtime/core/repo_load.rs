@@ -1,3 +1,4 @@
+use super::checkpoint_import::CheckpointCompatibilityError;
 use super::*;
 
 impl Daemon {
@@ -16,7 +17,7 @@ impl Daemon {
             .path_to_remote
             .insert(repo.to_owned(), remote.clone());
 
-        if !self.stores.contains_key(&store_id) {
+        if !self.store_sessions.contains_key(&store_id) {
             let open = StoreRuntime::open(
                 &self.layout,
                 store_id,
@@ -28,8 +29,11 @@ impl Daemon {
             )?;
             let runtime = open.runtime;
             self.seed_actor_clocks(&runtime)?;
-            self.stores.insert(store_id, runtime);
-            self.git_lanes.insert(store_id, GitLaneState::new());
+            let token = self.alloc_store_session_token(store_id);
+            self.store_sessions.insert(
+                store_id,
+                StoreSession::new(token, runtime, GitLaneState::new()),
+            );
             self.register_default_checkpoint_groups(store_id)?;
 
             let load_result = (|| -> Result<(), OpError> {
@@ -88,14 +92,9 @@ impl Daemon {
                 self.rollback_failed_initial_load(store_id);
                 return Err(err);
             }
-        } else if let Some(store) = self.stores.get_mut(&store_id) {
-            if let Some(repo_state) = self.git_lanes.get_mut(&store_id) {
-                repo_state.register_path(repo.to_owned());
-            } else {
-                let mut repo_state = GitLaneState::with_path(None, repo.to_owned());
-                repo_state.mark_loaded_from_git();
-                self.git_lanes.insert(store_id, repo_state);
-            }
+        } else if let Some(session) = self.store_sessions.get_mut(&store_id) {
+            let (store, repo_state) = session.split_mut();
+            repo_state.register_path(repo.to_owned());
             if store.primary_remote != remote {
                 store.primary_remote = remote.clone();
             }
@@ -121,7 +120,7 @@ impl Daemon {
             .path_to_remote
             .insert(repo.to_owned(), remote.clone());
 
-        if !self.stores.contains_key(&store_id) {
+        if !self.store_sessions.contains_key(&store_id) {
             let open = StoreRuntime::open(
                 &self.layout,
                 store_id,
@@ -133,8 +132,11 @@ impl Daemon {
             )?;
             let runtime = open.runtime;
             self.seed_actor_clocks(&runtime)?;
-            self.stores.insert(store_id, runtime);
-            self.git_lanes.insert(store_id, GitLaneState::new());
+            let token = self.alloc_store_session_token(store_id);
+            self.store_sessions.insert(
+                store_id,
+                StoreSession::new(token, runtime, GitLaneState::new()),
+            );
             self.register_default_checkpoint_groups(store_id)?;
 
             let load_result = (|| -> Result<(), OpError> {
@@ -173,14 +175,9 @@ impl Daemon {
                 self.rollback_failed_initial_load(store_id);
                 return Err(err);
             }
-        } else if let Some(store) = self.stores.get_mut(&store_id) {
-            if let Some(repo_state) = self.git_lanes.get_mut(&store_id) {
-                repo_state.register_path(repo.to_owned());
-            } else {
-                let mut repo_state = GitLaneState::with_path(None, repo.to_owned());
-                repo_state.mark_loaded_from_git();
-                self.git_lanes.insert(store_id, repo_state);
-            }
+        } else if let Some(session) = self.store_sessions.get_mut(&store_id) {
+            let (store, repo_state) = session.split_mut();
+            repo_state.register_path(repo.to_owned());
             if store.primary_remote != remote {
                 store.primary_remote = remote.clone();
             }
@@ -206,7 +203,9 @@ impl Daemon {
         let mut needs_sync = loaded.needs_sync;
         let mut state = store_state_from_legacy(loaded.state);
         let root_slug = loaded.root_slug;
-        let checkpoint_imports = self.load_checkpoint_imports(store_id, repo);
+        let checkpoint_imports = self
+            .load_checkpoint_imports(store_id, repo)
+            .map_err(Self::checkpoint_compatibility_op_error)?;
         for import in &checkpoint_imports {
             match merge_store_states(&state, &import.state) {
                 Ok(merged) => state = merged,
@@ -217,32 +216,32 @@ impl Daemon {
             }
         }
 
-        let replayed_event_wal = {
+        let pending_replay = {
             let store_dir = self.layout().store_dir(&store_id);
             let store = self
-                .stores
+                .store_sessions
                 .get(&store_id)
-                .expect("loaded store missing from state");
-            replay_event_wal(
-                &store_dir,
-                store.wal_index.as_ref(),
-                &mut state,
-                self.limits(),
-            )?
+                .expect("loaded store missing from state")
+                .runtime();
+            replay_event_wal(&store_dir, store.wal_index.as_ref(), state, self.limits())?
         };
-        if replayed_event_wal {
-            needs_sync = true;
-        }
 
-        if !checkpoint_imports.is_empty() {
+        {
             let store = self
-                .stores
+                .store_sessions
                 .get_mut(&store_id)
-                .expect("loaded store missing from state");
-            apply_checkpoint_watermarks(store, &checkpoint_imports)?;
+                .expect("loaded store missing from state")
+                .runtime_mut();
+            if !checkpoint_imports.is_empty() {
+                apply_checkpoint_watermarks(store, &checkpoint_imports)?;
+            }
+            let replay = pending_replay.acknowledge_checkpoint_dirty(store);
+            if replay.replayed_any {
+                needs_sync = true;
+            }
+            last_seen_stamp = max_write_stamp(last_seen_stamp, replay.max_write_stamp);
         }
 
-        last_seen_stamp = max_write_stamp(last_seen_stamp, state.max_write_stamp());
         if let Some(max_stamp) = last_seen_stamp.as_ref() {
             self.clock.receive(max_stamp);
         }
@@ -278,14 +277,13 @@ impl Daemon {
             self.scheduler.schedule(remote.clone());
         }
 
-        let store = self
-            .stores
+        let session = self
+            .store_sessions
             .get_mut(&store_id)
             .expect("loaded store missing from state");
-        store.state = state;
-        self.git_lanes.insert(store_id, repo_state);
-        if store.primary_remote != *remote {
-            store.primary_remote = remote.clone();
+        *session.lane_mut() = repo_state;
+        if session.runtime().primary_remote != *remote {
+            session.runtime_mut().primary_remote = remote.clone();
         }
 
         // Initial Go-compat export for newly loaded repo
@@ -309,6 +307,13 @@ impl Daemon {
             repo: repo.to_owned(),
             timeout_secs: timeout.as_secs(),
             remote: remote.as_str().to_string(),
+        }
+    }
+
+    fn checkpoint_compatibility_op_error(err: CheckpointCompatibilityError) -> OpError {
+        OpError::ValidationFailed {
+            field: "checkpoint_compatibility".into(),
+            reason: err.to_string(),
         }
     }
 }

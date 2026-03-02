@@ -3,13 +3,40 @@
 //! This module is feature-gated (`test-harness`) so production builds do not
 //! expose daemon internals.
 
+use crossbeam::channel::{Receiver, Sender};
+
 pub use crate::clock::Clock;
-pub use crate::runtime::GitOp;
+
+#[derive(Clone)]
+pub struct TestGitTx(Sender<crate::runtime::git_worker::GitOp>);
+
+#[allow(dead_code)]
+pub struct TestGitRx(Receiver<crate::runtime::git_worker::GitOp>);
+
+pub fn new_test_git_channel() -> (TestGitTx, TestGitRx) {
+    let (tx, rx) = crossbeam::channel::unbounded();
+    (TestGitTx(tx), TestGitRx(rx))
+}
 
 pub mod core {
     pub use crate::runtime::core::{
-        Daemon, HandleOutcome, insert_store_for_tests, replay_event_wal,
+        Daemon, HandleOutcome, PendingReplayApply, ReplayApplyOutcome, insert_store_for_tests,
+        replay_event_wal,
     };
+}
+
+pub fn handle_request_for_tests(
+    daemon: &mut core::Daemon,
+    request: ipc::Request,
+    git_tx: &TestGitTx,
+) -> core::HandleOutcome {
+    daemon.handle_request(request, &git_tx.0)
+}
+
+impl TestGitTx {
+    pub fn clone_for_tests(&self) -> Self {
+        self.clone()
+    }
 }
 
 pub mod durability_coordinator {

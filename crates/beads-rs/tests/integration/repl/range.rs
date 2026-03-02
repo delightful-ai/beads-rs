@@ -5,7 +5,7 @@ use beads_core::{Limits, NamespaceId, Seq0, StoreMeta, StoreMetaVersions};
 use beads_daemon::testkit::repl::{WalRangeError, WalRangeReader};
 use beads_daemon::testkit::wal::{
     IndexDurabilityMode, SegmentConfig, SegmentSyncMode, SegmentWriter, SqliteWalIndex,
-    WAL_FORMAT_VERSION, rebuild_index,
+    WAL_FORMAT_VERSION, WalReplayError, rebuild_index,
 };
 use beads_rs::paths;
 use rusqlite::params;
@@ -86,13 +86,8 @@ fn wal_range_reader_rejects_internal_gap() {
 
     let index =
         SqliteWalIndex::open(&store_dir, &meta, IndexDurabilityMode::Cache).expect("open index");
-    rebuild_index(&store_dir, &meta, &index, &limits).expect("rebuild index");
-    let reader = WalRangeReader::new(store_dir.clone(), Arc::new(index), limits.clone());
-
-    let err = reader
-        .read_range(&namespace, &origin, Seq0::ZERO, limits.max_frame_bytes)
-        .expect_err("expected gap");
-    assert!(matches!(err, WalRangeError::MissingRange { .. }));
+    let err = rebuild_index(&store_dir, &meta, &index, &limits).expect_err("expected gap");
+    assert!(matches!(err, WalReplayError::NonContiguousSeq { .. }));
 }
 
 #[test]

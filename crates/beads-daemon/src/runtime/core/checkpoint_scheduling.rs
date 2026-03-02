@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 
 use crossbeam::channel::Sender;
 
-use super::Daemon;
 use super::helpers::resolve_checkpoint_git_ref;
+use super::{Daemon, StoreSessionToken};
 use crate::core::{NamespaceId, ReplicaId, StoreId, WallClock};
 use crate::git::checkpoint::{CheckpointPublishError, CheckpointPublishOutcome};
 use crate::runtime::checkpoint_scheduler::{
@@ -38,9 +38,10 @@ impl Daemon {
             return Ok(());
         }
         let store = self
-            .stores
+            .store_sessions
             .get(&store_id)
-            .expect("loaded store missing from state");
+            .expect("loaded store missing from state")
+            .runtime();
         let configs = self.checkpoint_group_configs(store_id, store.meta.replica_id);
         for config in configs {
             self.checkpoint_scheduler.register_group(config);
@@ -157,7 +158,7 @@ impl Daemon {
         );
 
         // Re-register checkpoint groups for all loaded stores
-        let store_ids: Vec<StoreId> = self.stores.keys().copied().collect();
+        let store_ids: Vec<StoreId> = self.store_sessions.keys().copied().collect();
         for store_id in store_ids {
             if let Err(e) = self.register_default_checkpoint_groups(store_id) {
                 tracing::warn!(
@@ -173,10 +174,14 @@ impl Daemon {
 
     pub(in crate::runtime) fn complete_checkpoint(
         &mut self,
-        store_id: StoreId,
+        session: StoreSessionToken,
         checkpoint_group: &str,
         result: Result<CheckpointPublishOutcome, CheckpointPublishError>,
     ) {
+        if !self.session_matches(session) {
+            return;
+        }
+        let store_id = session.store_id();
         let key = CheckpointGroupKey {
             store_id,
             group: checkpoint_group.to_string(),
@@ -189,8 +194,10 @@ impl Daemon {
                     checkpoint_id = %outcome.checkpoint_id,
                     "checkpoint publish succeeded"
                 );
-                if let Some(store) = self.stores.get_mut(&store_id) {
-                    store.commit_checkpoint_dirty_shards(checkpoint_group);
+                if let Some(session) = self.store_session_by_id_mut(store_id) {
+                    session
+                        .runtime_mut()
+                        .commit_checkpoint_dirty_shards(checkpoint_group);
                 }
                 self.checkpoint_scheduler.complete_success(
                     &key,
@@ -205,8 +212,10 @@ impl Daemon {
                     error = ?err,
                     "checkpoint publish failed"
                 );
-                if let Some(store) = self.stores.get_mut(&store_id) {
-                    store.rollback_checkpoint_dirty_shards(checkpoint_group);
+                if let Some(session) = self.store_session_by_id_mut(store_id) {
+                    session
+                        .runtime_mut()
+                        .rollback_checkpoint_dirty_shards(checkpoint_group);
                 }
                 self.checkpoint_scheduler
                     .complete_failure(&key, Instant::now());
@@ -241,12 +250,18 @@ impl Daemon {
             .checkpoint_scheduler
             .checkpoint_groups_for_store(key.store_id);
 
-        let (snapshot, repo_path) = {
-            let Some(path) = self
-                .git_lanes
-                .get(&key.store_id)
-                .and_then(|lane| lane.any_valid_path().cloned())
-            else {
+        let (session_token, snapshot, repo_path) = {
+            let Some(session) = self.store_sessions.get_mut(&key.store_id) else {
+                tracing::warn!(
+                    store_id = %key.store_id,
+                    checkpoint_group = %config.group,
+                    "checkpoint store session missing"
+                );
+                self.checkpoint_scheduler.complete_failure(key, now);
+                self.emit_checkpoint_queue_depth();
+                return;
+            };
+            let Some(path) = session.lane().any_valid_path().cloned() else {
                 tracing::warn!(
                     store_id = %key.store_id,
                     checkpoint_group = %config.group,
@@ -256,19 +271,7 @@ impl Daemon {
                 self.emit_checkpoint_queue_depth();
                 return;
             };
-            let store = match self.stores.get_mut(&key.store_id) {
-                Some(store) => store,
-                None => {
-                    tracing::warn!(
-                        store_id = %key.store_id,
-                        checkpoint_group = %config.group,
-                        "checkpoint store missing"
-                    );
-                    self.checkpoint_scheduler.complete_failure(key, now);
-                    self.emit_checkpoint_queue_depth();
-                    return;
-                }
-            };
+            let store = session.runtime_mut();
             let created_at_ms = WallClock::now().0;
             let snapshot =
                 match store.checkpoint_snapshot(&config.group, &config.namespaces, created_at_ms) {
@@ -285,12 +288,13 @@ impl Daemon {
                         return;
                     }
                 };
-            (snapshot, path)
+            (session.token(), snapshot, path)
         };
 
         if git_tx
             .send(GitOp::Checkpoint {
                 repo: repo_path,
+                session: session_token,
                 store_id: key.store_id,
                 checkpoint_group: config.group.clone(),
                 git_ref: config.git_ref.clone(),
@@ -307,8 +311,10 @@ impl Daemon {
                 checkpoint_group = %config.group,
                 "checkpoint git worker not responding"
             );
-            if let Some(store) = self.stores.get_mut(&key.store_id) {
-                store.rollback_checkpoint_dirty_shards(&config.group);
+            if let Some(session) = self.store_sessions.get_mut(&key.store_id) {
+                session
+                    .runtime_mut()
+                    .rollback_checkpoint_dirty_shards(&config.group);
             }
             self.checkpoint_scheduler.complete_failure(key, now);
             self.emit_checkpoint_queue_depth();

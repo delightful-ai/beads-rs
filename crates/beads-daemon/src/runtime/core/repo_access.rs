@@ -2,15 +2,11 @@ use super::*;
 
 impl Daemon {
     pub(crate) fn loaded_store(&mut self, store_id: StoreId, remote: RemoteUrl) -> LoadedStore<'_> {
-        let store = self
-            .stores
+        let session = self
+            .store_sessions
             .get_mut(&store_id)
             .expect("loaded store missing from state");
-        let lane = self
-            .git_lanes
-            .get_mut(&store_id)
-            .expect("loaded store missing from state");
-        LoadedStore::new(store_id, remote, store, lane)
+        LoadedStore::new(store_id, remote, session)
     }
 
     pub(crate) fn try_loaded_store(
@@ -18,21 +14,31 @@ impl Daemon {
         store_id: StoreId,
         remote: RemoteUrl,
     ) -> Option<LoadedStore<'_>> {
-        let store = self.stores.get_mut(&store_id)?;
-        let lane = self.git_lanes.get_mut(&store_id)?;
-        Some(LoadedStore::new(store_id, remote, store, lane))
+        let session = self.store_sessions.get_mut(&store_id)?;
+        Some(LoadedStore::new(store_id, remote, session))
     }
 
     #[cfg(feature = "test-harness")]
     #[allow(dead_code)]
     pub fn store_runtime_by_id(&self, store_id: StoreId) -> Option<&StoreRuntime> {
-        self.stores.get(&store_id)
+        self.store_sessions
+            .get(&store_id)
+            .map(StoreSession::runtime)
     }
 
     #[cfg(feature = "test-harness")]
     #[allow(dead_code)]
     pub fn store_runtime_by_id_mut(&mut self, store_id: StoreId) -> Option<&mut StoreRuntime> {
-        self.stores.get_mut(&store_id)
+        self.store_sessions
+            .get_mut(&store_id)
+            .map(StoreSession::runtime_mut)
+    }
+
+    pub(crate) fn store_session_by_id_mut(
+        &mut self,
+        store_id: StoreId,
+    ) -> Option<&mut StoreSession> {
+        self.store_sessions.get_mut(&store_id)
     }
 
     pub(crate) fn namespace_state<'a>(
@@ -62,22 +68,17 @@ impl Daemon {
             .map(|resolution| resolution.store_id)
     }
 
-    pub(crate) fn store_and_lane_by_id_mut(
-        &mut self,
-        store_id: StoreId,
-    ) -> Option<(&mut StoreRuntime, &mut GitLaneState)> {
-        let store = self.stores.get_mut(&store_id)?;
-        let lane = self.git_lanes.get_mut(&store_id)?;
-        Some((store, lane))
-    }
-
     pub(crate) fn drop_store_state(&mut self, store_id: StoreId) {
-        if let Some(store) = self.stores.get(&store_id) {
-            self.scheduler.cancel(&store.primary_remote);
+        if let Some(session) = self.store_sessions.get(&store_id) {
+            self.scheduler.cancel(&session.runtime().primary_remote);
         }
         self.checkpoint_scheduler.drop_store(store_id);
-        self.stores.remove(&store_id);
-        self.git_lanes.remove(&store_id);
+        if let Some(mut session) = self.store_sessions.remove(&store_id)
+            && let Some(handles) = session.take_repl_handles()
+        {
+            handles.shutdown();
+        }
+        self.export_pending.remove(&store_id);
     }
 
     pub(crate) fn resolve_store(&mut self, repo: &Path) -> Result<ResolvedStore, OpError> {
@@ -102,10 +103,13 @@ impl Daemon {
         self.store_caches
             .remote_to_store
             .get(remote)
-            .and_then(|resolution| self.git_lanes.get(&resolution.store_id))
+            .and_then(|resolution| self.store_sessions.get(&resolution.store_id))
+            .map(StoreSession::lane)
     }
 
     pub(crate) fn primary_remote_for_store(&self, store_id: &StoreId) -> Option<&RemoteUrl> {
-        self.stores.get(store_id).map(|store| &store.primary_remote)
+        self.store_sessions
+            .get(store_id)
+            .map(|session| &session.runtime().primary_remote)
     }
 }

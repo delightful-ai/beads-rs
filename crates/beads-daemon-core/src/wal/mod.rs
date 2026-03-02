@@ -9,7 +9,7 @@ use crate::core::error::details as error_details;
 use crate::core::{
     ActorId, Applied, CliErrorCode, ClientRequestId, Durable, ErrorCode, ErrorPayload, EventId,
     HeadStatus, IntoErrorPayload, NamespaceId, ProtocolErrorCode, ReplicaId, SegmentId, Seq0, Seq1,
-    StoreId, Transience, TxnId, Watermark,
+    StoreId, Transience, TxnId, Watermark, WatermarkPair,
 };
 pub use crate::core::{ReplicaDurabilityRole, ReplicaDurabilityRoleError};
 
@@ -55,7 +55,10 @@ pub use replay::{
     RecordShaMismatchInfo, ReplayMode, ReplayStats, WalReplayError, catch_up_index, rebuild_index,
 };
 #[cfg(feature = "wal-fs")]
-pub use seams::{WalAppend, WalIndexTxnProvider, WalReadRange};
+pub use seams::{
+    AcknowledgedWalAppend, PendingWalAppend, WalAppend, WalAppendDurabilityEffect,
+    WalIndexTxnProvider, WalReadRange,
+};
 #[cfg(feature = "wal-fs")]
 pub use segment::{
     AppendOutcome, SEGMENT_HEADER_PREFIX_LEN, SegmentConfig, SegmentHeader, SegmentSyncMode,
@@ -371,11 +374,15 @@ pub trait WalIndexTxn {
         &mut self,
         ns: &NamespaceId,
         origin: &ReplicaId,
-        applied: Watermark<Applied>,
-        durable: Watermark<Durable>,
+        watermarks: WatermarkPair,
     ) -> Result<(), WalIndexError>;
     fn update_hlc(&mut self, hlc: &HlcRow) -> Result<(), WalIndexError>;
     fn upsert_segment(&mut self, segment: &SegmentRow) -> Result<(), WalIndexError>;
+    fn replace_namespace_segments(
+        &mut self,
+        ns: &NamespaceId,
+        segments: &[SegmentRow],
+    ) -> Result<(), WalIndexError>;
     #[allow(clippy::too_many_arguments)]
     fn upsert_client_request(
         &mut self,
@@ -399,6 +406,7 @@ pub trait WalIndexReader {
         eid: &EventId,
     ) -> Result<Option<[u8; 32]>, WalIndexError>;
     fn list_segments(&self, ns: &NamespaceId) -> Result<Vec<SegmentRow>, WalIndexError>;
+    fn list_segment_namespaces(&self) -> Result<Vec<NamespaceId>, WalIndexError>;
     fn load_watermarks(&self) -> Result<Vec<WatermarkRow>, WalIndexError>;
     fn load_hlc(&self) -> Result<Vec<HlcRow>, WalIndexError>;
     fn load_replica_liveness(&self) -> Result<Vec<ReplicaLivenessRow>, WalIndexError>;
@@ -525,6 +533,19 @@ pub struct IndexedRangeItem {
     pub client_request_id: Option<ClientRequestId>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct WalCursorOffset(u64);
+
+impl WalCursorOffset {
+    pub const fn new(offset: u64) -> Self {
+        Self(offset)
+    }
+
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SegmentRow {
     Open {
@@ -532,14 +553,14 @@ pub enum SegmentRow {
         segment_id: SegmentId,
         segment_path: PathBuf,
         created_at_ms: u64,
-        last_indexed_offset: u64,
+        last_indexed_offset: WalCursorOffset,
     },
     Sealed {
         namespace: NamespaceId,
         segment_id: SegmentId,
         segment_path: PathBuf,
         created_at_ms: u64,
-        last_indexed_offset: u64,
+        last_indexed_offset: WalCursorOffset,
         final_len: u64,
     },
 }
@@ -580,28 +601,47 @@ impl SegmentRow {
 pub struct WatermarkRow {
     pub namespace: NamespaceId,
     pub origin: ReplicaId,
-    pub applied: Watermark<Applied>,
-    pub durable: Watermark<Durable>,
+    watermarks: WatermarkPair,
 }
 
 impl WatermarkRow {
+    pub fn new(namespace: NamespaceId, origin: ReplicaId, watermarks: WatermarkPair) -> Self {
+        Self {
+            namespace,
+            origin,
+            watermarks,
+        }
+    }
+
+    pub fn watermarks(&self) -> WatermarkPair {
+        self.watermarks
+    }
+
+    pub fn applied(&self) -> Watermark<Applied> {
+        self.watermarks.applied()
+    }
+
+    pub fn durable(&self) -> Watermark<Durable> {
+        self.watermarks.durable()
+    }
+
     pub fn applied_seq(&self) -> u64 {
-        self.applied.seq().get()
+        self.applied().seq().get()
     }
 
     pub fn durable_seq(&self) -> u64 {
-        self.durable.seq().get()
+        self.durable().seq().get()
     }
 
     pub fn applied_head_sha(&self) -> Option<[u8; 32]> {
-        match self.applied.head() {
+        match self.applied().head() {
             HeadStatus::Known(sha) => Some(sha),
             HeadStatus::Genesis => None,
         }
     }
 
     pub fn durable_head_sha(&self) -> Option<[u8; 32]> {
-        match self.durable.head() {
+        match self.durable().head() {
             HeadStatus::Known(sha) => Some(sha),
             HeadStatus::Genesis => None,
         }
@@ -636,7 +676,7 @@ impl SegmentRow {
         segment_id: SegmentId,
         segment_path: PathBuf,
         created_at_ms: u64,
-        last_indexed_offset: u64,
+        last_indexed_offset: WalCursorOffset,
     ) -> Self {
         Self::Open {
             namespace,
@@ -652,7 +692,7 @@ impl SegmentRow {
         segment_id: SegmentId,
         segment_path: PathBuf,
         created_at_ms: u64,
-        last_indexed_offset: u64,
+        last_indexed_offset: WalCursorOffset,
         final_len: u64,
     ) -> Self {
         Self::Sealed {
@@ -665,7 +705,7 @@ impl SegmentRow {
         }
     }
 
-    pub fn last_indexed_offset(&self) -> u64 {
+    pub fn last_indexed_offset(&self) -> WalCursorOffset {
         match self {
             SegmentRow::Open {
                 last_indexed_offset,

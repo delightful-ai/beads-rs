@@ -97,6 +97,7 @@ impl LoadedStore<'_> {
         let _ = git_tx.send(GitOp::Sync {
             repo: path,
             remote: self.remote().clone(),
+            session: self.session_token(),
             store_id: self.store_id(),
             state: self.runtime().state.core().clone(),
             actor,

@@ -192,6 +192,78 @@ impl<K> Default for Watermark<K> {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct WatermarkPair {
+    applied: Watermark<Applied>,
+    durable: Watermark<Durable>,
+}
+
+impl WatermarkPair {
+    pub fn new(
+        applied: Watermark<Applied>,
+        durable: Watermark<Durable>,
+    ) -> Result<Self, WatermarkPairError> {
+        if durable.seq() > applied.seq() {
+            return Err(WatermarkPairError::DurableAhead {
+                durable: durable.seq(),
+                applied: applied.seq(),
+            });
+        }
+        if durable.seq() == applied.seq() && durable.head() != applied.head() {
+            return Err(WatermarkPairError::EqualSeqHeadMismatch {
+                seq: durable.seq(),
+                applied: applied.head(),
+                durable: durable.head(),
+            });
+        }
+        Ok(Self { applied, durable })
+    }
+
+    pub fn genesis() -> Self {
+        Self {
+            applied: Watermark::genesis(),
+            durable: Watermark::genesis(),
+        }
+    }
+
+    pub fn applied(self) -> Watermark<Applied> {
+        self.applied
+    }
+
+    pub fn durable(self) -> Watermark<Durable> {
+        self.durable
+    }
+}
+
+impl Serialize for WatermarkPair {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let wire = WatermarkPairWire {
+            applied: self.applied,
+            durable: self.durable,
+        };
+        wire.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for WatermarkPair {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = WatermarkPairWire::deserialize(deserializer)?;
+        WatermarkPair::new(wire.applied, wire.durable).map_err(serde::de::Error::custom)
+    }
+}
+
+impl Default for WatermarkPair {
+    fn default() -> Self {
+        Self::genesis()
+    }
+}
+
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum WatermarkError {
     #[error("expected contiguous seq {expected}, got {got}")]
@@ -205,6 +277,20 @@ pub enum WatermarkError {
         seq: Seq0,
         left: HeadStatus,
         right: HeadStatus,
+    },
+}
+
+#[derive(Debug, Error, Clone, PartialEq, Eq)]
+pub enum WatermarkPairError {
+    #[error("durable watermark seq {durable} exceeds applied seq {applied}")]
+    DurableAhead { durable: Seq0, applied: Seq0 },
+    #[error(
+        "applied and durable heads differ at seq {seq}: applied={applied:?}, durable={durable:?}"
+    )]
+    EqualSeqHeadMismatch {
+        seq: Seq0,
+        applied: HeadStatus,
+        durable: HeadStatus,
     },
 }
 
@@ -362,6 +448,12 @@ struct WatermarkWire {
     head: HeadStatus,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct WatermarkPairWire {
+    applied: Watermark<Applied>,
+    durable: Watermark<Durable>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -486,5 +578,60 @@ mod tests {
             .observe_at_least(&ns, &origin, seq, HeadStatus::Known([7u8; 32]))
             .unwrap_err();
         assert_eq!(err, WatermarkError::UnexpectedHead { seq });
+    }
+
+    #[test]
+    fn watermark_pair_rejects_durable_ahead_of_applied() {
+        let applied =
+            Watermark::<Applied>::new(Seq0::new(1), HeadStatus::Known([1u8; 32])).unwrap();
+        let durable =
+            Watermark::<Durable>::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap();
+        let err = WatermarkPair::new(applied, durable).unwrap_err();
+        assert_eq!(
+            err,
+            WatermarkPairError::DurableAhead {
+                durable: Seq0::new(2),
+                applied: Seq0::new(1),
+            }
+        );
+    }
+
+    #[test]
+    fn watermark_pair_rejects_equal_seq_with_mismatched_heads() {
+        let applied =
+            Watermark::<Applied>::new(Seq0::new(3), HeadStatus::Known([3u8; 32])).unwrap();
+        let durable =
+            Watermark::<Durable>::new(Seq0::new(3), HeadStatus::Known([4u8; 32])).unwrap();
+        let err = WatermarkPair::new(applied, durable).unwrap_err();
+        assert_eq!(
+            err,
+            WatermarkPairError::EqualSeqHeadMismatch {
+                seq: Seq0::new(3),
+                applied: HeadStatus::Known([3u8; 32]),
+                durable: HeadStatus::Known([4u8; 32]),
+            }
+        );
+    }
+
+    #[test]
+    fn watermark_pair_accepts_valid_unequal_seq() {
+        let applied =
+            Watermark::<Applied>::new(Seq0::new(3), HeadStatus::Known([3u8; 32])).unwrap();
+        let durable =
+            Watermark::<Durable>::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap();
+        let pair = WatermarkPair::new(applied, durable).unwrap();
+        assert_eq!(pair.applied(), applied);
+        assert_eq!(pair.durable(), durable);
+    }
+
+    #[test]
+    fn watermark_pair_accepts_equal_seq_with_matching_head() {
+        let applied =
+            Watermark::<Applied>::new(Seq0::new(4), HeadStatus::Known([6u8; 32])).unwrap();
+        let durable =
+            Watermark::<Durable>::new(Seq0::new(4), HeadStatus::Known([6u8; 32])).unwrap();
+        let pair = WatermarkPair::new(applied, durable).unwrap();
+        assert_eq!(pair.applied(), applied);
+        assert_eq!(pair.durable(), durable);
     }
 }

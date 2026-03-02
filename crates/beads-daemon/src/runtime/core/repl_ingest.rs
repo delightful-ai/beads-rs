@@ -1,12 +1,24 @@
 use super::*;
+use crate::runtime::wal::WalCursorOffset;
+use crate::runtime::wal_atomic_commit::{
+    AtomicWalCommitPath, AtomicWalDurabilityTxn, tip_watermark_pair,
+};
 
 impl Daemon {
     pub(super) fn ingest_remote_batch(
         &mut self,
-        store_id: StoreId,
+        session: StoreSessionToken,
         batch: ContiguousBatch,
         now_ms: u64,
     ) -> Result<IngestOutcome, ReplError> {
+        if !self.session_matches(session) {
+            return Err(ReplError::new(
+                CliErrorCode::Internal.into(),
+                "stale store session",
+                true,
+            ));
+        }
+        let store_id = session.store_id();
         let namespace = batch.namespace().clone();
         let origin = batch.origin();
         let actor_stamps: Vec<(ActorId, WriteStamp)> = batch
@@ -20,13 +32,10 @@ impl Daemon {
                 )
             })
             .collect();
-        let (stores, git_lanes) = (&mut self.stores, &mut self.git_lanes);
-        let store = stores.get_mut(&store_id).ok_or_else(|| {
+        let session = self.store_sessions.get_mut(&store_id).ok_or_else(|| {
             ReplError::new(CliErrorCode::Internal.into(), "store not loaded", true)
         })?;
-        let git_lane = git_lanes.get_mut(&store_id).ok_or_else(|| {
-            ReplError::new(CliErrorCode::Internal.into(), "store not loaded", true)
-        })?;
+        let (store, git_lane) = session.split_mut();
 
         let store_identity = store.meta.identity;
         let origin_seq_first = Some(batch.first().get());
@@ -46,11 +55,16 @@ impl Daemon {
         let store_dir = self.layout.store_dir(&store_id);
 
         let wal_index = Arc::clone(&store.wal_index);
-        let mut txn = wal_index
-            .begin_wal_txn()
-            .map_err(|err| wal_index_error_payload(&err))?;
+        let mut atomic_txn = AtomicWalDurabilityTxn::begin(
+            wal_index.as_ref(),
+            namespace.clone(),
+            origin,
+            AtomicWalCommitPath::ReplIngest,
+        )
+        .map_err(|err| wal_index_error_payload(&err))?;
 
         let mut canonical_shas = Vec::with_capacity(batch.len());
+        let mut batch_tip: Option<(Seq1, [u8; 32])> = None;
         for event in batch.events() {
             let payload = encode_event_body_canonical(event.body.as_ref()).map_err(|_| {
                 ReplError::new(
@@ -61,6 +75,7 @@ impl Daemon {
             })?;
             let sha = hash_event_body(&payload).0;
             canonical_shas.push(sha);
+            batch_tip = Some((event.body.origin_seq, sha));
             let record = VerifiedRecord::new(
                 RecordHeader {
                     origin_replica_id: origin,
@@ -89,11 +104,11 @@ impl Daemon {
 
             let append_start = Instant::now();
             let append = match store.event_wal.wal_append(&namespace, &record, now_ms) {
-                Ok(append) => {
+                Ok(pending_append) => {
                     let elapsed = append_start.elapsed();
                     metrics::wal_append_ok(elapsed);
                     metrics::wal_fsync_ok(elapsed);
-                    append
+                    pending_append.acknowledge_durability()
                 }
                 Err(err) => {
                     let elapsed = append_start.elapsed();
@@ -102,6 +117,9 @@ impl Daemon {
                     return Err(event_wal_error_payload(&namespace, None, None, err));
                 }
             };
+            let wal_effect = append.durability;
+            let append = append.append;
+            tracing::debug!(?wal_effect, "repl ingest wal durability acknowledged");
             let segment_snapshot =
                 store
                     .event_wal
@@ -113,7 +131,7 @@ impl Daemon {
                             false,
                         )
                     })?;
-            let last_indexed_offset = append.offset + append.len as u64;
+            let last_indexed_offset = WalCursorOffset::new(append.offset + append.len as u64);
             let segment_row = SegmentRow::open(
                 namespace.clone(),
                 append.segment_id,
@@ -122,7 +140,9 @@ impl Daemon {
                 last_indexed_offset,
             );
 
-            txn.upsert_segment(&segment_row)
+            atomic_txn
+                .index_mut()
+                .upsert_segment(&segment_row)
                 .map_err(|err| wal_index_error_payload(&err))?;
             if let Some(sealed) = append.sealed.as_ref() {
                 let sealed_row = SegmentRow::sealed(
@@ -130,46 +150,56 @@ impl Daemon {
                     sealed.segment_id,
                     segment_rel_path(&store_dir, &sealed.path),
                     sealed.created_at_ms,
-                    sealed.final_len,
+                    WalCursorOffset::new(sealed.final_len),
                     sealed.final_len,
                 );
-                txn.upsert_segment(&sealed_row)
+                atomic_txn
+                    .index_mut()
+                    .upsert_segment(&sealed_row)
                     .map_err(|err| wal_index_error_payload(&err))?;
             }
-            txn.record_event(
-                &namespace,
-                &event_id_for(origin, namespace.clone(), event.body.origin_seq),
-                sha,
-                event.prev.prev.map(|sha| sha.0),
-                append.segment_id,
-                append.offset,
-                append.len,
-                event.body.event_time_ms,
-                event.body.txn_id,
-                event.body.client_request_id,
-            )
-            .map_err(|err| wal_index_error_payload(&err))?;
+            atomic_txn
+                .index_mut()
+                .record_event(
+                    &namespace,
+                    &event_id_for(origin, namespace.clone(), event.body.origin_seq),
+                    sha,
+                    event.prev.prev.map(|sha| sha.0),
+                    append.segment_id,
+                    append.offset,
+                    append.len,
+                    event.body.event_time_ms,
+                    event.body.txn_id,
+                    event.body.client_request_id,
+                )
+                .map_err(|err| wal_index_error_payload(&err))?;
 
             let EventKindV1::TxnV1(txn_body) = &event.body.kind;
-            txn.update_hlc(&HlcRow {
-                actor_id: txn_body.hlc_max.actor_id.clone(),
-                last_physical_ms: txn_body.hlc_max.physical_ms,
-                last_logical: txn_body.hlc_max.logical,
-            })
-            .map_err(|err| wal_index_error_payload(&err))?;
+            atomic_txn
+                .index_mut()
+                .update_hlc(&HlcRow {
+                    actor_id: txn_body.hlc_max.actor_id.clone(),
+                    last_physical_ms: txn_body.hlc_max.physical_ms,
+                    last_logical: txn_body.hlc_max.logical,
+                })
+                .map_err(|err| wal_index_error_payload(&err))?;
         }
 
-        txn.commit().map_err(|err| wal_index_error_payload(&err))?;
-
+        let (tip_seq, tip_sha) = batch_tip.ok_or_else(|| {
+            ReplError::new(CliErrorCode::Internal.into(), "empty repl batch", false)
+        })?;
+        let commit_watermarks =
+            tip_watermark_pair(tip_seq, tip_sha).map_err(|err| wal_index_error_payload(&err))?;
         let (remote, max_stamp, durable, applied) = {
             let mut max_stamp = git_lane.last_seen_stamp.clone();
+            let mut staged_namespace_state = store.state.get_or_default(&namespace);
+            let mut apply_outcomes = Vec::with_capacity(batch.len());
+            let mut broadcasts = Vec::with_capacity(batch.len());
+            let mut watermark_advances = Vec::with_capacity(batch.len());
             for (event, canonical_sha) in batch.events().iter().zip(canonical_shas.iter().copied())
             {
                 let apply_start = Instant::now();
-                let apply_result = {
-                    let state = store.state.ensure_namespace(namespace.clone());
-                    apply_event(state, &event.body)
-                };
+                let apply_result = apply_event(&mut staged_namespace_state, &event.body);
                 let outcome = match apply_result {
                     Ok(outcome) => {
                         metrics::apply_ok(apply_start.elapsed());
@@ -180,7 +210,7 @@ impl Daemon {
                         return Err(apply_event_error_payload(&namespace, &origin, err));
                     }
                 };
-                store.record_checkpoint_dirty_shards(&namespace, &outcome);
+                apply_outcomes.push(outcome);
 
                 let EventKindV1::TxnV1(txn_body) = &event.body.kind;
                 let stamp = WriteStamp::new(txn_body.hlc_max.physical_ms, txn_body.hlc_max.logical);
@@ -195,17 +225,33 @@ impl Daemon {
                     prev_sha,
                     event.bytes.clone().into(),
                 );
+                broadcasts.push(broadcast);
+                watermark_advances.push((event.body.origin_seq, canonical_sha.0));
+            }
+
+            atomic_txn
+                .commit_with_watermarks(commit_watermarks)
+                .map_err(|err| wal_index_error_payload(&err))?;
+
+            store
+                .state
+                .set_namespace_state(namespace.clone(), staged_namespace_state);
+            for outcome in &apply_outcomes {
+                store.record_checkpoint_dirty_shards(&namespace, outcome);
+            }
+            for broadcast in broadcasts {
                 if let Err(err) = store.broadcaster.publish(broadcast) {
                     tracing::warn!("event broadcast failed: {err}");
                 }
-
+            }
+            for (origin_seq, head_sha) in watermark_advances {
                 store
                     .watermarks_applied
-                    .advance_contiguous(&namespace, &origin, event.body.origin_seq, canonical_sha.0)
+                    .advance_contiguous(&namespace, &origin, origin_seq, head_sha)
                     .map_err(|err| watermark_error_payload(&namespace, &origin, err))?;
                 store
                     .watermarks_durable
-                    .advance_contiguous(&namespace, &origin, event.body.origin_seq, canonical_sha.0)
+                    .advance_contiguous(&namespace, &origin, origin_seq, head_sha)
                     .map_err(|err| watermark_error_payload(&namespace, &origin, err))?;
             }
 
@@ -241,16 +287,6 @@ impl Daemon {
         self.mark_checkpoint_dirty(store_id, &namespace, batch.len() as u64);
         self.schedule_sync(remote);
 
-        let mut watermark_txn = wal_index
-            .begin_wal_txn()
-            .map_err(|err| wal_index_error_payload(&err))?;
-        watermark_txn
-            .update_watermark(&namespace, &origin, applied, durable)
-            .map_err(|err| wal_index_error_payload(&err))?;
-        watermark_txn
-            .commit()
-            .map_err(|err| wal_index_error_payload(&err))?;
-
         Ok(IngestOutcome { durable, applied })
     }
 
@@ -262,6 +298,9 @@ impl Daemon {
         batch: ContiguousBatch,
         now_ms: u64,
     ) -> Result<IngestOutcome, ReplError> {
-        self.ingest_remote_batch(store_id, batch, now_ms)
+        let session = self.session_token_for_store(store_id).ok_or_else(|| {
+            ReplError::new(CliErrorCode::Internal.into(), "store not loaded", true)
+        })?;
+        self.ingest_remote_batch(session, batch, now_ms)
     }
 }

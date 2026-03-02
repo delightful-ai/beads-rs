@@ -12,13 +12,13 @@ use uuid::Uuid;
 use crate::core::{
     ActorId, Applied, ClientRequestId, Durable, EventId, HeadStatus, NamespaceId,
     ReplicaDurabilityRole, ReplicaDurabilityRoleError, ReplicaId, ReplicaRole, SegmentId, Seq0,
-    Seq1, StoreMeta, StoreMetaVersions, TxnId, Watermark,
+    Seq1, StoreMeta, StoreMetaVersions, TxnId, Watermark, WatermarkPair,
 };
 
 pub use super::{
     ClientRequestEventIds, ClientRequestEventIdsError, ClientRequestRow, HlcRow,
-    IndexDurabilityMode, IndexedRangeItem, ReplicaLivenessRow, SegmentRow, WalIndex, WalIndexError,
-    WalIndexReader, WalIndexTxn, WalIndexWriter, WatermarkRow,
+    IndexDurabilityMode, IndexedRangeItem, ReplicaLivenessRow, SegmentRow, WalCursorOffset,
+    WalIndex, WalIndexError, WalIndexReader, WalIndexTxn, WalIndexWriter, WatermarkRow,
 };
 
 const INDEX_SCHEMA_VERSION: u32 = StoreMetaVersions::INDEX_SCHEMA_VERSION;
@@ -389,11 +389,12 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         &mut self,
         ns: &NamespaceId,
         origin: &ReplicaId,
-        applied: Watermark<Applied>,
-        durable: Watermark<Durable>,
+        watermarks: WatermarkPair,
     ) -> Result<(), WalIndexError> {
         let namespace = ns.as_str();
         let origin_blob = uuid_blob(origin.as_uuid());
+        let applied = watermarks.applied();
+        let durable = watermarks.durable();
         let applied_blob =
             head_sha_from_status(applied.head()).map(|value: [u8; 32]| value.to_vec());
         let durable_blob =
@@ -464,11 +465,43 @@ impl WalIndexTxn for SqliteWalIndexTxn {
             segment_blob,
             path_str.as_ref(),
             segment.created_at_ms() as i64,
-            segment.last_indexed_offset() as i64,
+            segment.last_indexed_offset().get() as i64,
             sealed,
             final_len,
         ])
         .map_err(map_sqlite_error)?;
+        Ok(())
+    }
+
+    fn replace_namespace_segments(
+        &mut self,
+        ns: &NamespaceId,
+        segments: &[SegmentRow],
+    ) -> Result<(), WalIndexError> {
+        for segment in segments {
+            if segment.namespace() != ns {
+                return Err(WalIndexError::SegmentRowDecode(format!(
+                    "segment namespace mismatch (expected {}, got {})",
+                    ns,
+                    segment.namespace()
+                )));
+            }
+        }
+
+        let namespace = ns.as_str();
+        {
+            let mut delete_stmt = self
+                .conn
+                .prepare_cached("DELETE FROM segments WHERE namespace = ?1")
+                .map_err(map_sqlite_error)?;
+            delete_stmt
+                .execute(params![namespace])
+                .map_err(map_sqlite_error)?;
+        }
+
+        for segment in segments {
+            self.upsert_segment(segment)?;
+        }
         Ok(())
     }
 
@@ -657,6 +690,7 @@ impl WalIndexReader for SqliteWalIndexReader {
                 let last_indexed_offset = u64::try_from(last_indexed_offset).map_err(|_| {
                     WalIndexError::SegmentRowDecode("last_indexed_offset out of range".to_string())
                 })?;
+                let last_indexed_offset = WalCursorOffset::new(last_indexed_offset);
                 let final_len = match final_len {
                     Some(value) => Some(u64::try_from(value).map_err(|_| {
                         WalIndexError::SegmentRowDecode("final_len out of range".to_string())
@@ -703,6 +737,24 @@ impl WalIndexReader for SqliteWalIndexReader {
         })
     }
 
+    fn list_segment_namespaces(&self) -> Result<Vec<NamespaceId>, WalIndexError> {
+        self.with_conn(|conn| {
+            let mut stmt = conn
+                .prepare_cached("SELECT DISTINCT namespace FROM segments ORDER BY namespace ASC")
+                .map_err(map_sqlite_error)?;
+            let mut rows = stmt.query([]).map_err(map_sqlite_error)?;
+            let mut namespaces = Vec::new();
+            while let Some(row) = rows.next().map_err(map_sqlite_error)? {
+                let namespace: String = row.get(0).map_err(map_sqlite_error)?;
+                namespaces.push(
+                    NamespaceId::parse(&namespace)
+                        .map_err(|err| WalIndexError::SegmentRowDecode(err.to_string()))?,
+                );
+            }
+            Ok(namespaces)
+        })
+    }
+
     fn load_watermarks(&self) -> Result<Vec<WatermarkRow>, WalIndexError> {
         self.with_conn(|conn| {
             let mut stmt = conn.prepare_cached(
@@ -737,13 +789,16 @@ impl WalIndexReader for SqliteWalIndexReader {
                     .map(blob_32)
                     .transpose()
                     .map_err(|err| WalIndexError::WatermarkRowDecode(err.to_string()))?;
+                let applied = watermark_from_columns::<Applied>(applied_seq, applied_head_sha)?;
+                let durable = watermark_from_columns::<Durable>(durable_seq, durable_head_sha)?;
+                let watermark_pair = WatermarkPair::new(applied, durable)
+                    .map_err(|err| WalIndexError::WatermarkRowDecode(err.to_string()))?;
 
-                watermarks.push(WatermarkRow {
+                watermarks.push(WatermarkRow::new(
                     namespace,
-                    origin: ReplicaId::new(origin_uuid),
-                    applied: watermark_from_columns::<Applied>(applied_seq, applied_head_sha)?,
-                    durable: watermark_from_columns::<Durable>(durable_seq, durable_head_sha)?,
-                });
+                    ReplicaId::new(origin_uuid),
+                    watermark_pair,
+                ));
             }
             Ok(watermarks)
         })
@@ -999,6 +1054,21 @@ fn initialize_schema(conn: &Connection) -> Result<(), WalIndexError> {
            durable_seq INTEGER NOT NULL,
            applied_head_sha BLOB,
            durable_head_sha BLOB,
+           CHECK (applied_seq >= 0),
+           CHECK (durable_seq >= 0),
+           CHECK (
+             (applied_seq = 0 AND applied_head_sha IS NULL) OR
+             (applied_seq > 0 AND applied_head_sha IS NOT NULL AND length(applied_head_sha) = 32)
+           ),
+           CHECK (
+             (durable_seq = 0 AND durable_head_sha IS NULL) OR
+             (durable_seq > 0 AND durable_head_sha IS NOT NULL AND length(durable_head_sha) = 32)
+           ),
+           CHECK (durable_seq <= applied_seq),
+           CHECK (
+             durable_seq != applied_seq OR
+             durable_head_sha IS applied_head_sha
+           ),
            PRIMARY KEY (namespace, origin_replica_id)
          );
          CREATE TABLE IF NOT EXISTS client_requests (
@@ -1549,8 +1619,8 @@ mod tests {
         let seq = origin_seq.get();
         let applied = Watermark::<Applied>::new(Seq0::new(seq), HeadStatus::Known(sha)).unwrap();
         let durable = Watermark::<Durable>::new(Seq0::new(seq), HeadStatus::Known(sha)).unwrap();
-        txn.update_watermark(&ns, &origin, applied, durable)
-            .unwrap();
+        let watermarks = WatermarkPair::new(applied, durable).unwrap();
+        txn.update_watermark(&ns, &origin, watermarks).unwrap();
         let event_ids = ClientRequestEventIds::single(event_id.clone());
         txn.upsert_client_request(
             &ns,
@@ -1598,10 +1668,10 @@ mod tests {
         let applied =
             Watermark::<Applied>::new(Seq0::new(2), HeadStatus::Known(applied_head)).unwrap();
         let durable = Watermark::<Durable>::genesis();
+        let watermarks = WatermarkPair::new(applied, durable).unwrap();
 
         let mut txn = index.writer().begin_txn().unwrap();
-        txn.update_watermark(&ns, &origin, applied, durable)
-            .unwrap();
+        txn.update_watermark(&ns, &origin, watermarks).unwrap();
         txn.commit().unwrap();
 
         let rows = index.reader().load_watermarks().unwrap();
@@ -1610,38 +1680,141 @@ mod tests {
         assert_eq!(row.namespace, ns);
         assert_eq!(row.origin, origin);
         assert_eq!(
-            row.applied,
+            row.applied(),
             Watermark::<Applied>::new(Seq0::new(2), HeadStatus::Known(applied_head)).unwrap()
         );
-        assert_eq!(row.durable, Watermark::<Durable>::genesis());
+        assert_eq!(row.durable(), Watermark::<Durable>::genesis());
+    }
+
+    fn assert_watermark_insert_rejected(
+        conn: &Connection,
+        ns: &NamespaceId,
+        origin: &ReplicaId,
+        applied_seq: i64,
+        durable_seq: i64,
+        applied_head_sha: Option<Vec<u8>>,
+        durable_head_sha: Option<Vec<u8>>,
+    ) {
+        let err = conn
+            .execute(
+                "INSERT INTO watermarks (namespace, origin_replica_id, applied_seq, durable_seq, applied_head_sha, durable_head_sha) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    ns.as_str(),
+                    uuid_blob(origin.as_uuid()),
+                    applied_seq,
+                    durable_seq,
+                    applied_head_sha,
+                    durable_head_sha,
+                ],
+            )
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("CHECK constraint failed"),
+            "expected CHECK constraint failure, got {err}"
+        );
     }
 
     #[test]
-    fn sqlite_index_rejects_invalid_watermark_rows() {
+    fn sqlite_index_rejects_applied_nonzero_with_null_head() {
         let temp = TempDir::new().unwrap();
         let meta = test_meta();
-        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let _index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
         let ns = NamespaceId::core();
         let origin = meta.replica_id;
         let db_path = temp.path().join("index").join("wal.sqlite");
         let conn = open_connection(&db_path, IndexDurabilityMode::Cache, false).unwrap();
 
-        conn.execute(
-            "INSERT INTO watermarks (namespace, origin_replica_id, applied_seq, durable_seq, applied_head_sha, durable_head_sha) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                ns.as_str(),
-                uuid_blob(origin.as_uuid()),
-                1i64,
-                0i64,
-                Option::<Vec<u8>>::None,
-                Option::<Vec<u8>>::None,
-            ],
-        )
-        .unwrap();
+        assert_watermark_insert_rejected(&conn, &ns, &origin, 1, 0, None, None);
+    }
 
-        let err = index.reader().load_watermarks().unwrap_err();
-        assert!(matches!(err, WalIndexError::WatermarkRowDecode(_)));
+    #[test]
+    fn sqlite_index_rejects_applied_zero_with_non_null_head() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let _index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let origin = meta.replica_id;
+        let db_path = temp.path().join("index").join("wal.sqlite");
+        let conn = open_connection(&db_path, IndexDurabilityMode::Cache, false).unwrap();
+
+        assert_watermark_insert_rejected(&conn, &ns, &origin, 0, 0, Some([7u8; 32].to_vec()), None);
+    }
+
+    #[test]
+    fn sqlite_index_rejects_durable_nonzero_with_null_head() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let _index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let origin = meta.replica_id;
+        let db_path = temp.path().join("index").join("wal.sqlite");
+        let conn = open_connection(&db_path, IndexDurabilityMode::Cache, false).unwrap();
+
+        assert_watermark_insert_rejected(&conn, &ns, &origin, 2, 1, Some([8u8; 32].to_vec()), None);
+    }
+
+    #[test]
+    fn sqlite_index_rejects_durable_zero_with_non_null_head() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let _index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let origin = meta.replica_id;
+        let db_path = temp.path().join("index").join("wal.sqlite");
+        let conn = open_connection(&db_path, IndexDurabilityMode::Cache, false).unwrap();
+
+        assert_watermark_insert_rejected(
+            &conn,
+            &ns,
+            &origin,
+            1,
+            0,
+            Some([9u8; 32].to_vec()),
+            Some([3u8; 32].to_vec()),
+        );
+    }
+
+    #[test]
+    fn sqlite_index_rejects_durable_seq_greater_than_applied_seq() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let _index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let origin = meta.replica_id;
+        let db_path = temp.path().join("index").join("wal.sqlite");
+        let conn = open_connection(&db_path, IndexDurabilityMode::Cache, false).unwrap();
+
+        assert_watermark_insert_rejected(
+            &conn,
+            &ns,
+            &origin,
+            2,
+            3,
+            Some([4u8; 32].to_vec()),
+            Some([5u8; 32].to_vec()),
+        );
+    }
+
+    #[test]
+    fn sqlite_index_rejects_equal_seq_with_head_mismatch() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let _index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let ns = NamespaceId::core();
+        let origin = meta.replica_id;
+        let db_path = temp.path().join("index").join("wal.sqlite");
+        let conn = open_connection(&db_path, IndexDurabilityMode::Cache, false).unwrap();
+
+        assert_watermark_insert_rejected(
+            &conn,
+            &ns,
+            &origin,
+            3,
+            3,
+            Some([1u8; 32].to_vec()),
+            Some([2u8; 32].to_vec()),
+        );
     }
 
     #[test]
@@ -1655,14 +1828,14 @@ mod tests {
             SegmentId::new(Uuid::from_bytes([1u8; 16])),
             PathBuf::from("open.wal"),
             1_700_000,
-            0,
+            WalCursorOffset::new(0),
         );
         let sealed = SegmentRow::sealed(
             ns.clone(),
             SegmentId::new(Uuid::from_bytes([2u8; 16])),
             PathBuf::from("sealed.wal"),
             1_700_100,
-            128,
+            WalCursorOffset::new(128),
             128,
         );
 

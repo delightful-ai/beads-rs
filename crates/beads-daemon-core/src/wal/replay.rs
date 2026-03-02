@@ -14,7 +14,7 @@ use crate::core::error::details as error_details;
 use crate::core::{
     Applied, CliErrorCode, DecodeError, Durable, EncodeError, ErrorCode, ErrorPayload, EventId,
     HeadStatus, IntoErrorPayload, Limits, NamespaceId, ProtocolErrorCode, ReplicaId, SegmentId,
-    Seq0, Seq1, StoreMeta, Transience, Watermark, WatermarkError, decode_event_body,
+    Seq0, Seq1, StoreMeta, Transience, Watermark, WatermarkError, WatermarkPair, decode_event_body,
     decode_event_hlc_max,
 };
 
@@ -22,10 +22,15 @@ use super::EventWalError;
 use super::frame::{FRAME_HEADER_LEN, FRAME_MAGIC};
 use super::record::{RecordHeaderMismatch, RecordVerifyError, UnverifiedRecord, VerifiedRecord};
 use super::segment::{SEGMENT_HEADER_PREFIX_LEN, SEGMENT_MAGIC, SegmentHeader};
-use super::{ClientRequestEventIds, HlcRow, SegmentRow, WalIndex, WalIndexError, WatermarkRow};
+use super::{
+    ClientRequestEventIds, HlcRow, SegmentRow, WalCursorOffset, WalIndex, WalIndexError,
+    WatermarkRow,
+};
 
 #[cfg(test)]
 use crate::core::sha256_bytes;
+#[cfg(test)]
+use std::cell::Cell;
 #[cfg(test)]
 use std::io::Write;
 
@@ -48,6 +53,52 @@ pub struct TailTruncation {
 pub enum ReplayMode {
     Rebuild,
     CatchUp,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReplayAtomicCommitStage {
+    AfterRowsBeforeFrontier,
+    AfterFrontierBeforeCommit,
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CRASH_STAGE: Cell<Option<ReplayAtomicCommitStage>> = const { Cell::new(None) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_SCAN_ENTRY_COUNT: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+fn set_test_crash_stage(stage: Option<ReplayAtomicCommitStage>) {
+    TEST_CRASH_STAGE.with(|cell| cell.set(stage));
+}
+
+#[cfg(test)]
+fn reset_test_scan_entry_count() {
+    TEST_SCAN_ENTRY_COUNT.with(|cell| cell.set(0));
+}
+
+#[cfg(test)]
+fn test_scan_entry_count() -> usize {
+    TEST_SCAN_ENTRY_COUNT.with(Cell::get)
+}
+
+#[cfg(test)]
+fn increment_test_scan_entry_count() {
+    TEST_SCAN_ENTRY_COUNT.with(|cell| cell.set(cell.get().saturating_add(1)));
+}
+
+#[cfg(test)]
+fn maybe_inject_test_crash(stage: ReplayAtomicCommitStage) -> Result<(), WalReplayError> {
+    let should_crash = TEST_CRASH_STAGE.with(|cell| cell.get() == Some(stage));
+    if should_crash {
+        return Err(WalReplayError::InjectedAtomicCatchUpCrash { stage });
+    }
+    Ok(())
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -106,10 +157,11 @@ pub enum WalReplayError {
     },
     #[error("index error: {0}")]
     Index(#[from] WalIndexError),
-    #[error("index offset invalid for {path:?}: offset {offset} > len {len}")]
+    #[error("index offset invalid for {path:?}: offset {offset} outside [{header_len}, {len}]")]
     IndexOffsetInvalid {
         path: PathBuf,
         offset: u64,
+        header_len: u64,
         len: u64,
     },
     #[error(
@@ -171,6 +223,9 @@ pub enum WalReplayError {
         #[source]
         source: EncodeError,
     },
+    #[cfg(test)]
+    #[error("injected atomic catch-up crash at {stage:?}")]
+    InjectedAtomicCatchUpCrash { stage: ReplayAtomicCommitStage },
 }
 
 impl WalReplayError {
@@ -204,6 +259,8 @@ impl WalReplayError {
             WalReplayError::IndexOffsetInvalid { .. }
             | WalReplayError::OriginSeqOverflow { .. } => ProtocolErrorCode::IndexCorrupt.into(),
             WalReplayError::Index(err) => err.code(),
+            #[cfg(test)]
+            WalReplayError::InjectedAtomicCatchUpCrash { .. } => CliErrorCode::IoError.into(),
         }
     }
 
@@ -351,6 +408,39 @@ pub fn catch_up_index(
     replay_index(store_dir, meta, index, limits, ReplayMode::CatchUp)
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReplayStartCursor {
+    offset: u64,
+}
+
+impl ReplayStartCursor {
+    fn for_rebuild(segment: &SegmentDescriptor<Verified>) -> Self {
+        Self {
+            offset: segment.header_len,
+        }
+    }
+
+    fn for_catch_up(
+        segment: &SegmentDescriptor<Verified>,
+        persisted: WalCursorOffset,
+    ) -> Result<Self, WalReplayError> {
+        let offset = persisted.get();
+        if offset < segment.header_len || offset > segment.file_len {
+            return Err(WalReplayError::IndexOffsetInvalid {
+                path: segment.path.clone(),
+                offset,
+                header_len: segment.header_len,
+                len: segment.file_len,
+            });
+        }
+        Ok(Self { offset })
+    }
+
+    const fn offset(self) -> u64 {
+        self.offset
+    }
+}
+
 fn replay_index(
     store_dir: &Path,
     meta: &StoreMeta,
@@ -367,8 +457,22 @@ fn replay_index(
         let rows = index.reader().load_watermarks()?;
         tracker.seed_from_watermarks(rows)?;
     }
+    let mut catch_up_commit = match mode {
+        ReplayMode::CatchUp => Some(ReplayAtomicCatchUpCommit::new(index.writer().begin_txn()?)),
+        ReplayMode::Rebuild => None,
+    };
 
-    let namespaces = list_namespaces(&wal_dir)?;
+    let namespaces = match mode {
+        ReplayMode::Rebuild => list_namespaces(&wal_dir)?,
+        ReplayMode::CatchUp => {
+            let mut namespaces: BTreeSet<NamespaceId> =
+                list_namespaces(&wal_dir)?.into_iter().collect();
+            for namespace in index.reader().list_segment_namespaces()? {
+                namespaces.insert(namespace);
+            }
+            namespaces.into_iter().collect()
+        }
+    };
     for namespace in namespaces {
         let namespace_dir = wal_dir.join(namespace.as_str());
         cleanup_orphan_tmp_segments(store_dir, &namespace, &namespace_dir, index)?;
@@ -383,32 +487,20 @@ fn replay_index(
                 existing.insert(row.segment_id(), row);
             }
         }
+        let mut catch_up_segment_rows = Vec::new();
 
         for segment in segments {
             let is_last = Some(segment.header.segment_id) == last_segment_id;
             stats.segments_scanned += 1;
-            let start_offset = match mode {
-                ReplayMode::Rebuild => segment.header_len,
-                ReplayMode::CatchUp => existing
-                    .get(&segment.header.segment_id)
-                    .map(|row| row.last_indexed_offset())
-                    .unwrap_or(segment.header_len),
+            let start_cursor = match mode {
+                ReplayMode::Rebuild => ReplayStartCursor::for_rebuild(&segment),
+                ReplayMode::CatchUp => match existing.get(&segment.header.segment_id) {
+                    Some(row) => {
+                        ReplayStartCursor::for_catch_up(&segment, row.last_indexed_offset())?
+                    }
+                    None => ReplayStartCursor::for_rebuild(&segment),
+                },
             };
-
-            if start_offset < segment.header_len {
-                return Err(WalReplayError::IndexOffsetInvalid {
-                    path: segment.path.clone(),
-                    offset: start_offset,
-                    len: segment.file_len,
-                });
-            }
-            if start_offset > segment.file_len {
-                return Err(WalReplayError::IndexOffsetInvalid {
-                    path: segment.path.clone(),
-                    offset: start_offset,
-                    len: segment.file_len,
-                });
-            }
 
             if mode == ReplayMode::CatchUp
                 && let Some(row) = existing
@@ -427,26 +519,73 @@ fn replay_index(
                 }
             }
 
-            let mut txn = index.writer().begin_txn()?;
-            let scan = scan_segment(
-                &segment,
-                start_offset,
-                max_record_bytes,
-                limits,
-                true,
-                |offset, record, frame_len| {
-                    index_record(
-                        &mut *txn,
-                        &mut tracker,
+            let scan = match mode {
+                ReplayMode::Rebuild => {
+                    let mut txn = index.writer().begin_txn()?;
+                    let scan = scan_segment(
+                        &segment,
+                        start_cursor,
+                        max_record_bytes,
+                        limits,
+                        true,
+                        |offset, record, frame_len| {
+                            index_record_with_txn(
+                                &mut *txn,
+                                &mut tracker,
+                                &namespace,
+                                &segment,
+                                offset,
+                                record,
+                                frame_len,
+                                limits,
+                            )
+                        },
+                    )?;
+                    let segment_row = build_segment_row(
+                        store_dir,
                         &namespace,
                         &segment,
-                        offset,
-                        record,
-                        frame_len,
+                        is_last,
+                        scan.last_indexed_offset,
+                    );
+                    txn.upsert_segment(&segment_row)?;
+                    txn.commit()?;
+                    scan
+                }
+                ReplayMode::CatchUp => {
+                    let commit = catch_up_commit
+                        .as_mut()
+                        .expect("catch-up commit initialized");
+                    let scan = scan_segment(
+                        &segment,
+                        start_cursor,
+                        max_record_bytes,
                         limits,
-                    )
-                },
-            )?;
+                        true,
+                        |offset, record, frame_len| {
+                            index_record(
+                                commit,
+                                &mut tracker,
+                                &namespace,
+                                &segment,
+                                offset,
+                                record,
+                                frame_len,
+                                limits,
+                            )
+                        },
+                    )?;
+                    let segment_row = build_segment_row(
+                        store_dir,
+                        &namespace,
+                        &segment,
+                        is_last,
+                        scan.last_indexed_offset,
+                    );
+                    catch_up_segment_rows.push(segment_row);
+                    scan
+                }
+            };
             stats.records_indexed += scan.records;
             if scan.truncated {
                 stats.segments_truncated += 1;
@@ -458,51 +597,105 @@ fn replay_index(
                     });
                 }
             }
+        }
 
-            let segment_row = if is_last {
-                SegmentRow::open(
-                    namespace.clone(),
-                    segment.header.segment_id,
-                    segment_rel_path(store_dir, &segment.path),
-                    segment.header.created_at_ms,
-                    scan.last_indexed_offset,
-                )
-            } else {
-                SegmentRow::sealed(
-                    namespace.clone(),
-                    segment.header.segment_id,
-                    segment_rel_path(store_dir, &segment.path),
-                    segment.header.created_at_ms,
-                    scan.last_indexed_offset,
-                    scan.last_indexed_offset,
-                )
-            };
-            txn.upsert_segment(&segment_row)?;
-            txn.commit()?;
+        if mode == ReplayMode::CatchUp {
+            let commit = catch_up_commit
+                .as_mut()
+                .expect("catch-up commit initialized");
+            commit.replace_namespace_segments(&namespace, &catch_up_segment_rows)?;
         }
     }
 
-    let mut txn = index.writer().begin_txn()?;
+    let frontier_updates = collect_frontier_updates(tracker, mode)?;
+    match mode {
+        ReplayMode::Rebuild => {
+            let mut txn = index.writer().begin_txn()?;
+            apply_frontier_updates(&mut *txn, &frontier_updates)?;
+            txn.commit()?;
+        }
+        ReplayMode::CatchUp => {
+            let mut commit = catch_up_commit.expect("catch-up commit initialized");
+            #[cfg(test)]
+            maybe_inject_test_crash(ReplayAtomicCommitStage::AfterRowsBeforeFrontier)?;
+            commit.apply_frontier_updates(&frontier_updates)?;
+            #[cfg(test)]
+            maybe_inject_test_crash(ReplayAtomicCommitStage::AfterFrontierBeforeCommit)?;
+            commit.commit()?;
+        }
+    }
+
+    Ok(stats)
+}
+
+#[derive(Clone, Debug)]
+struct ReplayFrontierUpdate {
+    namespace: NamespaceId,
+    origin: ReplicaId,
+    watermarks: WatermarkPair,
+    next_seq: Seq1,
+}
+
+fn build_segment_row(
+    store_dir: &Path,
+    namespace: &NamespaceId,
+    segment: &SegmentDescriptor<Verified>,
+    is_last: bool,
+    last_indexed_offset: WalCursorOffset,
+) -> SegmentRow {
+    if is_last {
+        SegmentRow::open(
+            namespace.clone(),
+            segment.header.segment_id,
+            segment_rel_path(store_dir, &segment.path),
+            segment.header.created_at_ms,
+            last_indexed_offset,
+        )
+    } else {
+        SegmentRow::sealed(
+            namespace.clone(),
+            segment.header.segment_id,
+            segment_rel_path(store_dir, &segment.path),
+            segment.header.created_at_ms,
+            last_indexed_offset,
+            last_indexed_offset.get(),
+        )
+    }
+}
+
+fn collect_frontier_updates(
+    tracker: ReplayTracker,
+    mode: ReplayMode,
+) -> Result<Vec<ReplayFrontierUpdate>, WalReplayError> {
+    let mut updates = Vec::new();
     let update_all = mode == ReplayMode::Rebuild;
     for (namespace, origins) in tracker.origins {
         for (origin, state) in origins {
             if !update_all && !state.touched {
                 continue;
             }
-            let first_pending = state.first_pending_seq();
-            if let Some(got) = first_pending
-                && mode == ReplayMode::CatchUp
-            {
+            let ReplayContiguity {
+                seq,
+                head_sha,
+                pending,
+            } = state.contiguity;
+            if let Some((&got, _)) = pending.first_key_value() {
+                let expected = seq
+                    .get()
+                    .checked_add(1)
+                    .and_then(Seq1::from_u64)
+                    .ok_or_else(|| WalReplayError::OriginSeqOverflow {
+                        namespace: namespace.clone(),
+                        origin,
+                    })?;
                 return Err(WalReplayError::NonContiguousSeq {
                     namespace: namespace.clone(),
                     origin,
-                    expected: state.contiguous_seq.next(),
+                    expected,
                     got: Seq0::new(got.get()),
                 });
             }
-
-            let head = state.head_sha;
-            let seq = state.contiguous_seq;
+            let head = head_sha;
             if seq.get() > 0 && head.is_none() {
                 return Err(WalReplayError::MissingHead {
                     namespace: namespace.clone(),
@@ -510,16 +703,13 @@ fn replay_index(
                     seq,
                 });
             }
-            let next_seq = if first_pending.is_some() {
-                // Preserve gap-fill ability during rebuild: don't advance past the contiguous tip.
-                state.contiguous_seq.get().checked_add(1)
-            } else {
-                state.max_seq.get().checked_add(1)
-            }
-            .ok_or_else(|| WalReplayError::OriginSeqOverflow {
-                namespace: namespace.clone(),
-                origin,
-            })?;
+            let next_seq =
+                seq.get()
+                    .checked_add(1)
+                    .ok_or_else(|| WalReplayError::OriginSeqOverflow {
+                        namespace: namespace.clone(),
+                        origin,
+                    })?;
             let next_seq =
                 Seq1::from_u64(next_seq).ok_or_else(|| WalReplayError::OriginSeqOverflow {
                     namespace: namespace.clone(),
@@ -562,17 +752,87 @@ fn replay_index(
             })?;
             let applied: Watermark<Applied> = applied;
             let durable: Watermark<Durable> = durable;
-            txn.update_watermark(&namespace, &origin, applied, durable)?;
-            txn.set_next_origin_seq(&namespace, &origin, next_seq)?;
+            let watermarks = WatermarkPair::new(applied, durable).map_err(|err| {
+                WalReplayError::Index(WalIndexError::WatermarkRowDecode(err.to_string()))
+            })?;
+            updates.push(ReplayFrontierUpdate {
+                namespace: namespace.clone(),
+                origin,
+                watermarks,
+                next_seq,
+            });
         }
     }
-    txn.commit()?;
+    Ok(updates)
+}
 
-    Ok(stats)
+fn apply_frontier_updates(
+    txn: &mut dyn super::WalIndexTxn,
+    updates: &[ReplayFrontierUpdate],
+) -> Result<(), WalReplayError> {
+    for update in updates {
+        txn.update_watermark(&update.namespace, &update.origin, update.watermarks)?;
+        txn.set_next_origin_seq(&update.namespace, &update.origin, update.next_seq)?;
+    }
+    Ok(())
+}
+
+struct ReplayAtomicCatchUpCommit {
+    txn: Box<dyn super::WalIndexTxn>,
+}
+
+impl ReplayAtomicCatchUpCommit {
+    fn new(txn: Box<dyn super::WalIndexTxn>) -> Self {
+        Self { txn }
+    }
+
+    fn replace_namespace_segments(
+        &mut self,
+        namespace: &NamespaceId,
+        segments: &[SegmentRow],
+    ) -> Result<(), WalReplayError> {
+        self.txn.replace_namespace_segments(namespace, segments)?;
+        Ok(())
+    }
+
+    fn apply_frontier_updates(
+        &mut self,
+        updates: &[ReplayFrontierUpdate],
+    ) -> Result<(), WalReplayError> {
+        apply_frontier_updates(&mut *self.txn, updates)
+    }
+
+    fn commit(self) -> Result<(), WalReplayError> {
+        self.txn.commit()?;
+        Ok(())
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn index_record(
+    commit: &mut ReplayAtomicCatchUpCommit,
+    tracker: &mut ReplayTracker,
+    namespace: &NamespaceId,
+    segment: &SegmentDescriptor<Verified>,
+    offset: u64,
+    record: &VerifiedRecord,
+    frame_len: u32,
+    limits: &Limits,
+) -> Result<(), WalReplayError> {
+    index_record_with_txn(
+        &mut *commit.txn,
+        tracker,
+        namespace,
+        segment,
+        offset,
+        record,
+        frame_len,
+        limits,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn index_record_with_txn(
     txn: &mut dyn super::WalIndexTxn,
     tracker: &mut ReplayTracker,
     namespace: &NamespaceId,
@@ -906,7 +1166,7 @@ impl SegmentDescriptor<Unverified> {
 }
 
 struct SegmentScanOutcome {
-    last_indexed_offset: u64,
+    last_indexed_offset: WalCursorOffset,
     records: usize,
     truncated: bool,
     truncated_from_offset: Option<u64>,
@@ -914,7 +1174,7 @@ struct SegmentScanOutcome {
 
 fn scan_segment<F>(
     segment: &SegmentDescriptor<Verified>,
-    start_offset: u64,
+    start: ReplayStartCursor,
     max_record_bytes: usize,
     limits: &Limits,
     repair_tail: bool,
@@ -923,6 +1183,9 @@ fn scan_segment<F>(
 where
     F: FnMut(u64, &VerifiedRecord, u32) -> Result<(), WalReplayError>,
 {
+    #[cfg(test)]
+    increment_test_scan_entry_count();
+
     let mut file = OpenOptions::new()
         .read(true)
         .write(repair_tail)
@@ -931,13 +1194,13 @@ where
             path: segment.path.clone(),
             source,
         })?;
-    file.seek(SeekFrom::Start(start_offset))
+    file.seek(SeekFrom::Start(start.offset()))
         .map_err(|source| WalReplayError::Io {
             path: segment.path.clone(),
             source,
         })?;
 
-    let mut offset = start_offset;
+    let mut offset = start.offset();
     let mut records = 0usize;
     let mut truncated = false;
     let mut truncated_from_offset = None;
@@ -1073,7 +1336,7 @@ where
     }
 
     Ok(SegmentScanOutcome {
-        last_indexed_offset: offset,
+        last_indexed_offset: WalCursorOffset::new(offset),
         records,
         truncated,
         truncated_from_offset,
@@ -1168,14 +1431,14 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        ActorId, EventBody, EventKindV1, HlcMax, Limits, NamespaceId, ReplicaId, SegmentId, Seq1,
-        StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId, TxnV1,
-        encode_event_body_canonical,
+        ActorId, EventBody, EventKindV1, HlcMax, Limits, NamespaceId, ReplicaId, SegmentId, Seq0,
+        Seq1, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId,
+        TxnV1, encode_event_body_canonical,
     };
     use crate::wal::SegmentConfig;
     use crate::wal::record::{RecordHeader, RequestProof};
     use crate::wal::segment::SegmentWriter;
-    use crate::wal::{IndexDurabilityMode, SqliteWalIndex};
+    use crate::wal::{IndexDurabilityMode, IndexedRangeItem, SqliteWalIndex, WatermarkRow};
 
     fn test_meta(store_id: StoreId, store_epoch: StoreEpoch) -> StoreMeta {
         let identity = StoreIdentity::new(store_id, store_epoch);
@@ -1212,6 +1475,396 @@ mod tests {
                     logical: 1,
                 },
             }),
+        }
+    }
+
+    struct CatchUpAtomicFixture {
+        temp: TempDir,
+        meta: StoreMeta,
+        index: SqliteWalIndex,
+        limits: Limits,
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        touched_segment_id: SegmentId,
+    }
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct ReplayStateSnapshot {
+        rows: Vec<IndexedRangeItem>,
+        frontier: Option<WatermarkRow>,
+        next_origin_seq: Seq1,
+        segment_offsets: BTreeMap<SegmentId, u64>,
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn make_replay_record(
+        store: StoreIdentity,
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        seq: Seq1,
+        prev_sha256: Option<[u8; 32]>,
+        event_time_ms: u64,
+        txn_byte: u8,
+        limits: &Limits,
+    ) -> VerifiedRecord {
+        let body = EventBody {
+            envelope_v: 1,
+            store,
+            namespace,
+            origin_replica_id: origin,
+            origin_seq: seq,
+            event_time_ms,
+            txn_id: TxnId::new(Uuid::from_bytes([txn_byte; 16])),
+            client_request_id: None,
+            trace_id: None,
+            kind: EventKindV1::TxnV1(TxnV1 {
+                delta: TxnDeltaV1::new(),
+                hlc_max: HlcMax {
+                    actor_id: ActorId::new("alice".to_string()).unwrap(),
+                    physical_ms: event_time_ms,
+                    logical: 1,
+                },
+            }),
+        };
+        let body = body.into_validated(limits).expect("validated");
+        let payload = encode_event_body_canonical(body.as_ref()).expect("payload");
+        let sha256 = sha256_bytes(payload.as_ref()).0;
+        let header = RecordHeader {
+            origin_replica_id: origin,
+            origin_seq: seq,
+            event_time_ms,
+            txn_id: TxnId::new(Uuid::from_bytes([txn_byte; 16])),
+            request_proof: RequestProof::None,
+            sha256,
+            prev_sha256,
+        };
+        VerifiedRecord::new(header, payload, body).expect("verified record")
+    }
+
+    fn append_record(
+        writer: &mut SegmentWriter,
+        store: StoreIdentity,
+        namespace: &NamespaceId,
+        origin: ReplicaId,
+        seq: Seq1,
+        prev_sha256: Option<[u8; 32]>,
+        event_time_ms: u64,
+        txn_byte: u8,
+        limits: &Limits,
+    ) -> [u8; 32] {
+        let record = make_replay_record(
+            store,
+            namespace.clone(),
+            origin,
+            seq,
+            prev_sha256,
+            event_time_ms,
+            txn_byte,
+            limits,
+        );
+        let sha256 = record.header().sha256;
+        writer
+            .append(&record, event_time_ms)
+            .expect("append replay record");
+        sha256
+    }
+
+    fn seed_catch_up_atomic_fixture() -> CatchUpAtomicFixture {
+        let temp = TempDir::new().unwrap();
+        let store_id = StoreId::new(Uuid::from_bytes([41u8; 16]));
+        let store_epoch = StoreEpoch::new(1);
+        let meta = test_meta(store_id, store_epoch);
+        let limits = Limits::default();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([42u8; 16]));
+        let store = StoreIdentity::new(store_id, store_epoch);
+
+        let mut writer = SegmentWriter::open(
+            temp.path(),
+            &meta,
+            &namespace,
+            10,
+            SegmentConfig::from_limits(&limits),
+        )
+        .unwrap();
+
+        let sha1 = append_record(
+            &mut writer,
+            store,
+            &namespace,
+            origin,
+            Seq1::from_u64(1).expect("seq1"),
+            None,
+            11,
+            1,
+            &limits,
+        );
+        let sha2 = append_record(
+            &mut writer,
+            store,
+            &namespace,
+            origin,
+            Seq1::from_u64(2).expect("seq2"),
+            Some(sha1),
+            12,
+            2,
+            &limits,
+        );
+        let touched_segment_id = writer.current_segment_id();
+
+        rebuild_index(temp.path(), &meta, &index, &limits).expect("seed rebuild");
+
+        append_record(
+            &mut writer,
+            store,
+            &namespace,
+            origin,
+            Seq1::from_u64(3).expect("seq3"),
+            Some(sha2),
+            13,
+            3,
+            &limits,
+        );
+
+        CatchUpAtomicFixture {
+            temp,
+            meta,
+            index,
+            limits,
+            namespace,
+            origin,
+            touched_segment_id,
+        }
+    }
+
+    fn seed_catch_up_gap_fixture() -> CatchUpAtomicFixture {
+        let temp = TempDir::new().unwrap();
+        let store_id = StoreId::new(Uuid::from_bytes([51u8; 16]));
+        let store_epoch = StoreEpoch::new(1);
+        let meta = test_meta(store_id, store_epoch);
+        let limits = Limits::default();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([52u8; 16]));
+        let store = StoreIdentity::new(store_id, store_epoch);
+
+        let mut writer = SegmentWriter::open(
+            temp.path(),
+            &meta,
+            &namespace,
+            10,
+            SegmentConfig::from_limits(&limits),
+        )
+        .unwrap();
+
+        let sha1 = append_record(
+            &mut writer,
+            store,
+            &namespace,
+            origin,
+            Seq1::from_u64(1).expect("seq1"),
+            None,
+            11,
+            1,
+            &limits,
+        );
+        let sha2 = append_record(
+            &mut writer,
+            store,
+            &namespace,
+            origin,
+            Seq1::from_u64(2).expect("seq2"),
+            Some(sha1),
+            12,
+            2,
+            &limits,
+        );
+        let touched_segment_id = writer.current_segment_id();
+
+        rebuild_index(temp.path(), &meta, &index, &limits).expect("seed rebuild");
+
+        append_record(
+            &mut writer,
+            store,
+            &namespace,
+            origin,
+            Seq1::from_u64(4).expect("seq4"),
+            Some(sha2),
+            14,
+            4,
+            &limits,
+        );
+
+        CatchUpAtomicFixture {
+            temp,
+            meta,
+            index,
+            limits,
+            namespace,
+            origin,
+            touched_segment_id,
+        }
+    }
+
+    fn capture_snapshot(
+        index: &dyn WalIndex,
+        namespace: &NamespaceId,
+        origin: ReplicaId,
+    ) -> ReplayStateSnapshot {
+        let rows = index
+            .reader()
+            .iter_from(namespace, &origin, Seq0::ZERO, 1_000_000)
+            .expect("iter rows");
+        let frontier = index
+            .reader()
+            .load_watermarks()
+            .expect("load watermarks")
+            .into_iter()
+            .find(|row| row.namespace == *namespace && row.origin == origin);
+        let next_origin_seq = {
+            let mut txn = index.writer().begin_txn().expect("begin txn");
+            let next = txn
+                .next_origin_seq(namespace, &origin)
+                .expect("next origin seq");
+            txn.rollback().expect("rollback probe");
+            next
+        };
+        let segment_offsets = index
+            .reader()
+            .list_segments(namespace)
+            .expect("list segments")
+            .into_iter()
+            .map(|row| (row.segment_id(), row.last_indexed_offset().get()))
+            .collect();
+        ReplayStateSnapshot {
+            rows,
+            frontier,
+            next_origin_seq,
+            segment_offsets,
+        }
+    }
+
+    fn filesystem_segment_ids(
+        store_dir: &Path,
+        meta: &StoreMeta,
+        namespace: &NamespaceId,
+    ) -> std::collections::BTreeSet<SegmentId> {
+        let namespace_dir = store_dir.join("wal").join(namespace.as_str());
+        let segments = list_segments(&namespace_dir).expect("list filesystem segments");
+        let verified = verify_segments(segments, meta, namespace).expect("verify segments");
+        verified
+            .into_iter()
+            .map(|segment| segment.header.segment_id)
+            .collect()
+    }
+
+    fn indexed_segment_ids(
+        index: &dyn WalIndex,
+        namespace: &NamespaceId,
+    ) -> std::collections::BTreeSet<SegmentId> {
+        index
+            .reader()
+            .list_segments(namespace)
+            .expect("list indexed segments")
+            .into_iter()
+            .map(|row| row.segment_id())
+            .collect()
+    }
+
+    fn load_verified_segment_for_row(
+        store_dir: &Path,
+        meta: &StoreMeta,
+        row: &SegmentRow,
+    ) -> SegmentDescriptor<Verified> {
+        let path = if row.segment_path().is_absolute() {
+            row.segment_path().to_path_buf()
+        } else {
+            store_dir.join(row.segment_path())
+        };
+        SegmentDescriptor::<Unverified>::load(path)
+            .expect("load segment descriptor")
+            .verify(meta, row.namespace())
+            .expect("verify segment descriptor")
+    }
+
+    fn segment_row_with_offset(
+        row: &SegmentRow,
+        last_indexed_offset: WalCursorOffset,
+    ) -> SegmentRow {
+        match row {
+            SegmentRow::Open {
+                namespace,
+                segment_id,
+                segment_path,
+                created_at_ms,
+                ..
+            } => SegmentRow::open(
+                namespace.clone(),
+                *segment_id,
+                segment_path.clone(),
+                *created_at_ms,
+                last_indexed_offset,
+            ),
+            SegmentRow::Sealed {
+                namespace,
+                segment_id,
+                segment_path,
+                created_at_ms,
+                final_len,
+                ..
+            } => SegmentRow::sealed(
+                namespace.clone(),
+                *segment_id,
+                segment_path.clone(),
+                *created_at_ms,
+                last_indexed_offset,
+                *final_len,
+            ),
+        }
+    }
+
+    fn assert_recovered_after_retry(fixture: &CatchUpAtomicFixture, pre: &ReplayStateSnapshot) {
+        let post = capture_snapshot(&fixture.index, &fixture.namespace, fixture.origin);
+        assert!(
+            post.rows
+                .iter()
+                .any(|row| row.event_id.origin_seq == Seq1::from_u64(3).expect("seq3")),
+            "seq 3 should appear after retry"
+        );
+        let frontier = post.frontier.expect("frontier row after retry");
+        assert_eq!(frontier.applied_seq(), 3);
+        assert_eq!(frontier.durable_seq(), 3);
+        assert_eq!(post.next_origin_seq.get(), 4);
+
+        let pre_offset = pre
+            .segment_offsets
+            .get(&fixture.touched_segment_id)
+            .copied()
+            .expect("pre touched segment offset");
+        let post_offset = post
+            .segment_offsets
+            .get(&fixture.touched_segment_id)
+            .copied()
+            .expect("post touched segment offset");
+        assert!(
+            post_offset > pre_offset,
+            "touched segment last_indexed_offset should advance"
+        );
+    }
+
+    struct CrashStageGuard;
+
+    impl CrashStageGuard {
+        fn install(stage: ReplayAtomicCommitStage) -> Self {
+            set_test_crash_stage(Some(stage));
+            Self
+        }
+    }
+
+    impl Drop for CrashStageGuard {
+        fn drop(&mut self) {
+            set_test_crash_stage(None);
         }
     }
 
@@ -1324,7 +1977,7 @@ mod tests {
         let max_record_bytes = limits.policy().max_wal_record_bytes();
         let err = match scan_segment(
             &verified,
-            verified.header_len,
+            ReplayStartCursor::for_rebuild(&verified),
             max_record_bytes,
             &limits,
             false,
@@ -1348,9 +2001,390 @@ mod tests {
     }
 
     #[test]
-    fn origin_replay_state_advances_when_gap_is_later_filled() {
+    fn rebuild_rejects_gap_and_does_not_commit_next_origin_seq() {
+        let temp = TempDir::new().unwrap();
+        let store_id = StoreId::new(Uuid::from_bytes([61u8; 16]));
+        let store_epoch = StoreEpoch::new(1);
+        let meta = test_meta(store_id, store_epoch);
+        let limits = Limits::default();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
         let namespace = NamespaceId::core();
-        let origin = ReplicaId::new(Uuid::from_bytes([23u8; 16]));
+        let origin = ReplicaId::new(Uuid::from_bytes([62u8; 16]));
+        let store = StoreIdentity::new(store_id, store_epoch);
+
+        let mut writer = SegmentWriter::open(
+            temp.path(),
+            &meta,
+            &namespace,
+            10,
+            SegmentConfig::from_limits(&limits),
+        )
+        .unwrap();
+        let sha1 = append_record(
+            &mut writer,
+            store,
+            &namespace,
+            origin,
+            Seq1::from_u64(1).expect("seq1"),
+            None,
+            11,
+            1,
+            &limits,
+        );
+        append_record(
+            &mut writer,
+            store,
+            &namespace,
+            origin,
+            Seq1::from_u64(3).expect("seq3"),
+            Some(sha1),
+            13,
+            3,
+            &limits,
+        );
+
+        let err = rebuild_index(temp.path(), &meta, &index, &limits)
+            .expect_err("rebuild must reject forward sequence gaps");
+        assert!(matches!(
+            err,
+            WalReplayError::NonContiguousSeq {
+                expected,
+                got,
+                ..
+            } if expected == Seq1::from_u64(2).expect("seq2") && got == Seq0::new(3)
+        ));
+
+        let next_origin_seq = {
+            let mut txn = index.writer().begin_txn().expect("begin txn");
+            let next = txn
+                .next_origin_seq(&namespace, &origin)
+                .expect("next origin seq");
+            txn.rollback().expect("rollback probe");
+            next
+        };
+        assert_eq!(next_origin_seq.get(), 1);
+        assert!(
+            index
+                .reader()
+                .load_watermarks()
+                .expect("load watermarks")
+                .into_iter()
+                .all(|row| !(row.namespace == namespace && row.origin == origin)),
+            "frontier row should not be committed on rebuild gap"
+        );
+    }
+
+    #[test]
+    fn catch_up_rejects_persisted_cursor_before_header_without_scan_entry() {
+        let fixture = seed_catch_up_atomic_fixture();
+        let row = fixture
+            .index
+            .reader()
+            .list_segments(&fixture.namespace)
+            .expect("list segments")
+            .into_iter()
+            .find(|row| row.segment_id() == fixture.touched_segment_id)
+            .expect("touched segment row");
+        let segment = load_verified_segment_for_row(fixture.temp.path(), &fixture.meta, &row);
+        let invalid_offset = WalCursorOffset::new(segment.header_len.saturating_sub(1));
+        assert!(invalid_offset.get() < segment.header_len);
+
+        let corrupt_row = segment_row_with_offset(&row, invalid_offset);
+        let mut txn = fixture.index.writer().begin_txn().expect("begin txn");
+        txn.upsert_segment(&corrupt_row)
+            .expect("upsert corrupted segment row");
+        txn.commit().expect("commit corrupted segment row");
+
+        reset_test_scan_entry_count();
+        let err = catch_up_index(
+            fixture.temp.path(),
+            &fixture.meta,
+            &fixture.index,
+            &fixture.limits,
+        )
+        .expect_err("header-before persisted offset should error");
+
+        assert!(matches!(
+            err,
+            WalReplayError::IndexOffsetInvalid {
+                offset,
+                header_len,
+                ..
+            } if offset < header_len
+        ));
+        assert_eq!(test_scan_entry_count(), 0);
+    }
+
+    #[test]
+    fn catch_up_rejects_gap_and_rolls_back_next_origin_seq() {
+        let fixture = seed_catch_up_gap_fixture();
+        let pre = capture_snapshot(&fixture.index, &fixture.namespace, fixture.origin);
+        assert_eq!(pre.rows.len(), 2);
+        assert_eq!(pre.next_origin_seq.get(), 3);
+
+        let err = catch_up_index(
+            fixture.temp.path(),
+            &fixture.meta,
+            &fixture.index,
+            &fixture.limits,
+        )
+        .expect_err("catch-up must reject forward sequence gaps");
+        assert!(matches!(
+            err,
+            WalReplayError::NonContiguousSeq {
+                expected,
+                got,
+                ..
+            } if expected == Seq1::from_u64(3).expect("seq3") && got == Seq0::new(4)
+        ));
+
+        let post = capture_snapshot(&fixture.index, &fixture.namespace, fixture.origin);
+        assert_eq!(post, pre);
+    }
+
+    #[test]
+    fn catch_up_rejects_persisted_cursor_beyond_segment_len_without_scan_entry() {
+        let fixture = seed_catch_up_atomic_fixture();
+        let row = fixture
+            .index
+            .reader()
+            .list_segments(&fixture.namespace)
+            .expect("list segments")
+            .into_iter()
+            .find(|row| row.segment_id() == fixture.touched_segment_id)
+            .expect("touched segment row");
+        let segment = load_verified_segment_for_row(fixture.temp.path(), &fixture.meta, &row);
+        let invalid_offset = WalCursorOffset::new(segment.file_len.saturating_add(1));
+        assert!(invalid_offset.get() > segment.file_len);
+
+        let corrupt_row = segment_row_with_offset(&row, invalid_offset);
+        let mut txn = fixture.index.writer().begin_txn().expect("begin txn");
+        txn.upsert_segment(&corrupt_row)
+            .expect("upsert corrupted segment row");
+        txn.commit().expect("commit corrupted segment row");
+
+        reset_test_scan_entry_count();
+        let err = catch_up_index(
+            fixture.temp.path(),
+            &fixture.meta,
+            &fixture.index,
+            &fixture.limits,
+        )
+        .expect_err("out-of-bounds persisted offset should error");
+
+        assert!(matches!(
+            err,
+            WalReplayError::IndexOffsetInvalid {
+                offset, len, ..
+            } if offset > len
+        ));
+        assert_eq!(test_scan_entry_count(), 0);
+    }
+
+    #[test]
+    fn catch_up_atomic_crash_after_rows_before_frontier_rolls_back_all() {
+        let fixture = seed_catch_up_atomic_fixture();
+        let pre = capture_snapshot(&fixture.index, &fixture.namespace, fixture.origin);
+        assert_eq!(pre.rows.len(), 2);
+        assert_eq!(pre.next_origin_seq.get(), 3);
+
+        {
+            let _guard = CrashStageGuard::install(ReplayAtomicCommitStage::AfterRowsBeforeFrontier);
+            let err = catch_up_index(
+                fixture.temp.path(),
+                &fixture.meta,
+                &fixture.index,
+                &fixture.limits,
+            )
+            .expect_err("injected crash should fail catch-up");
+            assert!(matches!(
+                err,
+                WalReplayError::InjectedAtomicCatchUpCrash {
+                    stage: ReplayAtomicCommitStage::AfterRowsBeforeFrontier
+                }
+            ));
+
+            let post_crash = capture_snapshot(&fixture.index, &fixture.namespace, fixture.origin);
+            assert_eq!(post_crash, pre);
+        }
+
+        catch_up_index(
+            fixture.temp.path(),
+            &fixture.meta,
+            &fixture.index,
+            &fixture.limits,
+        )
+        .expect("retry catch-up should succeed");
+        assert_recovered_after_retry(&fixture, &pre);
+    }
+
+    #[test]
+    fn catch_up_atomic_crash_after_frontier_before_commit_rolls_back_all() {
+        let fixture = seed_catch_up_atomic_fixture();
+        let pre = capture_snapshot(&fixture.index, &fixture.namespace, fixture.origin);
+        assert_eq!(pre.rows.len(), 2);
+        assert_eq!(pre.next_origin_seq.get(), 3);
+
+        {
+            let _guard =
+                CrashStageGuard::install(ReplayAtomicCommitStage::AfterFrontierBeforeCommit);
+            let err = catch_up_index(
+                fixture.temp.path(),
+                &fixture.meta,
+                &fixture.index,
+                &fixture.limits,
+            )
+            .expect_err("injected crash should fail catch-up");
+            assert!(matches!(
+                err,
+                WalReplayError::InjectedAtomicCatchUpCrash {
+                    stage: ReplayAtomicCommitStage::AfterFrontierBeforeCommit
+                }
+            ));
+
+            let post_crash = capture_snapshot(&fixture.index, &fixture.namespace, fixture.origin);
+            assert_eq!(post_crash, pre);
+        }
+
+        catch_up_index(
+            fixture.temp.path(),
+            &fixture.meta,
+            &fixture.index,
+            &fixture.limits,
+        )
+        .expect("retry catch-up should succeed");
+        assert_recovered_after_retry(&fixture, &pre);
+    }
+
+    #[test]
+    fn catch_up_atomic_success_commits_rows_segments_and_frontier_together() {
+        let fixture = seed_catch_up_atomic_fixture();
+        let pre = capture_snapshot(&fixture.index, &fixture.namespace, fixture.origin);
+        assert_eq!(pre.rows.len(), 2);
+        assert_eq!(pre.next_origin_seq.get(), 3);
+
+        catch_up_index(
+            fixture.temp.path(),
+            &fixture.meta,
+            &fixture.index,
+            &fixture.limits,
+        )
+        .expect("catch-up should succeed");
+        assert_recovered_after_retry(&fixture, &pre);
+    }
+
+    #[test]
+    fn catch_up_reconcile_deletes_stale_segment_rows_and_matches_filesystem_set() {
+        let fixture = seed_catch_up_atomic_fixture();
+        let stale_segment_id = SegmentId::new(Uuid::from_bytes([63u8; 16]));
+        let stale_row = SegmentRow::open(
+            fixture.namespace.clone(),
+            stale_segment_id,
+            std::path::PathBuf::from(format!(
+                "wal/{}/stale-segment.wal",
+                fixture.namespace.as_str()
+            )),
+            1,
+            WalCursorOffset::new(0),
+        );
+
+        let mut txn = fixture.index.writer().begin_txn().expect("begin txn");
+        txn.upsert_segment(&stale_row)
+            .expect("seed stale segment row");
+        txn.commit().expect("commit stale segment row");
+
+        assert!(
+            indexed_segment_ids(&fixture.index, &fixture.namespace).contains(&stale_segment_id),
+            "stale row should exist before catch-up"
+        );
+
+        catch_up_index(
+            fixture.temp.path(),
+            &fixture.meta,
+            &fixture.index,
+            &fixture.limits,
+        )
+        .expect("catch-up should reconcile segments");
+
+        let indexed = indexed_segment_ids(&fixture.index, &fixture.namespace);
+        let filesystem =
+            filesystem_segment_ids(fixture.temp.path(), &fixture.meta, &fixture.namespace);
+        assert_eq!(indexed, filesystem);
+        assert!(
+            !indexed.contains(&stale_segment_id),
+            "catch-up must delete stale namespace rows"
+        );
+    }
+
+    #[test]
+    fn catch_up_reconcile_clears_rows_for_index_only_namespace() {
+        let fixture = seed_catch_up_atomic_fixture();
+        let index_only_namespace = NamespaceId::parse("indexonly").expect("namespace");
+        let index_only_segment_id = SegmentId::new(Uuid::from_bytes([64u8; 16]));
+        let index_only_row = SegmentRow::open(
+            index_only_namespace.clone(),
+            index_only_segment_id,
+            std::path::PathBuf::from(format!(
+                "wal/{}/index-only.wal",
+                index_only_namespace.as_str()
+            )),
+            2,
+            WalCursorOffset::new(0),
+        );
+
+        let mut txn = fixture.index.writer().begin_txn().expect("begin txn");
+        txn.upsert_segment(&index_only_row)
+            .expect("seed index-only namespace row");
+        txn.commit().expect("commit index-only namespace row");
+
+        assert!(
+            !fixture
+                .temp
+                .path()
+                .join("wal")
+                .join(index_only_namespace.as_str())
+                .exists()
+        );
+        assert_eq!(
+            fixture
+                .index
+                .reader()
+                .list_segments(&index_only_namespace)
+                .expect("list pre catch-up")
+                .len(),
+            1
+        );
+
+        catch_up_index(
+            fixture.temp.path(),
+            &fixture.meta,
+            &fixture.index,
+            &fixture.limits,
+        )
+        .expect("catch-up should reconcile namespaces");
+
+        assert!(
+            fixture
+                .index
+                .reader()
+                .list_segments(&index_only_namespace)
+                .expect("list post catch-up")
+                .is_empty()
+        );
+        assert!(
+            !fixture
+                .index
+                .reader()
+                .list_segment_namespaces()
+                .expect("list segment namespaces")
+                .contains(&index_only_namespace)
+        );
+    }
+
+    #[test]
+    fn origin_replay_state_buffers_out_of_order_until_gap_resolved() {
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([65u8; 16]));
         let mut state = OriginReplayState::default();
         let sha1 = [1u8; 32];
         let sha2 = [2u8; 32];
@@ -1362,13 +2396,21 @@ mod tests {
                 Seq1::from_u64(2).expect("seq2"),
                 sha2,
                 Some(sha1),
-                8,
             )
-            .expect("record buffered until gap fills");
-        assert_eq!(state.contiguous_seq, Seq0::ZERO);
+            .expect("forward seq is buffered");
         assert_eq!(
-            state.first_pending_seq(),
-            Some(Seq1::from_u64(2).expect("seq2"))
+            state.contiguity,
+            ReplayContiguity {
+                seq: Seq0::ZERO,
+                head_sha: None,
+                pending: BTreeMap::from([(
+                    Seq1::from_u64(2).expect("seq2"),
+                    PendingRecord {
+                        sha: sha2,
+                        prev_sha: Some(sha1),
+                    }
+                )]),
+            }
         );
 
         state
@@ -1378,89 +2420,87 @@ mod tests {
                 Seq1::from_u64(1).expect("seq1"),
                 sha1,
                 None,
-                8,
             )
-            .expect("gap filled");
-
-        assert_eq!(state.contiguous_seq.get(), 2);
-        assert_eq!(state.head_sha, Some(sha2));
-        assert!(state.first_pending_seq().is_none());
+            .expect("gap closes once missing seq arrives");
+        assert_eq!(
+            state.contiguity,
+            ReplayContiguity {
+                seq: Seq0::new(2),
+                head_sha: Some(sha2),
+                pending: BTreeMap::new(),
+            }
+        );
     }
 
     #[test]
-    fn origin_replay_state_rejects_unbounded_pending_gap_buffers() {
+    fn collect_frontier_updates_rejects_unresolved_buffered_gap() {
         let namespace = NamespaceId::core();
-        let origin = ReplicaId::new(Uuid::from_bytes([25u8; 16]));
-        let mut state = OriginReplayState::default();
+        let origin = ReplicaId::new(Uuid::from_bytes([66u8; 16]));
+        let sha2 = [2u8; 32];
+        let sha1 = [1u8; 32];
 
-        state
-            .observe(
+        let mut tracker = ReplayTracker::new(50_000);
+        tracker
+            .observe_record(
                 &namespace,
                 origin,
-                Seq1::from_u64(3).expect("seq3"),
-                [3u8; 32],
-                Some([2u8; 32]),
-                2,
+                Seq1::from_u64(2).expect("seq2"),
+                sha2,
+                Some(sha1),
             )
-            .expect("first pending seq");
-        state
-            .observe(
-                &namespace,
-                origin,
-                Seq1::from_u64(4).expect("seq4"),
-                [4u8; 32],
-                Some([3u8; 32]),
-                2,
-            )
-            .expect("second pending seq");
+            .expect("out-of-order record should be buffered");
 
-        let err = state
-            .observe(
-                &namespace,
-                origin,
-                Seq1::from_u64(5).expect("seq5"),
-                [5u8; 32],
-                Some([4u8; 32]),
-                2,
-            )
-            .expect_err("pending gap buffer should cap");
-        assert!(matches!(err, WalReplayError::NonContiguousSeq { .. }));
+        let err = collect_frontier_updates(tracker, ReplayMode::CatchUp)
+            .expect_err("frontier update should fail when gap remains");
+        assert!(matches!(
+            err,
+            WalReplayError::NonContiguousSeq {
+                expected,
+                got,
+                ..
+            } if expected == Seq1::from_u64(1).expect("seq1") && got == Seq0::new(2)
+        ));
     }
 
     #[test]
-    fn origin_replay_state_detects_prev_sha_mismatch_when_flushing_buffer() {
+    fn origin_replay_state_detects_prev_sha_mismatch_for_contiguous_seq() {
         let namespace = NamespaceId::core();
         let origin = ReplicaId::new(Uuid::from_bytes([24u8; 16]));
         let mut state = OriginReplayState::default();
         let sha1 = [1u8; 32];
-        let sha2 = [2u8; 32];
         let wrong_prev = [9u8; 32];
 
         state
             .observe(
                 &namespace,
                 origin,
-                Seq1::from_u64(2).expect("seq2"),
-                sha2,
-                Some(wrong_prev),
-                8,
+                Seq1::from_u64(1).expect("seq1"),
+                sha1,
+                None,
             )
-            .expect("record buffered");
+            .expect("seed seq1");
 
         let err = state
             .observe(
                 &namespace,
                 origin,
-                Seq1::from_u64(1).expect("seq1"),
-                sha1,
-                None,
-                8,
+                Seq1::from_u64(2).expect("seq2"),
+                [2u8; 32],
+                Some(wrong_prev),
             )
             .expect_err("expected prev_sha mismatch");
-        assert!(matches!(err, WalReplayError::PrevShaMismatch { .. }));
+        assert!(matches!(
+            err,
+            WalReplayError::PrevShaMismatch { seq, head_seq, .. }
+                if seq == Seq1::from_u64(2).expect("seq2") && head_seq == Seq0::new(1)
+        ));
         assert_eq!(
-            state.first_pending_seq(),
-            Some(Seq1::from_u64(2).expect("seq2"))
+            state.contiguity,
+            ReplayContiguity {
+                seq: Seq0::new(1),
+                head_sha: Some(sha1),
+                pending: BTreeMap::new(),
+            }
         );
     }
 
@@ -1479,7 +2519,6 @@ mod tests {
                 Seq1::from_u64(1).expect("seq1"),
                 sha1,
                 None,
-                8,
             )
             .expect("seed seq1");
         state
@@ -1489,7 +2528,6 @@ mod tests {
                 Seq1::from_u64(2).expect("seq2"),
                 sha2,
                 Some(sha1),
-                8,
             )
             .expect("seed seq2");
         state
@@ -1499,57 +2537,90 @@ mod tests {
                 Seq1::from_u64(2).expect("seq2"),
                 sha2,
                 Some(sha1),
-                8,
             )
             .expect("duplicate committed seq should be idempotent");
 
-        assert_eq!(state.contiguous_seq.get(), 2);
-        assert_eq!(state.head_sha, Some(sha2));
-        assert!(state.first_pending_seq().is_none());
+        assert_eq!(
+            state.contiguity,
+            ReplayContiguity {
+                seq: Seq0::new(2),
+                head_sha: Some(sha2),
+                pending: BTreeMap::new(),
+            }
+        );
     }
 
     #[test]
-    fn origin_replay_state_ignores_duplicate_pending_seq() {
+    fn origin_replay_state_rejects_conflicting_duplicate_pending_seq() {
         let namespace = NamespaceId::core();
-        let origin = ReplicaId::new(Uuid::from_bytes([27u8; 16]));
+        let origin = ReplicaId::new(Uuid::from_bytes([67u8; 16]));
         let mut state = OriginReplayState::default();
+        let seq2 = Seq1::from_u64(2).expect("seq2");
         let sha1 = [1u8; 32];
         let sha2 = [2u8; 32];
+        let conflicting_sha = [9u8; 32];
 
         state
-            .observe(
-                &namespace,
-                origin,
-                Seq1::from_u64(2).expect("seq2"),
-                sha2,
-                Some(sha1),
-                8,
-            )
+            .observe(&namespace, origin, seq2, sha2, Some(sha1))
             .expect("seed pending seq2");
-        state
-            .observe(
+
+        let err = state
+            .observe(&namespace, origin, seq2, conflicting_sha, Some(sha1))
+            .expect_err("conflicting duplicate pending seq must fail");
+        assert!(matches!(
+            err,
+            WalReplayError::NonContiguousSeq { expected, got, .. }
+                if expected == Seq1::from_u64(1).expect("seq1") && got == Seq0::new(2)
+        ));
+        assert_eq!(
+            state.contiguity,
+            ReplayContiguity {
+                seq: Seq0::ZERO,
+                head_sha: None,
+                pending: BTreeMap::from([(
+                    seq2,
+                    PendingRecord {
+                        sha: sha2,
+                        prev_sha: Some(sha1),
+                    }
+                )]),
+            }
+        );
+    }
+
+    #[test]
+    fn replay_tracker_rejects_out_of_order_buffer_growth_past_limit() {
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([68u8; 16]));
+        let mut tracker = ReplayTracker::new(1);
+        let sha1 = [1u8; 32];
+        let sha2 = [2u8; 32];
+        let sha3 = [3u8; 32];
+
+        tracker
+            .observe_record(
                 &namespace,
                 origin,
                 Seq1::from_u64(2).expect("seq2"),
                 sha2,
                 Some(sha1),
-                8,
             )
-            .expect("duplicate pending seq should be idempotent");
-        state
-            .observe(
+            .expect("first out-of-order record should fit cap");
+
+        let err = tracker
+            .observe_record(
                 &namespace,
                 origin,
-                Seq1::from_u64(1).expect("seq1"),
-                sha1,
-                None,
-                8,
+                Seq1::from_u64(3).expect("seq3"),
+                sha3,
+                Some(sha2),
             )
-            .expect("gap fill should flush");
-
-        assert_eq!(state.contiguous_seq.get(), 2);
-        assert_eq!(state.head_sha, Some(sha2));
-        assert!(state.first_pending_seq().is_none());
+            .expect_err("pending gap buffer growth past cap must fail");
+        assert!(matches!(
+            err,
+            WalReplayError::NonContiguousSeq { expected, got, .. }
+                if expected == Seq1::from_u64(1).expect("seq1") && got == Seq0::new(3)
+        ));
     }
 
     #[test]
@@ -1576,7 +2647,7 @@ mod tests {
             SegmentId::new(Uuid::from_bytes([1u8; 16])),
             segment_rel_path(temp.path(), &keep),
             1,
-            0,
+            WalCursorOffset::new(0),
         );
         txn.upsert_segment(&segment_row).unwrap();
         txn.commit().unwrap();
@@ -1603,18 +2674,21 @@ impl ReplayTracker {
 
     fn seed_from_watermarks(&mut self, rows: Vec<WatermarkRow>) -> Result<(), WalReplayError> {
         for row in rows {
-            let durable_seq = row.durable.seq();
-            let head = match row.durable.head() {
+            let durable = row.durable();
+            let durable_seq = durable.seq();
+            let head = match durable.head() {
                 HeadStatus::Genesis => None,
                 HeadStatus::Known(sha) => Some(sha),
             };
 
             let state = OriginReplayState {
-                max_seq: durable_seq,
-                contiguous_seq: durable_seq,
-                head_sha: head,
+                contiguity: ReplayContiguity {
+                    seq: durable_seq,
+                    head_sha: head,
+                    pending: BTreeMap::new(),
+                },
+                max_pending_per_origin: self.max_pending_per_origin,
                 touched: false,
-                pending: BTreeMap::new(),
             };
             self.origins
                 .entry(row.namespace)
@@ -1637,50 +2711,49 @@ impl ReplayTracker {
             .entry(namespace.clone())
             .or_default()
             .entry(origin)
-            .or_default();
-        entry.observe(
-            namespace,
-            origin,
-            seq,
-            sha,
-            prev_sha,
-            self.max_pending_per_origin,
-        )
+            .or_insert_with(|| OriginReplayState {
+                max_pending_per_origin: self.max_pending_per_origin,
+                ..OriginReplayState::default()
+            });
+        entry.observe(namespace, origin, seq, sha, prev_sha)
     }
 }
 
-#[derive(Clone, Debug)]
-struct OriginReplayState {
-    max_seq: Seq0,
-    contiguous_seq: Seq0,
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ReplayContiguity {
+    seq: Seq0,
     head_sha: Option<[u8; 32]>,
-    touched: bool,
     pending: BTreeMap<Seq1, PendingRecord>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct PendingRecord {
     sha: [u8; 32],
     prev_sha: Option<[u8; 32]>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct OriginReplayState {
+    contiguity: ReplayContiguity,
+    max_pending_per_origin: usize,
+    touched: bool,
+}
+
 impl Default for OriginReplayState {
     fn default() -> Self {
         Self {
-            max_seq: Seq0::ZERO,
-            contiguous_seq: Seq0::ZERO,
-            head_sha: None,
+            contiguity: ReplayContiguity {
+                seq: Seq0::ZERO,
+                head_sha: None,
+                pending: BTreeMap::new(),
+            },
+            max_pending_per_origin: usize::MAX,
             touched: false,
-            pending: BTreeMap::new(),
         }
     }
 }
 
 impl OriginReplayState {
-    fn first_pending_seq(&self) -> Option<Seq1> {
-        self.pending.keys().next().copied()
-    }
-
     fn observe(
         &mut self,
         namespace: &NamespaceId,
@@ -1688,71 +2761,95 @@ impl OriginReplayState {
         seq: Seq1,
         sha: [u8; 32],
         prev_sha: Option<[u8; 32]>,
-        max_pending_per_origin: usize,
     ) -> Result<(), WalReplayError> {
-        self.max_seq = Seq0::new(self.max_seq.get().max(seq.get()));
         self.touched = true;
+        let ReplayContiguity {
+            seq: contiguous_seq,
+            head_sha,
+            pending,
+        } = &mut self.contiguity;
 
-        let expected = self.contiguous_seq.next();
-        if seq.get() <= self.contiguous_seq.get() {
+        if seq.get() <= contiguous_seq.get() {
             // Catch-up can re-read records that are already indexed; treat these as idempotent.
             return Ok(());
         }
 
-        if seq != expected && self.pending.len() >= max_pending_per_origin {
-            return Err(WalReplayError::NonContiguousSeq {
-                namespace: namespace.clone(),
-                origin,
-                expected,
-                got: Seq0::new(seq.get()),
-            });
-        }
-
-        if let Some(existing) = self.pending.get(&seq) {
-            if existing.sha == sha && existing.prev_sha == prev_sha {
-                return Ok(());
-            }
-            return Err(WalReplayError::NonContiguousSeq {
-                namespace: namespace.clone(),
-                origin,
-                expected,
-                got: Seq0::new(seq.get()),
-            });
-        }
-        self.pending.insert(seq, PendingRecord { sha, prev_sha });
-
-        while let Some(next) = self.pending.get(&self.contiguous_seq.next()).copied() {
-            let seq = self.contiguous_seq.next();
-            let expected_prev = self.head_sha.unwrap_or([0u8; 32]);
-            let got_prev = next.prev_sha.unwrap_or([0u8; 32]);
-            let head_seq = self.contiguous_seq;
-            if self.contiguous_seq == Seq0::ZERO {
-                if next.prev_sha.is_some() {
-                    return Err(WalReplayError::PrevShaMismatch {
+        if seq != contiguous_seq.next() {
+            if let Some(existing) = pending.get(&seq) {
+                if existing.sha != sha || existing.prev_sha != prev_sha {
+                    return Err(WalReplayError::NonContiguousSeq {
                         namespace: namespace.clone(),
                         origin,
-                        seq,
-                        expected_prev_sha256: expected_prev,
-                        got_prev_sha256: got_prev,
-                        head_seq,
+                        expected: contiguous_seq.next(),
+                        got: Seq0::new(seq.get()),
                     });
                 }
-            } else if next.prev_sha != self.head_sha {
-                return Err(WalReplayError::PrevShaMismatch {
-                    namespace: namespace.clone(),
-                    origin,
-                    seq,
-                    expected_prev_sha256: expected_prev,
-                    got_prev_sha256: got_prev,
-                    head_seq,
-                });
+            } else {
+                if pending.len() >= self.max_pending_per_origin {
+                    return Err(WalReplayError::NonContiguousSeq {
+                        namespace: namespace.clone(),
+                        origin,
+                        expected: contiguous_seq.next(),
+                        got: Seq0::new(seq.get()),
+                    });
+                }
+                pending.insert(seq, PendingRecord { sha, prev_sha });
             }
+            return Ok(());
+        }
 
-            self.pending.remove(&seq);
-            self.contiguous_seq = Seq0::new(seq.get());
-            self.head_sha = Some(next.sha);
+        validate_prev_sha(namespace, origin, *contiguous_seq, *head_sha, seq, prev_sha)?;
+        *contiguous_seq = Seq0::new(seq.get());
+        *head_sha = Some(sha);
+
+        while let Some(next) = pending.remove(&contiguous_seq.next()) {
+            let next_seq = contiguous_seq.next();
+            validate_prev_sha(
+                namespace,
+                origin,
+                *contiguous_seq,
+                *head_sha,
+                next_seq,
+                next.prev_sha,
+            )?;
+            *contiguous_seq = Seq0::new(next_seq.get());
+            *head_sha = Some(next.sha);
         }
 
         Ok(())
     }
+}
+
+fn validate_prev_sha(
+    namespace: &NamespaceId,
+    origin: ReplicaId,
+    contiguous_seq: Seq0,
+    head_sha: Option<[u8; 32]>,
+    seq: Seq1,
+    prev_sha: Option<[u8; 32]>,
+) -> Result<(), WalReplayError> {
+    let expected_prev = head_sha.unwrap_or([0u8; 32]);
+    let got_prev = prev_sha.unwrap_or([0u8; 32]);
+    if contiguous_seq == Seq0::ZERO {
+        if prev_sha.is_some() {
+            return Err(WalReplayError::PrevShaMismatch {
+                namespace: namespace.clone(),
+                origin,
+                seq,
+                expected_prev_sha256: expected_prev,
+                got_prev_sha256: got_prev,
+                head_seq: contiguous_seq,
+            });
+        }
+    } else if prev_sha != head_sha {
+        return Err(WalReplayError::PrevShaMismatch {
+            namespace: namespace.clone(),
+            origin,
+            seq,
+            expected_prev_sha256: expected_prev,
+            got_prev_sha256: got_prev,
+            head_seq: contiguous_seq,
+        });
+    }
+    Ok(())
 }

@@ -42,6 +42,7 @@ use beads_daemon::testkit::wal::{
     EventWal, MemoryWalIndex, ReplicaLivenessRow, SegmentConfig, SegmentSyncMode, WalIndexError,
     rebuild_index,
 };
+use beads_daemon::testkit::{TestGitRx, TestGitTx, handle_request_for_tests, new_test_git_channel};
 use beads_daemon_core::repl::frame::{FrameLimitState, FrameReader, encode_frame};
 use beads_daemon_core::repl::proto::{
     PROTOCOL_VERSION_V1, ReplEnvelope, WireReplEnvelope, decode_envelope, encode_envelope,
@@ -141,8 +142,8 @@ struct TestNodeInner {
     repo_path: PathBuf,
     data_dir: PathBuf,
     _dir: TestDir,
-    git_tx: Sender<beads_daemon::testkit::GitOp>,
-    _git_rx: Receiver<beads_daemon::testkit::GitOp>,
+    git_tx: TestGitTx,
+    _git_rx: TestGitRx,
 }
 
 #[derive(Clone)]
@@ -270,7 +271,7 @@ impl TestNode {
         );
         let remote = RemoteUrl::new(&format!("test://{store_id}"));
 
-        let (git_tx, git_rx) = unbounded();
+        let (git_tx, git_rx) = new_test_git_channel();
         {
             let _guard = paths::override_data_dir_for_tests(Some(data_dir.clone()));
             insert_store_for_tests(&mut daemon, store_id, remote, &repo_path)
@@ -340,7 +341,7 @@ impl TestNode {
     }
 
     pub(crate) fn handle_request(&self, req: Request) -> HandleOutcome {
-        self.with_daemon_mut(|daemon, git_tx| daemon.handle_request(req, git_tx))
+        self.with_daemon_mut(|daemon, git_tx| handle_request_for_tests(daemon, req, git_tx))
     }
 
     pub fn restart(&self) {
@@ -365,7 +366,7 @@ impl TestNode {
             options.limits.hlc_max_forward_drift_ms,
         );
 
-        let (git_tx, git_rx) = unbounded();
+        let (git_tx, git_rx) = new_test_git_channel();
         let remote = RemoteUrl::new(&format!("test://{store_id}"));
 
         let mut inner = self.inner.borrow_mut();
@@ -382,13 +383,10 @@ impl TestNode {
             let limits = inner.daemon.limits().clone();
             let store_dir = crate::daemon_layout_from_paths().store_dir(&store_id);
             if let Some(store) = inner.daemon.store_runtime_by_id_mut(store_id) {
-                replay_event_wal(
-                    &store_dir,
-                    store.wal_index.as_ref(),
-                    &mut store.state,
-                    &limits,
-                )
-                .expect("replay wal");
+                let state = std::mem::take(&mut store.state);
+                replay_event_wal(&store_dir, store.wal_index.as_ref(), state, &limits)
+                    .expect("replay wal")
+                    .acknowledge_checkpoint_dirty(store);
             }
         }
 
@@ -540,14 +538,11 @@ impl TestNode {
         f(&inner.daemon)
     }
 
-    fn with_daemon_mut<R>(
-        &self,
-        f: impl FnOnce(&mut Daemon, &Sender<beads_daemon::testkit::GitOp>) -> R,
-    ) -> R {
+    fn with_daemon_mut<R>(&self, f: impl FnOnce(&mut Daemon, &TestGitTx) -> R) -> R {
         let data_dir = self.inner.borrow().data_dir.clone();
         let _guard = paths::override_data_dir_for_tests(Some(data_dir));
         let mut inner = self.inner.borrow_mut();
-        let git_tx = inner.git_tx.clone();
+        let git_tx = inner.git_tx.clone_for_tests();
         f(&mut inner.daemon, &git_tx)
     }
 }
@@ -593,8 +588,8 @@ impl SessionStore for TestSessionStore {
                 durable
                     .entry(ns.clone())
                     .or_default()
-                    .insert(origin, row.durable);
-                applied.entry(ns).or_default().insert(origin, row.applied);
+                    .insert(origin, row.durable());
+                applied.entry(ns).or_default().insert(origin, row.applied());
             }
 
             WatermarkSnapshot { durable, applied }

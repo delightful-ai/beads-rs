@@ -60,7 +60,28 @@ impl StampedContext {
 }
 
 pub trait DotAllocator {
-    fn next_dot(&mut self) -> Result<Dot, OpError>;
+    fn next_dot(&mut self) -> Result<DotAllocation, OpError>;
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DotDurabilityEffect {
+    StoreMetaSyncBoundary,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DotAllocation {
+    pub dot: Dot,
+    pub durability: DotDurabilityEffect,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct PendingPlanningDurabilityEffects {
+    pub dot_meta_sync_boundaries: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AcknowledgedPlanningDurabilityEffects {
+    pub dot_meta_sync_boundaries: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -78,6 +99,31 @@ pub struct EventDraft {
     pub request_sha256: [u8; 32],
     pub client_request_id: Option<ClientRequestId>,
     pub trace_id: TraceId,
+}
+
+/// ```compile_fail
+/// use beads_daemon::runtime::mutation_engine::PlannedMutation;
+///
+/// fn bypass_ack(planned: PlannedMutation) {
+///     let _ = planned.draft;
+/// }
+/// ```
+#[must_use = "planned mutation has unacknowledged durability effects"]
+#[derive(Debug)]
+pub struct PlannedMutation {
+    draft: EventDraft,
+    durability: PendingPlanningDurabilityEffects,
+}
+
+impl PlannedMutation {
+    pub fn acknowledge_durability(self) -> (EventDraft, AcknowledgedPlanningDurabilityEffects) {
+        (
+            self.draft,
+            AcknowledgedPlanningDurabilityEffects {
+                dot_meta_sync_boundaries: self.durability.dot_meta_sync_boundaries,
+            },
+        )
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -327,9 +373,10 @@ impl MutationEngine {
         id_ctx: Option<&IdContext>,
         req: ParsedMutationRequest,
         dot_alloc: &mut dyn DotAllocator,
-    ) -> Result<EventDraft, OpError> {
+    ) -> Result<PlannedMutation, OpError> {
         let (ctx, stamp) = stamped.into_parts();
         let write_stamp = stamp.at.clone();
+        let mut durability = PendingPlanningDurabilityEffects::default();
 
         let planned = match req {
             ParsedMutationRequest::Create {
@@ -350,6 +397,7 @@ impl MutationEngine {
                 state,
                 &stamp,
                 dot_alloc,
+                &mut durability,
                 id_ctx,
                 id,
                 parent,
@@ -369,13 +417,13 @@ impl MutationEngine {
                 self.plan_update(state, id, patch, cas)?
             }
             ParsedMutationRequest::AddLabels { id, labels } => {
-                self.plan_add_labels(state, id, labels, dot_alloc)?
+                self.plan_add_labels(state, id, labels, dot_alloc, &mut durability)?
             }
             ParsedMutationRequest::RemoveLabels { id, labels } => {
                 self.plan_remove_labels(state, id, labels)?
             }
             ParsedMutationRequest::SetParent { id, parent } => {
-                self.plan_set_parent(state, id, parent, &stamp, dot_alloc)?
+                self.plan_set_parent(state, id, parent, &stamp, dot_alloc, &mut durability)?
             }
             ParsedMutationRequest::Close {
                 id,
@@ -387,7 +435,7 @@ impl MutationEngine {
                 self.plan_delete(state, &stamp, id, reason)?
             }
             ParsedMutationRequest::AddDep { from, to, kind } => {
-                self.plan_add_dep(state, &stamp, from, to, kind, dot_alloc)?
+                self.plan_add_dep(state, &stamp, from, to, kind, dot_alloc, &mut durability)?
             }
             ParsedMutationRequest::RemoveDep { from, to, kind } => {
                 self.plan_remove_dep(state, &stamp, from, to, kind)?
@@ -421,18 +469,21 @@ impl MutationEngine {
             ..
         } = ctx;
 
-        Ok(EventDraft {
-            command,
-            hlc_max: HlcMax {
-                actor_id,
-                physical_ms: write_stamp.wall_ms,
-                logical: write_stamp.counter,
+        Ok(PlannedMutation {
+            draft: EventDraft {
+                command,
+                hlc_max: HlcMax {
+                    actor_id,
+                    physical_ms: write_stamp.wall_ms,
+                    logical: write_stamp.counter,
+                },
+                event_time_ms: write_stamp.wall_ms,
+                txn_id: txn_id_for_stamp(&store, &stamp),
+                request_sha256,
+                client_request_id,
+                trace_id,
             },
-            event_time_ms: write_stamp.wall_ms,
-            txn_id: txn_id_for_stamp(&store, &stamp),
-            request_sha256,
-            client_request_id,
-            trace_id,
+            durability,
         })
     }
 
@@ -647,12 +698,29 @@ impl MutationEngine {
         Ok(())
     }
 
+    fn allocate_dot(
+        &self,
+        dot_alloc: &mut dyn DotAllocator,
+        durability: &mut PendingPlanningDurabilityEffects,
+    ) -> Result<Dot, OpError> {
+        let allocation = dot_alloc.next_dot()?;
+        if matches!(
+            allocation.durability,
+            DotDurabilityEffect::StoreMetaSyncBoundary
+        ) {
+            durability.dot_meta_sync_boundaries =
+                durability.dot_meta_sync_boundaries.saturating_add(1);
+        }
+        Ok(allocation.dot)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn plan_create(
         &self,
         state: &CanonicalState,
         stamp: &Stamp,
         dot_alloc: &mut dyn DotAllocator,
+        durability: &mut PendingPlanningDurabilityEffects,
         id_ctx: Option<&IdContext>,
         id: Option<BeadId>,
         parent: Option<BeadId>,
@@ -781,7 +849,7 @@ impl MutationEngine {
         insert_bead_upsert(&mut delta, patch)?;
 
         for label in labels.iter() {
-            let dot = dot_alloc.next_dot()?;
+            let dot = self.allocate_dot(dot_alloc, durability)?;
             delta
                 .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
                     bead_id: id.clone(),
@@ -801,7 +869,7 @@ impl MutationEngine {
             delta
                 .insert(TxnOpV1::ParentAdd(WireParentAddV1 {
                     edge,
-                    dot: WireDotV1::from(dot_alloc.next_dot()?),
+                    dot: WireDotV1::from(self.allocate_dot(dot_alloc, durability)?),
                 }))
                 .map_err(delta_error_to_op)?;
         }
@@ -816,7 +884,7 @@ impl MutationEngine {
             delta
                 .insert(TxnOpV1::DepAdd(WireDepAddV1 {
                     key,
-                    dot: WireDotV1::from(dot_alloc.next_dot()?),
+                    dot: WireDotV1::from(self.allocate_dot(dot_alloc, durability)?),
                 }))
                 .map_err(delta_error_to_op)?;
         }
@@ -880,6 +948,7 @@ impl MutationEngine {
         id: BeadId,
         labels: Labels,
         dot_alloc: &mut dyn DotAllocator,
+        durability: &mut PendingPlanningDurabilityEffects,
     ) -> Result<PlannedDelta, OpError> {
         let bead = state.require_live(&id).map_live_err(&id)?;
         let lineage = bead.core.created().clone();
@@ -891,7 +960,7 @@ impl MutationEngine {
 
         let mut delta = TxnDeltaV1::new();
         for label in labels.iter() {
-            let dot = dot_alloc.next_dot()?;
+            let dot = self.allocate_dot(dot_alloc, durability)?;
             delta
                 .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
                     bead_id: id.clone(),
@@ -1060,6 +1129,7 @@ impl MutationEngine {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn plan_add_dep(
         &self,
         state: &CanonicalState,
@@ -1068,6 +1138,7 @@ impl MutationEngine {
         to: BeadId,
         kind: DepKind,
         dot_alloc: &mut dyn DotAllocator,
+        durability: &mut PendingPlanningDurabilityEffects,
     ) -> Result<PlannedDelta, OpError> {
         if state.get_live(&from).is_none() {
             return Err(OpError::NotFound(from));
@@ -1086,7 +1157,7 @@ impl MutationEngine {
         delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
                 key: key.clone(),
-                dot: WireDotV1::from(dot_alloc.next_dot()?),
+                dot: WireDotV1::from(self.allocate_dot(dot_alloc, durability)?),
             }))
             .map_err(delta_error_to_op)?;
 
@@ -1135,6 +1206,7 @@ impl MutationEngine {
         parent: Option<BeadId>,
         _stamp: &Stamp,
         dot_alloc: &mut dyn DotAllocator,
+        durability: &mut PendingPlanningDurabilityEffects,
     ) -> Result<PlannedDelta, OpError> {
         state.require_live(&id).map_live_err(&id)?;
 
@@ -1178,7 +1250,7 @@ impl MutationEngine {
             delta
                 .insert(TxnOpV1::ParentAdd(WireParentAddV1 {
                     edge: parent_edge,
-                    dot: WireDotV1::from(dot_alloc.next_dot()?),
+                    dot: WireDotV1::from(self.allocate_dot(dot_alloc, durability)?),
                 }))
                 .map_err(delta_error_to_op)?;
         }
@@ -2005,11 +2077,14 @@ mod tests {
     }
 
     impl DotAllocator for TestDotAllocator {
-        fn next_dot(&mut self) -> Result<Dot, OpError> {
+        fn next_dot(&mut self) -> Result<DotAllocation, OpError> {
             self.counter += 1;
-            Ok(Dot {
-                replica: self.replica_id,
-                counter: self.counter,
+            Ok(DotAllocation {
+                dot: Dot {
+                    replica: self.replica_id,
+                    counter: self.counter,
+                },
+                durability: DotDurabilityEffect::StoreMetaSyncBoundary,
             })
         }
     }
@@ -2047,15 +2122,47 @@ mod tests {
         let mut dots_a = TestDotAllocator::new(replica_id);
         let mut dots_b = TestDotAllocator::new(replica_id);
 
-        let draft_a = engine
+        let planned_a = engine
             .plan(&state, now_ms, stamped_a, store, None, req_a, &mut dots_a)
             .unwrap();
-        let draft_b = engine
+        let planned_b = engine
             .plan(&state, now_ms, stamped_b, store, None, req_b, &mut dots_b)
             .unwrap();
+        let (draft_a, effects_a) = planned_a.acknowledge_durability();
+        let (draft_b, effects_b) = planned_b.acknowledge_durability();
 
         assert_eq!(draft_a.request_sha256, draft_b.request_sha256);
         assert_eq!(draft_a.command.raw_delta(), draft_b.command.raw_delta());
+        assert_eq!(effects_a.dot_meta_sync_boundaries, 2);
+        assert_eq!(effects_b.dot_meta_sync_boundaries, 2);
+    }
+
+    #[test]
+    fn plan_requires_durability_ack_for_dot_allocating_mutations() {
+        let engine = MutationEngine::new(Limits::default());
+        let actor = actor_id("alice");
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([6u8; 16])),
+        };
+        let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([1u8; 16])), 0.into());
+        let state = make_state_with_bead("bd-123", &actor);
+        let req = ParsedMutationRequest::parse_add_labels(LabelsPayload {
+            id: BeadId::parse("bd-123").expect("bead id"),
+            labels: vec!["a".into()],
+        })
+        .expect("request");
+        let now_ms = 1_000;
+        let stamped = make_stamped_context(ctx, make_stamp(now_ms, &actor));
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([4u8; 16])));
+
+        let planned = engine
+            .plan(&state, now_ms, stamped, store, None, req, &mut dots)
+            .expect("plan");
+        let (_draft, effects) = planned.acknowledge_durability();
+        assert_eq!(effects.dot_meta_sync_boundaries, 1);
     }
 
     #[test]
@@ -2097,9 +2204,10 @@ mod tests {
         .unwrap();
         let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
 
-        let draft = engine
+        let planned = engine
             .plan(&state, 1_000, stamped, store, Some(&id_ctx), req, &mut dots)
             .unwrap();
+        let (draft, effects) = planned.acknowledge_durability();
         let patch = draft
             .command
             .raw_delta()
@@ -2109,6 +2217,7 @@ mod tests {
                 _ => None,
             })
             .expect("bead upsert");
+        assert_eq!(effects.dot_meta_sync_boundaries, 0);
 
         assert_eq!(patch.status, Some(WorkflowStatus::InProgress));
         assert!(matches!(patch.assignee, WirePatch::Set(_)));
@@ -2145,9 +2254,10 @@ mod tests {
         };
         let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([4u8; 16])));
 
-        let draft = engine
+        let planned = engine
             .plan(&state, 10, stamped, store, None, req, &mut dots)
             .unwrap();
+        let (draft, effects) = planned.acknowledge_durability();
         let patch = draft
             .command
             .raw_delta()
@@ -2157,6 +2267,7 @@ mod tests {
                 _ => None,
             })
             .expect("bead upsert");
+        assert_eq!(effects.dot_meta_sync_boundaries, 0);
 
         assert_eq!(patch.status, Some(WorkflowStatus::InProgress));
         assert!(matches!(patch.assignee, WirePatch::Set(_)));
@@ -2266,9 +2377,10 @@ mod tests {
         .unwrap();
         let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([7u8; 16])));
 
-        let draft = engine
+        let planned = engine
             .plan(&state, 10, stamped, store, None, req, &mut dots)
             .unwrap();
+        let (draft, effects) = planned.acknowledge_durability();
         let patch = draft
             .command
             .raw_delta()
@@ -2281,6 +2393,7 @@ mod tests {
 
         assert_eq!(patch.title.as_deref(), Some("title"));
         assert_eq!(patch.description.as_deref(), Some("desc"));
+        assert_eq!(effects.dot_meta_sync_boundaries, 0);
     }
 
     #[test]
@@ -2405,7 +2518,7 @@ mod tests {
         .unwrap();
         let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
 
-        let draft = engine
+        let planned = engine
             .plan(
                 &state,
                 stamp.at.wall_ms,
@@ -2416,6 +2529,7 @@ mod tests {
                 &mut dots,
             )
             .expect("plan related dep");
+        let (draft, effects) = planned.acknowledge_durability();
 
         assert!(
             draft
@@ -2424,6 +2538,7 @@ mod tests {
                 .iter()
                 .any(|op| matches!(op, TxnOpV1::DepAdd(_)))
         );
+        assert_eq!(effects.dot_meta_sync_boundaries, 1);
     }
 
     #[test]
@@ -2518,7 +2633,7 @@ mod tests {
         };
         let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
 
-        let draft = engine
+        let planned = engine
             .plan(
                 &state,
                 stamp.at.wall_ms,
@@ -2529,6 +2644,7 @@ mod tests {
                 &mut dots,
             )
             .expect("plan set parent");
+        let (draft, effects) = planned.acknowledge_durability();
 
         let ops: Vec<_> = draft.command.raw_delta().iter().collect();
         assert!(ops.iter().any(|op| matches!(op, TxnOpV1::ParentRemove(_))));
@@ -2537,6 +2653,7 @@ mod tests {
             !ops.iter()
                 .any(|op| matches!(op, TxnOpV1::DepAdd(dep) if dep.kind() == DepKind::Parent))
         );
+        assert_eq!(effects.dot_meta_sync_boundaries, 1);
     }
 
     #[test]
@@ -2631,9 +2748,11 @@ mod tests {
         let stamp = make_stamp(now_ms, &actor);
         let stamped = make_stamped_context(ctx, stamp);
         let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([4u8; 16])));
-        let _ = engine
+        let planned = engine
             .plan(&state, now_ms, stamped, store, None, req, &mut dots)
             .unwrap();
+        let (_draft, effects) = planned.acknowledge_durability();
+        assert_eq!(effects.dot_meta_sync_boundaries, 1);
 
         let after = serde_json::to_string(&state).unwrap();
         assert_eq!(before, after);

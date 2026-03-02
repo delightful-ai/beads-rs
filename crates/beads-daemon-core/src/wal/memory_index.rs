@@ -3,8 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 use crate::core::{
-    ActorId, Applied, ClientRequestId, Durable, EventId, NamespaceId, ReplicaId, SegmentId, Seq0,
-    Seq1, TxnId, Watermark,
+    ActorId, ClientRequestId, EventId, NamespaceId, ReplicaId, SegmentId, Seq0, Seq1, TxnId,
+    WatermarkPair,
 };
 
 use super::{
@@ -264,18 +264,12 @@ impl WalIndexTxn for MemoryWalIndexTxn {
         &mut self,
         ns: &NamespaceId,
         origin: &ReplicaId,
-        applied: Watermark<Applied>,
-        durable: Watermark<Durable>,
+        watermarks: WatermarkPair,
     ) -> Result<(), WalIndexError> {
         self.ensure_live()?;
         self.working.watermarks.insert(
             (ns.clone(), *origin),
-            WatermarkRow {
-                namespace: ns.clone(),
-                origin: *origin,
-                applied,
-                durable,
-            },
+            WatermarkRow::new(ns.clone(), *origin, watermarks),
         );
         Ok(())
     }
@@ -292,6 +286,30 @@ impl WalIndexTxn for MemoryWalIndexTxn {
             (segment.namespace().clone(), segment.segment_id()),
             segment.clone(),
         );
+        Ok(())
+    }
+
+    fn replace_namespace_segments(
+        &mut self,
+        ns: &NamespaceId,
+        segments: &[SegmentRow],
+    ) -> Result<(), WalIndexError> {
+        self.ensure_live()?;
+        for segment in segments {
+            if segment.namespace() != ns {
+                return Err(WalIndexError::SegmentRowDecode(format!(
+                    "segment namespace mismatch (expected {}, got {})",
+                    ns,
+                    segment.namespace()
+                )));
+            }
+        }
+        self.working.segments.retain(|(row_ns, _), _| row_ns != ns);
+        for segment in segments {
+            self.working
+                .segments
+                .insert((ns.clone(), segment.segment_id()), segment.clone());
+        }
         Ok(())
     }
 
@@ -432,6 +450,19 @@ impl WalIndexReader for MemoryWalIndexReader {
         })
     }
 
+    fn list_segment_namespaces(&self) -> Result<Vec<NamespaceId>, WalIndexError> {
+        self.with_state(|state| {
+            let mut namespaces: Vec<NamespaceId> = state
+                .segments
+                .keys()
+                .map(|(namespace, _)| namespace.clone())
+                .collect();
+            namespaces.sort();
+            namespaces.dedup();
+            Ok(namespaces)
+        })
+    }
+
     fn load_watermarks(&self) -> Result<Vec<WatermarkRow>, WalIndexError> {
         self.with_state(|state| {
             let mut rows: Vec<WatermarkRow> = state.watermarks.values().cloned().collect();
@@ -533,7 +564,9 @@ mod tests {
     use super::*;
     use uuid::Uuid;
 
-    use crate::core::{EventId, HeadStatus, NamespaceId, SegmentId, Seq1, TxnId};
+    use crate::core::{
+        Applied, Durable, EventId, HeadStatus, NamespaceId, SegmentId, Seq0, Seq1, TxnId, Watermark,
+    };
 
     #[test]
     fn memory_index_records_event_and_watermarks() {
@@ -564,7 +597,8 @@ mod tests {
             Watermark::<Applied>::new(Seq0::new(1), HeadStatus::Known(sha)).expect("watermark");
         let durable =
             Watermark::<Durable>::new(Seq0::new(1), HeadStatus::Known(sha)).expect("watermark");
-        txn.update_watermark(&namespace, &origin, applied, durable)
+        let watermarks = WatermarkPair::new(applied, durable).expect("watermark pair");
+        txn.update_watermark(&namespace, &origin, watermarks)
             .expect("update watermark");
         txn.commit().expect("commit");
 

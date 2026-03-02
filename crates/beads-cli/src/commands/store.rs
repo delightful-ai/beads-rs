@@ -37,7 +37,7 @@ pub struct StoreFsckArgs {
     #[arg(long = "store-id", alias = "id", value_name = "STORE_ID")]
     pub store_id: String,
 
-    /// Apply safe repairs (tail truncation, quarantine, wal.sqlite rebuild).
+    /// Apply safe repairs (prefix salvage truncation, no-prefix quarantine, wal.sqlite rebuild).
     #[arg(long)]
     pub repair: bool,
 }
@@ -94,15 +94,30 @@ pub fn render_admin_fsck(output: &AdminFsckOutput) -> String {
     if !output.repairs.is_empty() {
         out.push_str("  repairs:\n");
         for repair in &output.repairs {
-            let path = repair
-                .path
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "none".to_string());
-            out.push_str(&format!(
-                "    - {}: {} ({path})\n",
-                repair.kind, repair.detail
-            ));
+            match repair {
+                beads_api::FsckRepair::PrefixSalvageTruncate {
+                    segment_path,
+                    truncate_to_offset,
+                    discarded_suffix_bytes,
+                    cause,
+                } => out.push_str(&format!(
+                    "    - prefix_salvage_truncate: segment={} truncate_to_offset={truncate_to_offset} discarded_suffix_bytes={discarded_suffix_bytes} cause={cause}\n",
+                    segment_path.display()
+                )),
+                beads_api::FsckRepair::QuarantineNoValidPrefix {
+                    original_segment_path,
+                    quarantined_path,
+                    cause,
+                } => out.push_str(&format!(
+                    "    - quarantine_no_valid_prefix: original={} quarantined={} cause={cause}\n",
+                    original_segment_path.display(),
+                    quarantined_path.display()
+                )),
+                beads_api::FsckRepair::RebuildIndex { index_path } => out.push_str(&format!(
+                    "    - rebuild_index: index={}\n",
+                    index_path.display()
+                )),
+            }
         }
     }
 
@@ -232,8 +247,8 @@ fn write_stdout(text: &str) -> crate::Result<()> {
 mod tests {
     use super::*;
     use beads_api::{
-        FsckCheck, FsckCheckId, FsckEvidence, FsckEvidenceCode, FsckRepair, FsckRepairKind,
-        FsckRisk, FsckSeverity, FsckStats, FsckSummary,
+        FsckCheck, FsckCheckId, FsckEvidence, FsckEvidenceCode, FsckRepair, FsckRisk, FsckSeverity,
+        FsckStats, FsckSummary,
     };
     use beads_core::{NamespaceId, ReplicaId};
     use std::path::PathBuf;
@@ -256,11 +271,22 @@ mod tests {
                 safe_to_prune_wal: false,
                 safe_to_rebuild_index: true,
             },
-            repairs: vec![FsckRepair {
-                kind: FsckRepairKind::TruncateTail,
-                path: Some(PathBuf::from("/tmp/wal/segment-1")),
-                detail: "truncated tail corruption".to_string(),
-            }],
+            repairs: vec![
+                FsckRepair::PrefixSalvageTruncate {
+                    segment_path: PathBuf::from("/tmp/wal/segment-1"),
+                    truncate_to_offset: 128,
+                    discarded_suffix_bytes: 24,
+                    cause: FsckEvidenceCode::FrameCrcMismatch,
+                },
+                FsckRepair::QuarantineNoValidPrefix {
+                    original_segment_path: PathBuf::from("/tmp/wal/segment-2"),
+                    quarantined_path: PathBuf::from("/tmp/wal/quarantine/segment-2"),
+                    cause: FsckEvidenceCode::SegmentHeaderInvalid,
+                },
+                FsckRepair::RebuildIndex {
+                    index_path: PathBuf::from("/tmp/index/wal.sqlite"),
+                },
+            ],
             checks: vec![
                 FsckCheck {
                     id: FsckCheckId::SegmentFrames,
@@ -300,7 +326,9 @@ mod tests {
             "  stats: namespaces=1 segments=2 records=3\n",
             "  summary: risk=high safe_to_accept_writes=false safe_to_prune_wal=false safe_to_rebuild_index=true\n",
             "  repairs:\n",
-            "    - truncate_tail: truncated tail corruption (/tmp/wal/segment-1)\n",
+            "    - prefix_salvage_truncate: segment=/tmp/wal/segment-1 truncate_to_offset=128 discarded_suffix_bytes=24 cause=frame_crc_mismatch\n",
+            "    - quarantine_no_valid_prefix: original=/tmp/wal/segment-2 quarantined=/tmp/wal/quarantine/segment-2 cause=segment_header_invalid\n",
+            "    - rebuild_index: index=/tmp/index/wal.sqlite\n",
             "  checks:\n",
             "    - segment_frames: fail (severity=high, issues=1)\n",
             "      * frame_crc_mismatch: crc mismatch path=/tmp/wal/segment-1 namespace=core origin=07070707-0707-0707-0707-070707070707 seq=5 offset=128\n",

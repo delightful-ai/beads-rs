@@ -1,4 +1,5 @@
 use super::*;
+use crate::runtime::mutation_engine::{DotAllocation, DotDurabilityEffect};
 
 pub(super) fn wal_index_to_op(err: WalIndexError) -> OpError {
     OpError::from(StoreRuntimeError::WalIndex(err))
@@ -40,11 +41,14 @@ impl<'a> RuntimeDotAllocator<'a> {
 }
 
 impl DotAllocator for RuntimeDotAllocator<'_> {
-    fn next_dot(&mut self) -> Result<Dot, OpError> {
+    fn next_dot(&mut self) -> Result<DotAllocation, OpError> {
         let counter = self.runtime.next_orset_counter()?;
-        Ok(Dot {
-            replica: self.replica_id,
-            counter,
+        Ok(DotAllocation {
+            dot: Dot {
+                replica: self.replica_id,
+                counter,
+            },
+            durability: DotDurabilityEffect::StoreMetaSyncBoundary,
         })
     }
 }
