@@ -1,0 +1,8 @@
+warning: `allow(rustc::private_interfaces)` is forbidden outside test-only code
+  --> $DIR/private_interface_allow_namespaced_violation.rs:LL:CC
+   |
+LL | #[allow(rustc::private_interfaces)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: remove this suppression and narrow item visibility or narrow re-export visibility instead
+

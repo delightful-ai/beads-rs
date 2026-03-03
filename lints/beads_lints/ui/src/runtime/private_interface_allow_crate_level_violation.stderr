@@ -1,0 +1,8 @@
+warning: `allow(private_interfaces)` is forbidden outside test-only code
+  --> $DIR/private_interface_allow_crate_level_violation.rs:LL:CC
+   |
+LL | #![allow(private_interfaces)]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: remove this suppression and narrow item visibility or narrow re-export visibility instead
+

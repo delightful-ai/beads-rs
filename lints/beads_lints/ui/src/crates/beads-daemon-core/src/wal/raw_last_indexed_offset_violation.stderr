@@ -1,0 +1,8 @@
+warning: WAL boundary `last_indexed_offset` must use `WalCursorOffset`, not `u64`
+  --> $DIR/raw_last_indexed_offset_violation.rs:LL:CC
+   |
+LL |     last_indexed_offset: u64,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = help: replace `u64` with `WalCursorOffset` at this boundary
+
