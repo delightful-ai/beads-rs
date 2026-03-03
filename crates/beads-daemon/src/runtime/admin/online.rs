@@ -467,6 +467,20 @@ impl Daemon {
         repo: &Path,
         git_tx: &Sender<GitOp>,
     ) -> Response {
+        let resolved = match self.resolve_store(repo) {
+            Ok(resolved) => resolved,
+            Err(err) => return Response::err_from(err),
+        };
+        let store_id = resolved.store_id();
+        let was_loaded = self
+            .try_loaded_store(store_id, resolved.remote.clone())
+            .is_some();
+
+        // Reload replication config from disk
+        if let Err(err) = self.reload_replication_config(repo) {
+            return Response::err_from(err);
+        }
+
         let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
             Err(err) => return Response::err_from(err),
@@ -474,12 +488,9 @@ impl Daemon {
         let store_id = proof.store_id();
         drop(proof);
 
-        // Reload replication config from disk
-        if let Err(err) = self.reload_replication_config(repo) {
-            return Response::err_from(err);
-        }
-
-        if let Err(err) = self.reload_replication_runtime(store_id) {
+        // Fresh loads already bind replication runtime during repo load.
+        // Only force rebind if the store was already loaded before this command.
+        if was_loaded && let Err(err) = self.reload_replication_runtime(store_id) {
             return Response::err_from(err);
         }
 
