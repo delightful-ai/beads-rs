@@ -1,5 +1,8 @@
 //! Replication protocol modules.
 
+use std::net::TcpStream;
+use std::time::Duration;
+
 pub mod contiguous_batch;
 pub mod error;
 pub mod gap_buffer;
@@ -40,3 +43,24 @@ pub use session::{
     SessionStore, ValidatedAck, WatermarkSnapshot,
 };
 pub use store::SharedSessionStore;
+
+const REPL_STREAM_READ_TIMEOUT: Duration = Duration::from_secs(1);
+const REPL_STREAM_WRITE_TIMEOUT: Duration = Duration::from_secs(3);
+
+fn configure_repl_stream(stream: &TcpStream) -> std::io::Result<()> {
+    stream.set_nodelay(true)?;
+    stream.set_read_timeout(Some(REPL_STREAM_READ_TIMEOUT))?;
+    stream.set_write_timeout(Some(REPL_STREAM_WRITE_TIMEOUT))?;
+    Ok(())
+}
+
+fn is_timeout_error(err: &FrameError) -> bool {
+    matches!(
+        err,
+        FrameError::Io(io_err)
+            if matches!(
+                io_err.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            )
+    )
+}

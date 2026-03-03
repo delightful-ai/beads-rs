@@ -13,6 +13,7 @@ use thiserror::Error;
 #[cfg(test)]
 use std::sync::OnceLock;
 
+use super::{configure_repl_stream, is_timeout_error};
 use crate::admission::AdmissionController;
 use crate::broadcast::{
     BroadcastError, BroadcastEvent, EventBroadcaster, EventSubscription, SubscriberLimits,
@@ -384,7 +385,7 @@ where
     S: SessionStore + Send + 'static,
 {
     let shutdown_stream = stream;
-    shutdown_stream.set_nodelay(true)?;
+    configure_repl_stream(&shutdown_stream)?;
 
     let mut store = runtime.store.clone();
     let admission = runtime.admission.clone();
@@ -796,6 +797,9 @@ fn run_reader_loop(
                 break;
             }
             Err(err) => {
+                if is_timeout_error(&err) {
+                    continue;
+                }
                 let payload = err.as_error_payload();
                 let _ = inbound_tx.send(InboundMessage::Terminated { payload });
                 break;
@@ -1885,5 +1889,49 @@ mod tests {
             "backoff should delay connect attempts by at least base duration"
         );
         handle.shutdown();
+    }
+
+    #[test]
+    fn reader_loop_ignores_timeouts_until_shutdown() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let client = TcpStream::connect(addr).expect("connect");
+        let (server_stream, _) = listener.accept().expect("accept");
+        server_stream
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .expect("set read timeout");
+
+        let mut reader =
+            FrameReader::new(server_stream, FrameLimitState::unnegotiated(1024 * 1024));
+        let (inbound_tx, inbound_rx) = crossbeam::channel::unbounded();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let expected_version = Arc::new(AtomicU32::new(PROTOCOL_VERSION_V1));
+        let worker_shutdown = Arc::clone(&shutdown);
+        let reader_handle = thread::spawn(move || {
+            run_reader_loop(
+                &mut reader,
+                inbound_tx,
+                worker_shutdown,
+                test_limits(),
+                expected_version,
+            );
+        });
+
+        assert!(
+            inbound_rx.recv_timeout(Duration::from_millis(80)).is_err(),
+            "timeout without frames should not terminate the reader loop"
+        );
+
+        shutdown.store(true, Ordering::Relaxed);
+        match inbound_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("shutdown termination")
+        {
+            InboundMessage::Terminated { payload: None } => {}
+            other => panic!("unexpected message during shutdown: {other:?}"),
+        }
+
+        reader_handle.join().expect("join reader");
+        drop(client);
     }
 }

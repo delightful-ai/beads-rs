@@ -87,6 +87,11 @@ impl Default for ReplRigOptions {
 }
 
 const ADMIN_READY_POLL_TIMEOUT: Duration = Duration::from_millis(250);
+const IPC_IO_TIMEOUT_FLOOR: Duration = Duration::from_secs(5);
+const IPC_IO_TIMEOUT_SLACK: Duration = Duration::from_secs(2);
+const IPC_IO_TIMEOUT_CEILING: Duration = Duration::from_secs(600);
+const IPC_RELOAD_REPLICATION_TIMEOUT: Duration = Duration::from_secs(30);
+const IPC_SEND_RETRY_ATTEMPTS: usize = 3;
 
 pub struct ReplRig {
     _root: Option<TempDir>,
@@ -305,76 +310,79 @@ impl ReplRig {
 
     pub fn assert_converged(&self, namespaces: &[NamespaceId], timeout: Duration) {
         let deadline = Instant::now() + timeout;
-        let mut statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline)
-        {
-            Ok(statuses) => statuses,
-            Err(err) => panic!("admin status error: {err:?}"),
-        };
-        loop {
+        let mut retry_backoff = Duration::from_millis(10);
+        let statuses = loop {
+            let statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline)
+            {
+                Ok(statuses) => statuses,
+                Err(err) if err.retryable && Instant::now() < deadline => {
+                    std::thread::sleep(retry_backoff);
+                    retry_backoff =
+                        std::cmp::min(retry_backoff.saturating_mul(2), Duration::from_millis(100));
+                    continue;
+                }
+                Err(err) => panic!("admin status error: {err:?}"),
+            };
+            retry_backoff = Duration::from_millis(10);
             if self.converged_with_statuses(&statuses, namespaces) {
                 return;
             }
             if Instant::now() >= deadline {
-                break;
+                break statuses;
             }
-            statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline) {
-                Ok(statuses) => statuses,
-                Err(err) => panic!("admin status error: {err:?}"),
-            };
-        }
-        if self.converged_with_statuses(&statuses, namespaces) {
-            return;
-        }
+        };
         panic!("replication did not converge: {statuses:?}");
     }
 
     pub fn assert_peers_seen(&self, timeout: Duration) {
         let deadline = Instant::now() + timeout;
-        let mut statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline)
-        {
-            Ok(statuses) => statuses,
-            Err(err) => panic!("admin status error: {err:?}"),
-        };
-        loop {
+        let mut retry_backoff = Duration::from_millis(10);
+        let statuses = loop {
+            let statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline)
+            {
+                Ok(statuses) => statuses,
+                Err(err) if err.retryable && Instant::now() < deadline => {
+                    std::thread::sleep(retry_backoff);
+                    retry_backoff =
+                        std::cmp::min(retry_backoff.saturating_mul(2), Duration::from_millis(100));
+                    continue;
+                }
+                Err(err) => panic!("admin status error: {err:?}"),
+            };
+            retry_backoff = Duration::from_millis(10);
             if self.peers_seen_with_statuses(&statuses) {
                 return;
             }
             if Instant::now() >= deadline {
-                break;
+                break statuses;
             }
-            statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline) {
-                Ok(statuses) => statuses,
-                Err(err) => panic!("admin status error: {err:?}"),
-            };
-        }
-        if self.peers_seen_with_statuses(&statuses) {
-            return;
-        }
+        };
         panic!("replication peers not observed: {statuses:?}");
     }
 
     pub fn assert_replication_ready(&self, timeout: Duration) {
         let deadline = Instant::now() + timeout;
-        let mut statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline)
-        {
-            Ok(statuses) => statuses,
-            Err(err) => panic!("admin status error: {err:?}"),
-        };
-        loop {
+        let mut retry_backoff = Duration::from_millis(10);
+        let statuses = loop {
+            let statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline)
+            {
+                Ok(statuses) => statuses,
+                Err(err) if err.retryable && Instant::now() < deadline => {
+                    std::thread::sleep(retry_backoff);
+                    retry_backoff =
+                        std::cmp::min(retry_backoff.saturating_mul(2), Duration::from_millis(100));
+                    continue;
+                }
+                Err(err) => panic!("admin status error: {err:?}"),
+            };
+            retry_backoff = Duration::from_millis(10);
             if self.replication_ready_with_statuses(&statuses) {
                 return;
             }
             if Instant::now() >= deadline {
-                break;
+                break statuses;
             }
-            statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline) {
-                Ok(statuses) => statuses,
-                Err(err) => panic!("admin status error: {err:?}"),
-            };
-        }
-        if self.replication_ready_with_statuses(&statuses) {
-            return;
-        }
+        };
         panic!("replication not ready: {statuses:?}");
     }
 
@@ -626,7 +634,15 @@ impl Node {
                     id: BeadId::parse(issue_id).expect("bead id"),
                 },
             };
-            let response = self.send_request(&request).expect("bd show");
+            let response = match self.send_request(&request) {
+                Ok(response) => response,
+                Err(err) if err.transience().is_retryable() && Instant::now() < deadline => {
+                    std::thread::sleep(backoff);
+                    backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(100));
+                    continue;
+                }
+                Err(err) => panic!("bd show transport error for {issue_id}: {err:?}"),
+            };
             match response {
                 Response::Ok { ok } => match ok {
                     ResponsePayload::Query(QueryResult::Issue(issue)) => {
@@ -743,23 +759,55 @@ impl Node {
     }
 
     fn send_admin_request(&self, request: &Request) -> Result<Response, IpcError> {
-        let mut guard = self.admin_conn.lock().expect("admin conn lock");
-        if guard.is_none() {
-            let client = IpcClient::for_runtime_dir(&self.runtime_dir).with_autostart(false);
-            let conn = client.connect()?;
-            *guard = Some(conn);
-        }
-        guard.as_mut().expect("admin conn").send_request(request)
+        self.send_with_connection(&self.admin_conn, request)
     }
 
     fn send_request(&self, request: &Request) -> Result<Response, IpcError> {
-        let mut guard = self.ipc_conn.lock().expect("ipc conn lock");
-        if guard.is_none() {
-            let client = IpcClient::for_runtime_dir(&self.runtime_dir).with_autostart(false);
-            let conn = client.connect()?;
-            *guard = Some(conn);
+        self.send_with_connection(&self.ipc_conn, request)
+    }
+
+    fn send_with_connection(
+        &self,
+        conn_slot: &Mutex<Option<IpcConnection>>,
+        request: &Request,
+    ) -> Result<Response, IpcError> {
+        let timeout = ipc_timeout_for_request(request);
+        let retry_attempts = if request_is_retry_safe(request) {
+            IPC_SEND_RETRY_ATTEMPTS
+        } else {
+            1
+        };
+        let mut backoff = Duration::from_millis(20);
+        let mut final_error: Option<IpcError> = None;
+        for attempt in 1..=retry_attempts {
+            let result = (|| -> Result<Response, IpcError> {
+                let mut guard = conn_slot.lock().expect("ipc conn lock");
+                if guard.is_none() {
+                    let client =
+                        IpcClient::for_runtime_dir(&self.runtime_dir).with_autostart(false);
+                    *guard = Some(client.connect()?);
+                }
+                let conn = guard.as_mut().expect("ipc conn");
+                conn.set_read_timeout(Some(timeout))?;
+                conn.set_write_timeout(Some(timeout))?;
+                conn.send_request(request)
+            })();
+            match result {
+                Ok(response) => return Ok(response),
+                Err(err) if err.transience().is_retryable() => {
+                    let mut guard = conn_slot.lock().expect("ipc conn lock");
+                    *guard = None;
+                    if attempt == retry_attempts {
+                        final_error = Some(err);
+                        break;
+                    }
+                    std::thread::sleep(backoff);
+                    backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(250));
+                }
+                Err(err) => return Err(err),
+            }
         }
-        guard.as_mut().expect("ipc conn").send_request(request)
+        Err(final_error.expect("retryable IPC error should be recorded"))
     }
 }
 
@@ -1233,6 +1281,39 @@ fn run_git(args: &[&str], cwd: &Path) -> Result<(), String> {
 
 fn wait_timeout_ms(timeout: Duration) -> u64 {
     timeout.as_millis().clamp(1, u128::from(u64::MAX)) as u64
+}
+
+fn ipc_timeout_for_request(request: &Request) -> Duration {
+    if matches!(request, Request::Admin(AdminOp::ReloadReplication { .. })) {
+        return IPC_RELOAD_REPLICATION_TIMEOUT;
+    }
+    request_read_wait_timeout(request)
+        .and_then(|wait_ms| {
+            if wait_ms == 0 {
+                None
+            } else {
+                Some(Duration::from_millis(wait_ms))
+            }
+        })
+        .unwrap_or(IPC_IO_TIMEOUT_FLOOR)
+        .saturating_add(IPC_IO_TIMEOUT_SLACK)
+        .clamp(IPC_IO_TIMEOUT_FLOOR, IPC_IO_TIMEOUT_CEILING)
+}
+
+fn request_read_wait_timeout(request: &Request) -> Option<u64> {
+    match request {
+        Request::Show { ctx, .. } => ctx.read.wait_timeout_ms,
+        Request::Admin(AdminOp::Status { ctx, .. }) => ctx.read.wait_timeout_ms,
+        _ => None,
+    }
+}
+
+fn request_is_retry_safe(request: &Request) -> bool {
+    match request {
+        Request::Show { .. } => true,
+        Request::Admin(AdminOp::Status { .. } | AdminOp::ReloadReplication { .. }) => true,
+        _ => false,
+    }
 }
 
 fn poll_until<F>(timeout: Duration, mut condition: F) -> bool

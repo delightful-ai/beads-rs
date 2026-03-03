@@ -356,6 +356,16 @@ impl IpcConnection {
         write_req_line(&mut self.writer, req)?;
         read_resp_line(&mut self.reader)
     }
+
+    pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), IpcError> {
+        self.reader.get_ref().set_read_timeout(timeout)?;
+        Ok(())
+    }
+
+    pub fn set_write_timeout(&self, timeout: Option<Duration>) -> Result<(), IpcError> {
+        self.writer.set_write_timeout(timeout)?;
+        Ok(())
+    }
 }
 
 fn should_autostart(err: &std::io::Error) -> bool {

@@ -187,7 +187,6 @@ fn repl_daemon_to_daemon_roundtrip() {
 }
 
 #[test]
-#[ignore = "flaky under tailnet; tracked in bd-acif"]
 fn repl_daemon_to_daemon_tailnet_roundtrip() {
     let mut options = ReplRigOptions::default();
     options.fault_profile = Some(FaultProfile::tailnet());
@@ -345,7 +344,6 @@ fn repl_daemon_crash_restart_roundtrip() {
 }
 
 #[test]
-#[ignore = "flaky under tailnet; tracked in bd-acif"]
 fn repl_daemon_crash_restart_tailnet_roundtrip() {
     let mut options = ReplRigOptions::default();
     options.seed = 51;
