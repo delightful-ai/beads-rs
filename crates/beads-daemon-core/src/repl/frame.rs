@@ -95,70 +95,125 @@ impl FrameError {
 pub struct FrameReader<R> {
     reader: R,
     limits: FrameLimitState,
+    state: FrameReadState,
+}
+
+enum FrameReadState {
+    Header {
+        buf: [u8; FRAME_HEADER_LEN],
+        read: usize,
+    },
+    Body {
+        expected_crc: u32,
+        body: Vec<u8>,
+        read: usize,
+    },
+}
+
+impl Default for FrameReadState {
+    fn default() -> Self {
+        Self::Header {
+            buf: [0u8; FRAME_HEADER_LEN],
+            read: 0,
+        }
+    }
 }
 
 impl<R: Read> FrameReader<R> {
     #[must_use]
     pub fn new(reader: R, limits: FrameLimitState) -> Self {
-        Self { reader, limits }
+        Self {
+            reader,
+            limits,
+            state: FrameReadState::default(),
+        }
     }
 
     pub fn read_next(&mut self) -> Result<Option<Vec<u8>>, FrameError> {
-        let mut header = [0u8; FRAME_HEADER_LEN];
-        let mut read = 0usize;
-        while read < header.len() {
-            let n = self.reader.read(&mut header[read..])?;
-            if n == 0 {
-                if read == 0 {
-                    return Ok(None);
+        loop {
+            let state = std::mem::take(&mut self.state);
+            match state {
+                FrameReadState::Header { mut buf, mut read } => {
+                    while read < buf.len() {
+                        match self.reader.read(&mut buf[read..]) {
+                            Ok(0) => {
+                                if read == 0 {
+                                    self.state = FrameReadState::Header { buf, read };
+                                    return Ok(None);
+                                }
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::UnexpectedEof,
+                                    "frame header truncated",
+                                )
+                                .into());
+                            }
+                            Ok(n) => read += n,
+                            Err(err) => {
+                                self.state = FrameReadState::Header { buf, read };
+                                return Err(err.into());
+                            }
+                        }
+                    }
+
+                    let length = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+                    if length == 0 {
+                        return Err(FrameError::FrameLengthInvalid {
+                            reason: "frame length cannot be zero".to_string(),
+                        });
+                    }
+                    let max_frame_bytes = self.limits.max_frame_bytes();
+                    if length > max_frame_bytes {
+                        return Err(FrameError::FrameTooLarge {
+                            max_frame_bytes,
+                            got_bytes: length,
+                        });
+                    }
+
+                    let expected_crc = u32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]);
+                    self.state = FrameReadState::Body {
+                        expected_crc,
+                        body: vec![0u8; length],
+                        read: 0,
+                    };
                 }
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "frame header truncated",
-                )
-                .into());
+                FrameReadState::Body {
+                    expected_crc,
+                    mut body,
+                    mut read,
+                } => {
+                    while read < body.len() {
+                        match self.reader.read(&mut body[read..]) {
+                            Ok(0) => {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::UnexpectedEof,
+                                    "frame body truncated",
+                                )
+                                .into());
+                            }
+                            Ok(n) => read += n,
+                            Err(err) => {
+                                self.state = FrameReadState::Body {
+                                    expected_crc,
+                                    body,
+                                    read,
+                                };
+                                return Err(err.into());
+                            }
+                        }
+                    }
+
+                    let actual_crc = crc32c(&body);
+                    if actual_crc != expected_crc {
+                        return Err(FrameError::FrameCrcMismatch {
+                            expected: expected_crc,
+                            got: actual_crc,
+                        });
+                    }
+
+                    return Ok(Some(body));
+                }
             }
-            read += n;
         }
-
-        let length = u32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
-        if length == 0 {
-            return Err(FrameError::FrameLengthInvalid {
-                reason: "frame length cannot be zero".to_string(),
-            });
-        }
-        let max_frame_bytes = self.limits.max_frame_bytes();
-        if length > max_frame_bytes {
-            return Err(FrameError::FrameTooLarge {
-                max_frame_bytes,
-                got_bytes: length,
-            });
-        }
-
-        let expected_crc = u32::from_le_bytes([header[4], header[5], header[6], header[7]]);
-        let mut body = vec![0u8; length];
-        let mut read_body = 0usize;
-        while read_body < length {
-            let n = self.reader.read(&mut body[read_body..])?;
-            if n == 0 {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "frame body truncated",
-                )
-                .into());
-            }
-            read_body += n;
-        }
-
-        let actual_crc = crc32c(&body);
-        if actual_crc != expected_crc {
-            return Err(FrameError::FrameCrcMismatch {
-                expected: expected_crc,
-                got: actual_crc,
-            });
-        }
-
-        Ok(Some(body))
     }
 }
 
@@ -221,7 +276,9 @@ pub fn encode_frame(payload: &[u8], max_frame_bytes: usize) -> Result<Vec<u8>, F
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeSet;
     use std::io::Cursor;
+    use std::io::{self, Read};
 
     #[test]
     fn frame_roundtrip_validates_crc() {
@@ -266,5 +323,61 @@ mod tests {
         let mut reader = FrameReader::new(Cursor::new(frame), limits);
         let err = reader.read_next().unwrap_err();
         assert!(matches!(err, FrameError::FrameTooLarge { .. }));
+    }
+
+    struct ChunkedTimeoutReader<R> {
+        inner: R,
+        max_chunk: usize,
+        timeout_reads: BTreeSet<usize>,
+        read_calls: usize,
+    }
+
+    impl<R> ChunkedTimeoutReader<R> {
+        fn new(inner: R, max_chunk: usize, timeout_reads: &[usize]) -> Self {
+            Self {
+                inner,
+                max_chunk,
+                timeout_reads: timeout_reads.iter().copied().collect(),
+                read_calls: 0,
+            }
+        }
+    }
+
+    impl<R: Read> Read for ChunkedTimeoutReader<R> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.read_calls += 1;
+            if self.timeout_reads.contains(&self.read_calls) {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "synthetic timeout"));
+            }
+            let max_len = self.max_chunk.min(buf.len());
+            self.inner.read(&mut buf[..max_len])
+        }
+    }
+
+    #[test]
+    fn frame_reader_resumes_across_timeout_with_partial_progress() {
+        let payload = b"hello".to_vec();
+        let frame = encode_frame(&payload, 1024).expect("encode frame");
+        let flaky = ChunkedTimeoutReader::new(Cursor::new(frame), 2, &[2, 5]);
+        let mut reader = FrameReader::new(flaky, FrameLimitState::unnegotiated(1024));
+
+        let mut timeout_count = 0usize;
+        loop {
+            match reader.read_next() {
+                Ok(Some(decoded)) => {
+                    assert_eq!(decoded, payload);
+                    break;
+                }
+                Err(FrameError::Io(err)) if err.kind() == io::ErrorKind::TimedOut => {
+                    timeout_count += 1;
+                    assert!(
+                        timeout_count <= 4,
+                        "reader should make progress and eventually decode frame"
+                    );
+                }
+                other => panic!("unexpected read result: {other:?}"),
+            }
+        }
+        assert!(timeout_count >= 1, "test should include timeout retries");
     }
 }
