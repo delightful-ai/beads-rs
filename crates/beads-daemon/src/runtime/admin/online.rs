@@ -475,6 +475,7 @@ impl Daemon {
         let was_loaded = self
             .try_loaded_store(store_id, resolved.remote.clone())
             .is_some();
+        let previous_replication = self.replication_config().clone();
 
         // Reload replication config from disk
         if let Err(err) = self.reload_replication_config(repo) {
@@ -483,7 +484,10 @@ impl Daemon {
 
         let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
             Ok(proof) => proof,
-            Err(err) => return Response::err_from(err),
+            Err(err) => {
+                self.set_replication_config(previous_replication);
+                return Response::err_from(err);
+            }
         };
         let store_id = proof.store_id();
         drop(proof);

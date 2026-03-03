@@ -17,6 +17,17 @@ use crate::runtime::wal::WalIndex;
 const REPL_RUNTIME_RETRY_AFTER_MS: u64 = 100;
 
 impl Daemon {
+    pub(in crate::runtime) fn replication_config(&self) -> &crate::config::ReplicationConfig {
+        &self.replication
+    }
+
+    pub(in crate::runtime) fn set_replication_config(
+        &mut self,
+        config: crate::config::ReplicationConfig,
+    ) {
+        self.replication = config;
+    }
+
     fn replication_peers(&self) -> Vec<PeerConfig> {
         self.replication
             .peers
