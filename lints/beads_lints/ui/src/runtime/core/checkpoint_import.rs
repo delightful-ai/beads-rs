@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-// normalize-stderr-test: "\$DIR/runtime/core/checkpoint_import.rs:[0-9]+:[0-9]+" -> "$$DIR/runtime/core/checkpoint_import.rs:LL:CC"
+// normalize-stderr-test: "\$DIR/checkpoint_import.rs:[0-9]+:[0-9]+" -> "$$DIR/checkpoint_import.rs:LL:CC"
 // normalize-stderr-test: "(?m)^   = note: .*\n" -> ""
-// normalize-stderr-test: "(?m)^warning: 1 warning emitted\n\n" -> ""
+// normalize-stderr-test: "(?m)^warning: [0-9]+ warnings? emitted\n\n" -> ""
 
 macro_rules! warn {
     ($($tt:tt)*) => {{}};
@@ -27,6 +27,23 @@ fn load_checkpoint_imports() {
     let _ = imports;
 }
 
+fn load_checkpoint_imports_inverted() {
+    let local_policy_hash = 7;
+    let import = CheckpointImport { policy_hash: 9 };
+    let mut imports = Vec::new();
+
+    if import.policy_hash == local_policy_hash {
+        imports.push(import);
+    } else {
+        warn!("checkpoint policy hash mismatch");
+    }
+
+    // Violation: mismatch path logged, then import is still admitted.
+    imports.push(import);
+    let _ = imports;
+}
+
 fn main() {
     load_checkpoint_imports();
+    load_checkpoint_imports_inverted();
 }

@@ -41,7 +41,7 @@ impl<'tcx> LateLintPass<'tcx> for ReplayAtomicFrontierCommitGuard {
 
         let body = cx.tcx.hir_body(body);
         let mut analyzer = ReplayAnalyzer::new(cx);
-        analyzer.visit_expr(&body.value);
+        analyzer.visit_expr(body.value);
 
         let begin_sorted = sorted_by_lo(&analyzer.catchup_begin_txn_calls);
         if begin_sorted.len() > 1 {
@@ -143,11 +143,11 @@ impl<'v, 'tcx> Visitor<'v> for ReplayAnalyzer<'_, 'tcx> {
         match expr.kind {
             ExprKind::If(cond, then_expr, else_expr) => {
                 self.visit_expr(cond);
-                match condition_mode(self.cx, cond.span) {
-                    Some(mode) => {
-                        self.with_mode(mode, |this| this.visit_expr(then_expr));
+                match condition_modes(self.cx, cond.span) {
+                    Some((then_mode, else_mode)) => {
+                        self.with_mode(then_mode, |this| this.visit_expr(then_expr));
                         if let Some(else_expr) = else_expr {
-                            self.visit_expr(else_expr);
+                            self.with_mode(else_mode, |this| this.visit_expr(else_expr));
                         }
                     }
                     None => {
@@ -190,19 +190,31 @@ fn call_name<'hir>(expr: &'hir Expr<'hir>) -> Option<&'hir str> {
     }
 }
 
-fn condition_mode(cx: &LateContext<'_>, span: Span) -> Option<ModeContext> {
+fn condition_modes(cx: &LateContext<'_>, span: Span) -> Option<(ModeContext, ModeContext)> {
     let normalized = normalize(&snippet_opt(cx, span)?);
-    if normalized.contains("mode==ReplayMode::CatchUp")
-        || normalized.contains("ReplayMode::CatchUp==mode")
-    {
-        return Some(ModeContext::CatchUp);
+    if is_mode_equality(&normalized, "ReplayMode::CatchUp") {
+        return Some((ModeContext::CatchUp, ModeContext::Rebuild));
     }
-    if normalized.contains("mode==ReplayMode::Rebuild")
-        || normalized.contains("ReplayMode::Rebuild==mode")
-    {
-        return Some(ModeContext::Rebuild);
+    if is_mode_inequality(&normalized, "ReplayMode::CatchUp") {
+        return Some((ModeContext::Rebuild, ModeContext::CatchUp));
+    }
+    if is_mode_equality(&normalized, "ReplayMode::Rebuild") {
+        return Some((ModeContext::Rebuild, ModeContext::CatchUp));
+    }
+    if is_mode_inequality(&normalized, "ReplayMode::Rebuild") {
+        return Some((ModeContext::CatchUp, ModeContext::Rebuild));
     }
     None
+}
+
+fn is_mode_equality(normalized: &str, variant: &str) -> bool {
+    normalized.contains(&format!("mode=={variant}"))
+        || normalized.contains(&format!("{variant}==mode"))
+}
+
+fn is_mode_inequality(normalized: &str, variant: &str) -> bool {
+    normalized.contains(&format!("mode!={variant}"))
+        || normalized.contains(&format!("{variant}!=mode"))
 }
 
 fn arm_mode(cx: &LateContext<'_>, arm: &Arm<'_>) -> Option<ModeContext> {

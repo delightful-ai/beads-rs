@@ -30,7 +30,7 @@ pub struct NoWarningOnlyCompatibilityGates {
 
 impl<'tcx> LateLintPass<'tcx> for NoWarningOnlyCompatibilityGates {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
-        let ExprKind::If(cond, then_expr, _else_expr) = expr.kind else {
+        let ExprKind::If(cond, then_expr, else_expr) = expr.kind else {
             return;
         };
 
@@ -40,7 +40,19 @@ impl<'tcx> LateLintPass<'tcx> for NoWarningOnlyCompatibilityGates {
         if !is_compatibility_mismatch_condition(cx, cond.span) {
             return;
         }
-        if !is_warn_only_branch(cx, then_expr.span) {
+        let Some(mismatch_branch) = mismatch_branch(cx, cond.span) else {
+            return;
+        };
+        let mismatch_span = match mismatch_branch {
+            MismatchBranch::Then => then_expr.span,
+            MismatchBranch::Else => {
+                let Some(else_expr) = else_expr else {
+                    return;
+                };
+                else_expr.span
+            }
+        };
+        if !is_warn_only_branch(cx, mismatch_span) {
             return;
         }
         if !self.emitted_hir.insert(expr.hir_id) {
@@ -83,6 +95,23 @@ fn is_compatibility_mismatch_condition(cx: &LateContext<'_>, span: Span) -> bool
     let has_hash_subject = cond.contains("policy_hash") || cond.contains("roster_hash");
     let has_mismatch = cond.contains("!=") || cond.contains("==");
     has_hash_subject && has_mismatch
+}
+
+#[derive(Clone, Copy)]
+enum MismatchBranch {
+    Then,
+    Else,
+}
+
+fn mismatch_branch(cx: &LateContext<'_>, span: Span) -> Option<MismatchBranch> {
+    let cond = snippet_opt(cx, span)?.replace(char::is_whitespace, "");
+    if cond.contains("!=") {
+        Some(MismatchBranch::Then)
+    } else if cond.contains("==") {
+        Some(MismatchBranch::Else)
+    } else {
+        None
+    }
 }
 
 fn is_warn_only_branch(cx: &LateContext<'_>, span: Span) -> bool {
