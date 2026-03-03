@@ -1,6 +1,7 @@
 #![feature(rustc_private)]
 #![warn(unused_extern_crates)]
 
+extern crate rustc_ast;
 extern crate rustc_hir;
 extern crate rustc_lint;
 extern crate rustc_session;
@@ -15,6 +16,12 @@ use rustc_hir::{
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_span::{symbol::kw, Span};
 use std::collections::HashSet;
+
+mod compat_gates;
+mod private_interface_suppression;
+mod replay_frontier_guard;
+mod rotate_rebind;
+mod typed_wal_boundaries;
 
 dylint_linting::dylint_library!();
 
@@ -42,6 +49,11 @@ pub fn register_lints(sess: &rustc_session::Session, lint_store: &mut rustc_lint
     dylint_linting::init_config(sess);
     lint_store.register_lints(&[CLI_DAEMON_BOUNDARY]);
     lint_store.register_late_pass(|_| Box::new(CliDaemonBoundary::default()));
+    compat_gates::register(lint_store);
+    private_interface_suppression::register(lint_store);
+    replay_frontier_guard::register(lint_store);
+    rotate_rebind::register(lint_store);
+    typed_wal_boundaries::register(lint_store);
 }
 
 impl<'tcx> LateLintPass<'tcx> for CliDaemonBoundary {

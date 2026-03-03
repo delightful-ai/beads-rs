@@ -1,0 +1,10 @@
+warning: compatibility mismatch is warning-only and does not hard-fail
+  --> $DIR/checkpoint_import.rs:21:5
+   |
+LL | /     if import.policy_hash != local_policy_hash {
+LL | |         warn!("checkpoint policy hash mismatch");
+LL | |     }
+   | |_____^
+   |
+   = help: return `Err(...)` (or propagate with `?`) before accepting/importing data
+
