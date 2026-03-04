@@ -4,6 +4,7 @@ use std::path::PathBuf;
 use super::CommandError;
 use crate::backend::{
     CliHostBackend, MigrateApplyImportRequest, MigrateDetectRequest, MigrateRefreshRequest,
+    MigrateToRequest,
 };
 use crate::migrate::{GoImportError, import_go_export};
 use crate::render::print_json;
@@ -16,7 +17,7 @@ pub enum MigrateCmd {
     /// Show current store format and whether migration is needed.
     Detect,
 
-    /// Migrate canonical store to a target format version.
+    /// Migrate canonical store to the latest supported format version.
     To(MigrateToArgs),
 
     /// Import/migrate from beads-go export.
@@ -25,7 +26,7 @@ pub enum MigrateCmd {
 
 #[derive(Args, Debug)]
 pub struct MigrateToArgs {
-    /// Target format version.
+    /// Target format version (must match the latest supported version).
     pub to: u32,
 
     /// Preview changes without writing commits.
@@ -77,24 +78,38 @@ where
 {
     match cmd {
         MigrateCmd::Detect => {
-            let current = backend.run_migrate_detect(MigrateDetectRequest {
+            let outcome = backend.run_migrate_detect(MigrateDetectRequest {
                 repo: ctx.repo.clone(),
             })?;
-            let latest = FormatVersion::CURRENT.get();
-            let payload = serde_json::json!({
-                "current_format_version": current,
-                "latest_format_version": latest,
-                "needs_migration": current != latest,
-            });
-            print_json_as_backend::<B, _>(&payload)
+            print_json_as_backend::<B, _>(&outcome)
         }
-        MigrateCmd::To(args) => Err(B::Error::from(CommandError::from(validation_error(
-            "migrate",
-            format!(
-                "migration to format {} not implemented yet (dry_run={}, force={}, no_push={})",
-                args.to, args.dry_run, args.force, args.no_push
-            ),
-        )))),
+        MigrateCmd::To(args) => {
+            let latest = FormatVersion::CURRENT.get();
+            if args.to != latest {
+                return Err(B::Error::from(CommandError::from(validation_error(
+                    "to",
+                    format!(
+                        "unsupported migration target {} (latest supported is {latest})",
+                        args.to
+                    ),
+                ))));
+            }
+
+            let outcome = backend.run_migrate_to(MigrateToRequest {
+                repo: ctx.repo.clone(),
+                to: args.to,
+                dry_run: args.dry_run,
+                force: args.force,
+                no_push: args.no_push,
+            })?;
+
+            if !args.dry_run {
+                // Best-effort daemon refresh after migration write.
+                let _ = backend.notify_migrate_refresh(MigrateRefreshRequest::new(ctx.repo_ctx()));
+            }
+
+            print_json_as_backend::<B, _>(&outcome)
+        }
         MigrateCmd::FromGo(args) => {
             let actor = ctx
                 .actor_id()

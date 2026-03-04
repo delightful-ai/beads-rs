@@ -56,6 +56,9 @@ pub enum SyncError {
     #[error("no common ancestor between local and remote")]
     NoCommonAncestor,
 
+    #[error("migration aborted due to parse warnings; rerun with --force to proceed")]
+    MigrationWarnings(Vec<String>),
+
     #[error(transparent)]
     Wire(#[from] WireError),
 
@@ -99,6 +102,7 @@ impl SyncError {
             | SyncError::BuildTree(_)
             | SyncError::Commit(_)
             | SyncError::NoCommonAncestor
+            | SyncError::MigrationWarnings(_)
             | SyncError::Wire(_)
             | SyncError::Git(_) => Transience::Permanent,
         }
@@ -112,7 +116,8 @@ impl SyncError {
             | SyncError::Push(_)
             | SyncError::PushRejected(_)
             | SyncError::TooManyRetries(_)
-            | SyncError::InitFailed(_) => Effect::Some,
+            | SyncError::InitFailed(_)
+            | SyncError::MigrationWarnings(_) => Effect::Some,
 
             // Low-level git2 errors can happen at any phase.
             SyncError::Git(_) => Effect::Unknown,

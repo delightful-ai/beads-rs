@@ -1,18 +1,21 @@
 use beads_cli::backend::{
-    CliHostBackend, MigrateApplyImportOutcome, MigrateApplyImportRequest, MigrateDetectRequest,
-    MigrateRefreshRequest, StoreFsckRequest, StoreUnlockRequest, UpgradeMethod as CliUpgradeMethod,
+    CliHostBackend, DepsFormat, MigrateApplyImportOutcome, MigrateApplyImportRequest,
+    MigrateDetectOutcome, MigrateDetectRequest, MigrateRefreshRequest, MigrateToOutcome,
+    MigrateToRequest, StoreFsckRequest, StoreUnlockRequest, UpgradeMethod as CliUpgradeMethod,
     UpgradeOutcome as CliUpgradeOutcome, UpgradeRequest,
 };
+use beads_core::FormatVersion;
 use beads_surface::ipc::{EmptyPayload, Request, send_request};
 use beads_surface::store_admin::{
     StoreAdminCall, StoreAdminCallError, call_store_fsck_no_autostart,
     call_store_unlock_no_autostart, daemon_pid_no_autostart,
 };
+use git2::{ErrorCode, ObjectType, Repository};
 
 use crate::config::load_or_init;
 use crate::upgrade::{UpgradeMethod as HostUpgradeMethod, run_upgrade};
 use crate::{Error, OpError, Result};
-use beads_git::SyncProcess;
+use beads_git::{SyncError, SyncProcess, sync, wire};
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct BeadsRsCliBackend;
@@ -61,10 +64,73 @@ impl CliHostBackend for BeadsRsCliBackend {
         Ok(output)
     }
 
-    fn run_migrate_detect(&self, request: MigrateDetectRequest) -> Result<u32> {
-        let repo = git2::Repository::discover(&request.repo)
+    fn run_migrate_detect(&self, request: MigrateDetectRequest) -> Result<MigrateDetectOutcome> {
+        let repo = Repository::discover(&request.repo)
             .map_err(|err| beads_git::SyncError::OpenRepo(request.repo, err))?;
-        read_current_format_version(&repo)
+        detect_store_migration_state(&repo)
+    }
+
+    fn run_migrate_to(&self, request: MigrateToRequest) -> Result<MigrateToOutcome> {
+        let latest = FormatVersion::CURRENT.get();
+        if request.to != latest {
+            return Err(Error::Op(OpError::ValidationFailed {
+                field: "to".into(),
+                reason: format!(
+                    "unsupported migration target {} (latest supported is {latest})",
+                    request.to
+                ),
+            }));
+        }
+
+        let repo = Repository::discover(&request.repo)
+            .map_err(|err| beads_git::SyncError::OpenRepo(request.repo.clone(), err))?;
+        let before = detect_store_migration_state(&repo)?;
+
+        let migrated = match sync::migrate_store_ref_to_v1(
+            &repo,
+            &request.repo,
+            request.dry_run,
+            request.force,
+            request.no_push,
+            3,
+        ) {
+            Ok(outcome) => outcome,
+            Err(SyncError::NoLocalRef(ref_name)) => {
+                return Err(Error::Op(OpError::ValidationFailed {
+                    field: "migrate".into(),
+                    reason: format!(
+                        "{ref_name} is missing; run `bd migrate from-go --input <path>` or sync from remote first"
+                    ),
+                }));
+            }
+            Err(SyncError::MigrationWarnings(warnings)) => {
+                let summary = warnings
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| "legacy deps parse emitted warnings".into());
+                return Err(Error::Op(OpError::ValidationFailed {
+                    field: "migrate".into(),
+                    reason: format!(
+                        "legacy deps parse produced {} warning(s); rerun with --force to proceed. first warning: {summary}",
+                        warnings.len()
+                    ),
+                }));
+            }
+            Err(err) => return Err(err.into()),
+        };
+
+        Ok(MigrateToOutcome {
+            dry_run: request.dry_run,
+            from_effective_version: before.effective_format_version,
+            to_version: request.to,
+            deps_format_before: before.deps_format,
+            converted_deps: migrated.converted_deps,
+            added_notes_file: migrated.added_notes_file,
+            wrote_checksums: migrated.wrote_checksums,
+            commit_oid: migrated.commit_oid.map(|oid| oid.to_string()),
+            pushed: migrated.pushed,
+            warnings: migrated.warnings,
+        })
     }
 
     fn run_migrate_apply_import(
@@ -86,7 +152,7 @@ impl CliHostBackend for BeadsRsCliBackend {
             .merge(&request.imported)?
             .commit(&repo)?;
         let commit_oid = committed.commit_oid().to_string();
-        let pushed = if !request.no_push {
+        let pushed = if !request.no_push && repo.find_remote("origin").is_ok() {
             let _ = committed.push(&repo)?;
             true
         } else {
@@ -123,27 +189,125 @@ fn map_store_admin_call_error(err: StoreAdminCallError) -> Error {
     }
 }
 
-fn read_current_format_version(repo: &git2::Repository) -> Result<u32> {
-    use git2::ObjectType;
+fn detect_store_migration_state(repo: &Repository) -> Result<MigrateDetectOutcome> {
+    let latest = FormatVersion::CURRENT.get();
+    let local_oid = match repo.refname_to_id("refs/heads/beads/store") {
+        Ok(oid) => Some(oid),
+        Err(err) if err.code() == ErrorCode::NotFound => None,
+        Err(err) => return Err(beads_git::SyncError::Git(err).into()),
+    };
 
-    let oid = repo
-        .refname_to_id("refs/heads/beads/store")
-        .map_err(|_| beads_git::SyncError::NoLocalRef("refs/heads/beads/store".into()))?;
+    let Some(oid) = local_oid else {
+        return Ok(MigrateDetectOutcome {
+            meta_format_version: None,
+            effective_format_version: 0,
+            latest_format_version: latest,
+            deps_format: DepsFormat::Missing,
+            notes_present: false,
+            checksums_present: false,
+            needs_migration: true,
+            reasons: vec!["refs/heads/beads/store is missing".into()],
+        });
+    };
+
     let commit = repo.find_commit(oid).map_err(beads_git::SyncError::from)?;
     let tree = commit.tree().map_err(beads_git::SyncError::from)?;
-    let meta_entry = tree
-        .get_name("meta.json")
-        .ok_or_else(|| beads_git::SyncError::MissingFile("meta.json".into()))?;
-    let meta_obj = repo
-        .find_object(meta_entry.id(), Some(ObjectType::Blob))
-        .map_err(beads_git::SyncError::from)?;
-    let meta_blob = meta_obj
-        .peel_to_blob()
-        .map_err(|_| beads_git::SyncError::NotABlob("meta.json"))?;
-    let parsed = beads_git::wire::parse_supported_meta(meta_blob.content())
-        .map_err(beads_git::SyncError::from)?;
-    match parsed.meta() {
-        beads_git::wire::StoreMeta::V1 { .. } => Ok(1),
-        beads_git::wire::StoreMeta::Legacy => Ok(0),
+
+    let notes_present = tree.get_name("notes.jsonl").is_some();
+    let mut reasons = Vec::new();
+
+    let (meta_format_version, checksums_present) = match read_meta_probe(repo, &tree)? {
+        Some((version, checksums_present)) => (Some(version), checksums_present),
+        None => (None, false),
+    };
+    if !notes_present {
+        reasons.push("notes.jsonl missing".into());
     }
+    if !checksums_present {
+        reasons.push("meta checksums missing".into());
+    }
+
+    let deps_format = match read_blob_from_tree(repo, &tree, "deps.jsonl")? {
+        Some(deps_bytes) => match wire::parse_deps_wire(&deps_bytes) {
+            Ok(_) => DepsFormat::OrSetV1,
+            Err(strict_err) => match wire::parse_legacy_deps_edges(&deps_bytes) {
+                Ok((_wire, warnings)) => {
+                    reasons.extend(warnings);
+                    DepsFormat::LegacyEdges
+                }
+                Err(legacy_err) => {
+                    reasons.push(format!(
+                        "deps.jsonl parse failed (strict: {strict_err}; legacy: {legacy_err})"
+                    ));
+                    DepsFormat::Invalid
+                }
+            },
+        },
+        None => DepsFormat::Missing,
+    };
+
+    match deps_format {
+        DepsFormat::OrSetV1 => {}
+        DepsFormat::LegacyEdges => {
+            reasons.push("deps.jsonl is legacy line-per-edge (missing cc)".into())
+        }
+        DepsFormat::Missing => reasons.push("deps.jsonl missing".into()),
+        DepsFormat::Invalid => {}
+    }
+
+    let effective_format_version = if meta_format_version == Some(latest)
+        && matches!(deps_format, DepsFormat::OrSetV1)
+        && notes_present
+        && checksums_present
+    {
+        latest
+    } else {
+        0
+    };
+    let needs_migration = effective_format_version != latest;
+    reasons.sort();
+    reasons.dedup();
+
+    Ok(MigrateDetectOutcome {
+        meta_format_version,
+        effective_format_version,
+        latest_format_version: latest,
+        deps_format,
+        notes_present,
+        checksums_present,
+        needs_migration,
+        reasons,
+    })
+}
+
+fn read_meta_probe(repo: &Repository, tree: &git2::Tree<'_>) -> Result<Option<(u32, bool)>> {
+    let Some(bytes) = read_blob_from_tree(repo, tree, "meta.json")? else {
+        return Ok(None);
+    };
+    let parsed = wire::parse_supported_meta(&bytes).map_err(beads_git::SyncError::from)?;
+    let format_version = match parsed.meta() {
+        wire::StoreMeta::Legacy => 0,
+        wire::StoreMeta::V1 { .. } => 1,
+    };
+    let checksums_present = parsed
+        .checksums()
+        .is_some_and(|checksums| checksums.notes.is_some());
+    Ok(Some((format_version, checksums_present)))
+}
+
+fn read_blob_from_tree(
+    repo: &Repository,
+    tree: &git2::Tree<'_>,
+    name: &'static str,
+) -> Result<Option<Vec<u8>>> {
+    let Some(entry) = tree.get_name(name) else {
+        return Ok(None);
+    };
+    let obj = repo
+        .find_object(entry.id(), Some(ObjectType::Blob))
+        .map_err(beads_git::SyncError::from)?;
+    let blob = obj
+        .peel_to_blob()
+        .map_err(|_| beads_git::SyncError::NotABlob(name))?;
+    Ok(Some(blob.content().to_vec()))
 }
