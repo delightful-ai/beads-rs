@@ -20,3 +20,25 @@ LL | |     }
    |
    = help: return `Err(...)` (or propagate with `?`) before accepting/importing data
 
+warning: compatibility mismatch is warning-only and does not hard-fail
+  --> $DIR/checkpoint_import.rs:LL:CC
+   |
+LL | /     if !(import.policy_hash == local_policy_hash) {
+LL | |         warn!("checkpoint policy hash mismatch");
+LL | |     }
+   | |_____^
+   |
+   = help: return `Err(...)` (or propagate with `?`) before accepting/importing data
+
+warning: compatibility mismatch is warning-only and does not hard-fail
+  --> $DIR/checkpoint_import.rs:LL:CC
+   |
+LL | /     if import.policy_hash == local_policy_hash && status != 1 {
+LL | |         imports.push(import);
+LL | |     } else {
+LL | |         warn!("checkpoint policy hash mismatch");
+LL | |     }
+   | |_____^
+   |
+   = help: return `Err(...)` (or propagate with `?`) before accepting/importing data
+

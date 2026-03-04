@@ -1,6 +1,7 @@
 use clippy_utils::diagnostics::span_lint_and_help;
 use rustc_hir::{
-    Arm, Block, Expr, ExprKind, ImplItem, ImplItemKind, QPath, Stmt, StmtKind, TyKind,
+    Arm, Block, Expr, ExprKind, ImplItem, ImplItemKind, QPath, Stmt, StmtKind, StructTailExpr,
+    TyKind,
 };
 use rustc_lint::{LateContext, LateLintPass};
 use rustc_span::Span;
@@ -65,6 +66,7 @@ impl<'tcx> LateLintPass<'tcx> for RotateRequiresRebind {
 #[derive(Default)]
 struct RotateReloadAnalyzer {
     violation_spans: Vec<Span>,
+    loop_exit_stack: Vec<PathStates>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
@@ -152,10 +154,15 @@ impl RotateReloadAnalyzer {
             }
             ExprKind::Ret(None) => PathStates::new(),
             ExprKind::Break(_, Some(value)) => {
-                let _ = self.analyze_expr(value, states);
+                let break_states = self.analyze_expr(value, states);
+                self.record_loop_exit_states(break_states);
                 PathStates::new()
             }
-            ExprKind::Break(_, None) | ExprKind::Continue(_) => PathStates::new(),
+            ExprKind::Break(_, None) => {
+                self.record_loop_exit_states(states);
+                PathStates::new()
+            }
+            ExprKind::Continue(_) => PathStates::new(),
             ExprKind::DropTemps(inner)
             | ExprKind::AddrOf(_, _, inner)
             | ExprKind::Field(inner, _)
@@ -181,14 +188,19 @@ impl RotateReloadAnalyzer {
                 for field in fields {
                     states = self.analyze_expr(field.expr, states);
                 }
-                let _ = base;
+                if let StructTailExpr::Base(base_expr) = base {
+                    states = self.analyze_expr(base_expr, states);
+                }
                 states
             }
             ExprKind::Repeat(value, _) => self.analyze_expr(value, states),
             ExprKind::Let(let_expr) => self.analyze_expr(let_expr.init, states),
             ExprKind::Loop(block, ..) => {
-                let _ = self.analyze_block(block, states.clone());
-                states
+                self.loop_exit_stack.push(PathStates::new());
+                let _ = self.analyze_block(block, states);
+                self.loop_exit_stack
+                    .pop()
+                    .expect("loop exit stack should contain current loop")
             }
             _ => states,
         }
@@ -244,6 +256,12 @@ impl RotateReloadAnalyzer {
             .all(|existing| existing.lo() != span.lo() || existing.hi() != span.hi())
         {
             self.violation_spans.push(span);
+        }
+    }
+
+    fn record_loop_exit_states(&mut self, states: PathStates) {
+        if let Some(loop_exits) = self.loop_exit_stack.last_mut() {
+            loop_exits.extend(states);
         }
     }
 }

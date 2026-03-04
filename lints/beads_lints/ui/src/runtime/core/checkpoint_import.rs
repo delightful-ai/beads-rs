@@ -43,7 +43,40 @@ fn load_checkpoint_imports_inverted() {
     let _ = imports;
 }
 
+fn load_checkpoint_imports_negated_equality() {
+    let local_policy_hash = 7;
+    let import = CheckpointImport { policy_hash: 9 };
+    let mut imports = Vec::new();
+
+    if !(import.policy_hash == local_policy_hash) {
+        warn!("checkpoint policy hash mismatch");
+    }
+
+    // Violation: negated equality still gates mismatch branch.
+    imports.push(import);
+    let _ = imports;
+}
+
+fn load_checkpoint_imports_mixed_operators() {
+    let local_policy_hash = 7;
+    let import = CheckpointImport { policy_hash: 9 };
+    let status = 0;
+    let mut imports = Vec::new();
+
+    if import.policy_hash == local_policy_hash && status != 1 {
+        imports.push(import);
+    } else {
+        warn!("checkpoint policy hash mismatch");
+    }
+
+    // Violation: mismatch branch is the else branch selected by hash equality.
+    imports.push(import);
+    let _ = imports;
+}
+
 fn main() {
     load_checkpoint_imports();
     load_checkpoint_imports_inverted();
+    load_checkpoint_imports_negated_equality();
+    load_checkpoint_imports_mixed_operators();
 }
