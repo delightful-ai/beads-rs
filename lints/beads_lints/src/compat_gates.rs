@@ -1,6 +1,6 @@
 use clippy_utils::diagnostics::span_lint_hir_and_then;
 use clippy_utils::source::snippet_opt;
-use rustc_hir::{BinOpKind, Expr, ExprKind, HirId, UnOp};
+use rustc_hir::{BinOpKind, Expr, ExprKind, HirId, StmtKind, UnOp};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_span::Span;
 use std::collections::HashSet;
@@ -144,11 +144,36 @@ fn collect_hash_comparison_branches(
             collect_hash_comparison_branches(cx, let_expr.init, negated, branches);
         }
         ExprKind::Block(block, _) => {
-            if let Some(tail) = block.expr {
-                collect_hash_comparison_branches(cx, tail, negated, branches);
-            }
+            collect_hash_comparison_branches_in_block(cx, block, negated, branches);
         }
         _ => {}
+    }
+}
+
+fn collect_hash_comparison_branches_in_block(
+    cx: &LateContext<'_>,
+    block: &rustc_hir::Block<'_>,
+    negated: bool,
+    branches: &mut Vec<MismatchBranch>,
+) {
+    for stmt in block.stmts {
+        match stmt.kind {
+            StmtKind::Let(let_stmt) => {
+                if let Some(init) = let_stmt.init {
+                    collect_hash_comparison_branches(cx, init, negated, branches);
+                }
+                if let Some(else_block) = let_stmt.els {
+                    collect_hash_comparison_branches_in_block(cx, else_block, negated, branches);
+                }
+            }
+            StmtKind::Expr(stmt_expr) | StmtKind::Semi(stmt_expr) => {
+                collect_hash_comparison_branches(cx, stmt_expr, negated, branches);
+            }
+            StmtKind::Item(_) => {}
+        }
+    }
+    if let Some(tail) = block.expr {
+        collect_hash_comparison_branches(cx, tail, negated, branches);
     }
 }
 

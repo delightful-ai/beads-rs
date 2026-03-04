@@ -42,3 +42,16 @@ LL | |     }
    |
    = help: return `Err(...)` (or propagate with `?`) before accepting/importing data
 
+warning: compatibility mismatch is warning-only and does not hard-fail
+  --> $DIR/checkpoint_import.rs:LL:CC
+   |
+LL | /     if {
+LL | |         let mismatch = import.policy_hash != local_policy_hash;
+LL | |         mismatch
+LL | |     } {
+LL | |         warn!("checkpoint policy hash mismatch");
+LL | |     }
+   | |_____^
+   |
+   = help: return `Err(...)` (or propagate with `?`) before accepting/importing data
+

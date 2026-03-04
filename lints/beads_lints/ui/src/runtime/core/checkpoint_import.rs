@@ -74,9 +74,27 @@ fn load_checkpoint_imports_mixed_operators() {
     let _ = imports;
 }
 
+fn load_checkpoint_imports_block_condition_statement() {
+    let local_policy_hash = 7;
+    let import = CheckpointImport { policy_hash: 9 };
+    let mut imports = Vec::new();
+
+    if {
+        let mismatch = import.policy_hash != local_policy_hash;
+        mismatch
+    } {
+        warn!("checkpoint policy hash mismatch");
+    }
+
+    // Violation: mismatch check hidden in block statement still warning-only.
+    imports.push(import);
+    let _ = imports;
+}
+
 fn main() {
     load_checkpoint_imports();
     load_checkpoint_imports_inverted();
     load_checkpoint_imports_negated_equality();
     load_checkpoint_imports_mixed_operators();
+    load_checkpoint_imports_block_condition_statement();
 }
