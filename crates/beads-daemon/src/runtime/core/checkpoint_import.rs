@@ -7,6 +7,7 @@ use super::{
     CheckpointCache, CheckpointImport, ContentHash, Daemon, StoreId, checkpoint_ref_oid,
     import_checkpoint, load_replica_roster, policy_hash, roster_hash, write_checkpoint_tree,
 };
+use crate::git::checkpoint::CheckpointImportError;
 use crate::runtime::checkpoint_scheduler::CheckpointGroupSnapshot;
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -161,6 +162,14 @@ impl Daemon {
                     );
                     Some(import)
                 }
+                Err(CheckpointImportError::IncompatibleDepsFormat { .. }) => {
+                    tracing::warn!(
+                        store_id = %store_id,
+                        checkpoint_group = %group.group,
+                        "checkpoint cache import incompatible deps format; ignoring and rebuilding from canonical store"
+                    );
+                    None
+                }
                 Err(err) => {
                     tracing::warn!(
                         store_id = %store_id,
@@ -259,6 +268,14 @@ impl Daemon {
                     "checkpoint git import succeeded"
                 );
                 Some(import)
+            }
+            Err(CheckpointImportError::IncompatibleDepsFormat { .. }) => {
+                tracing::warn!(
+                    checkpoint_group = %group.group,
+                    git_ref = %group.git_ref,
+                    "checkpoint git import incompatible deps format; skipping legacy checkpoint"
+                );
+                None
             }
             Err(err) => {
                 tracing::warn!(

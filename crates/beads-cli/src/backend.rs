@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use beads_api::{AdminFsckOutput, AdminStoreUnlockOutput};
 use beads_core::{CanonicalState, StoreId};
 use beads_surface::ipc::RepoCtx;
+use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct UpgradeRequest {
@@ -53,6 +54,53 @@ pub struct MigrateDetectRequest {
     pub repo: PathBuf,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum DepsFormat {
+    #[serde(rename = "orset_v1")]
+    OrSetV1,
+    #[serde(rename = "legacy_edges")]
+    LegacyEdges,
+    #[serde(rename = "missing")]
+    Missing,
+    #[serde(rename = "invalid")]
+    Invalid,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MigrateDetectOutcome {
+    pub meta_format_version: Option<u32>,
+    pub effective_format_version: u32,
+    pub latest_format_version: u32,
+    pub deps_format: DepsFormat,
+    pub notes_present: bool,
+    pub checksums_present: bool,
+    pub needs_migration: bool,
+    pub reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrateToRequest {
+    pub repo: PathBuf,
+    pub to: u32,
+    pub dry_run: bool,
+    pub force: bool,
+    pub no_push: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct MigrateToOutcome {
+    pub dry_run: bool,
+    pub from_effective_version: u32,
+    pub to_version: u32,
+    pub deps_format_before: DepsFormat,
+    pub converted_deps: bool,
+    pub added_notes_file: bool,
+    pub wrote_checksums: bool,
+    pub commit_oid: Option<String>,
+    pub pushed: bool,
+    pub warnings: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct MigrateApplyImportRequest {
     pub repo: PathBuf,
@@ -88,7 +136,12 @@ pub trait CliHostBackend {
     fn run_migrate_detect(
         &self,
         request: MigrateDetectRequest,
-    ) -> std::result::Result<u32, Self::Error>;
+    ) -> std::result::Result<MigrateDetectOutcome, Self::Error>;
+
+    fn run_migrate_to(
+        &self,
+        request: MigrateToRequest,
+    ) -> std::result::Result<MigrateToOutcome, Self::Error>;
 
     fn run_migrate_apply_import(
         &self,

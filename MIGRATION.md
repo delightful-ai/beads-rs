@@ -80,3 +80,73 @@ The canonical store lives on its own git ref. If you want a “checkpoint” bef
 git show-ref refs/heads/beads/store >/dev/null 2>&1 && \
   git branch beads/store-backup refs/heads/beads/store
 ```
+
+## Legacy Deps Cutover (`deps.jsonl` line-per-edge -> OR-Set v1)
+
+Some historical repos have `refs/heads/beads/store` with legacy `deps.jsonl`
+that stores one edge per JSON line. Current runtime loads expect strict OR-Set
+deps (`WireDepStoreV1` with `cc` + `entries`). Strict canonical load paths can
+fail with errors like:
+
+```text
+missing field `cc`
+```
+
+Checkpoint import handles this differently: legacy checkpoint deps are
+classified as incompatible, skipped, and rebuilt from canonical store state.
+
+Use the explicit migration flow:
+
+`bd migrate to` currently supports only the latest format target (`1`).
+Any other target version is rejected.
+
+1. Detect format/invariants:
+
+   ```bash
+   bd migrate detect --json
+   ```
+
+   Example signals:
+   - `"deps_format":"legacy_edges"`
+   - `"notes_present":false`
+   - `"checksums_present":false`
+   - `"needs_migration":true`
+
+2. Preview migration (no writes):
+
+   ```bash
+   bd migrate to 1 --dry-run --json
+   ```
+
+3. Execute migration:
+
+   ```bash
+   bd migrate to 1 --json
+   ```
+
+   Optional flags:
+   - `--no-push` to rewrite locally only
+   - `--force` to continue on safety checks (for example divergence or warningful legacy parses)
+
+Migration rewrites `refs/heads/beads/store` with canonical v1 files:
+`state.jsonl`, `tombstones.jsonl`, `deps.jsonl`, `notes.jsonl`, `meta.json`.
+`deps.jsonl` is rewritten to strict OR-Set shape, and `meta.json` checksums are
+backfilled.
+
+### Rollback snippet
+
+```bash
+git show-ref refs/heads/beads/store >/dev/null 2>&1 && \
+  git branch beads/store-backup refs/heads/beads/store
+
+# ... run migration ...
+
+# restore if needed
+git show-ref refs/heads/beads/store-backup >/dev/null 2>&1 && \
+  git update-ref refs/heads/beads/store refs/heads/beads/store-backup
+```
+
+### Compatibility note
+
+This is a hard cutover. Older binaries that expect line-per-edge `deps.jsonl`
+will not be able to read the migrated store.
