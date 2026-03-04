@@ -602,6 +602,59 @@ mod tests {
     }
 
     #[test]
+    fn admin_reload_replication_restores_config_when_strict_load_fails() {
+        let _tmp = test_store_dir();
+        let repo_dir = TempDir::new().unwrap();
+        let repo_path = repo_dir.path().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo path");
+
+        let mut daemon = Daemon::new(test_actor());
+        let original_listen_addr = daemon.replication.listen_addr.clone();
+        let requested_listen_addr = "127.0.0.1:40111";
+        assert_ne!(original_listen_addr, requested_listen_addr);
+
+        std::fs::write(
+            repo_path.join("beads.toml"),
+            format!(
+                "[replication]\nlisten_addr = \"{requested_listen_addr}\"\nbackoff_base_ms = 50\nbackoff_max_ms = 500\nmax_connections = 8\n"
+            ),
+        )
+        .expect("write beads.toml");
+
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let resolution = StoreIdResolution::verified(store_id, StoreIdSource::PathMap);
+        daemon
+            .store_caches
+            .path_to_remote
+            .insert(repo_path.clone(), remote.clone());
+        daemon
+            .store_caches
+            .path_to_store
+            .insert(repo_path.clone(), resolution);
+        daemon
+            .store_caches
+            .remote_to_store
+            .insert(remote.clone(), resolution);
+
+        let (git_tx, git_rx) = crossbeam::channel::bounded(1);
+        let worker = std::thread::spawn(move || match git_rx.recv().expect("load op") {
+            GitOp::Load { respond, .. } => respond
+                .send(Err(SyncError::NoLocalRef("missing remote ref".to_string())))
+                .expect("respond load"),
+            _ => panic!("expected load op"),
+        });
+
+        let response = daemon.admin_reload_replication(&repo_path, &git_tx);
+        worker.join().expect("worker join");
+
+        assert!(matches!(response, Response::Err { .. }));
+        assert_eq!(daemon.replication.listen_addr, original_listen_addr);
+        assert_ne!(daemon.replication.listen_addr, requested_listen_addr);
+        assert!(!daemon.store_sessions.contains_key(&store_id));
+    }
+
+    #[test]
     fn export_go_compat_requires_loaded_lane() {
         let _tmp = test_store_dir();
         let mut daemon = Daemon::new(test_actor());

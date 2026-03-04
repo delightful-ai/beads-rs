@@ -194,7 +194,7 @@ impl ReplRig {
         }
 
         // Start proxies before daemons so configured peer addresses are already listening
-        // when replication managers come up and reload.
+        // when replication managers come up and config-triggered reloads run.
         let proxies = spawn_proxies(proxy_specs);
         for node in &nodes {
             node.start_daemon();
@@ -574,6 +574,7 @@ impl Node {
 
     fn start_daemon(&self) {
         self.bd_cmd().args(["status"]).assert().success();
+        self.wait_for_admin_ready(IPC_RELOAD_REPLICATION_TIMEOUT);
     }
 
     pub fn create_issue(&self, title: &str) -> String {
@@ -704,6 +705,7 @@ impl Node {
     }
 
     pub fn reload_replication(&self) {
+        self.wait_for_admin_ready(IPC_RELOAD_REPLICATION_TIMEOUT);
         let request = Request::Admin(AdminOp::ReloadReplication {
             ctx: RepoCtx::new(self.repo_dir.clone()),
             payload: EmptyPayload {},
@@ -715,6 +717,7 @@ impl Node {
             Response::Ok {
                 ok: ResponsePayload::Query(QueryResult::AdminReloadReplication(_)),
             } => {}
+            Response::Err { err } => panic!("admin reload replication failed: {err:?}"),
             other => panic!("unexpected admin reload replication response: {other:?}"),
         }
     }
@@ -1311,7 +1314,7 @@ fn request_read_wait_timeout(request: &Request) -> Option<u64> {
 fn request_is_retry_safe(request: &Request) -> bool {
     match request {
         Request::Show { .. } => true,
-        Request::Admin(AdminOp::Status { .. } | AdminOp::ReloadReplication { .. }) => true,
+        Request::Admin(AdminOp::Status { .. }) => true,
         _ => false,
     }
 }
