@@ -1,6 +1,6 @@
 use clippy_utils::diagnostics::span_lint_hir_and_then;
 use clippy_utils::source::snippet_opt;
-use rustc_hir::{Expr, ExprKind, HirId};
+use rustc_hir::{BinOpKind, Expr, ExprKind, HirId, StmtKind, UnOp};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_span::Span;
 use std::collections::HashSet;
@@ -30,7 +30,7 @@ pub struct NoWarningOnlyCompatibilityGates {
 
 impl<'tcx> LateLintPass<'tcx> for NoWarningOnlyCompatibilityGates {
     fn check_expr(&mut self, cx: &LateContext<'tcx>, expr: &'tcx Expr<'tcx>) {
-        let ExprKind::If(cond, then_expr, _else_expr) = expr.kind else {
+        let ExprKind::If(cond, then_expr, else_expr) = expr.kind else {
             return;
         };
 
@@ -40,7 +40,19 @@ impl<'tcx> LateLintPass<'tcx> for NoWarningOnlyCompatibilityGates {
         if !is_compatibility_mismatch_condition(cx, cond.span) {
             return;
         }
-        if !is_warn_only_branch(cx, then_expr.span) {
+        let Some(mismatch_branch) = mismatch_branch(cx, cond) else {
+            return;
+        };
+        let mismatch_span = match mismatch_branch {
+            MismatchBranch::Then => then_expr.span,
+            MismatchBranch::Else => {
+                let Some(else_expr) = else_expr else {
+                    return;
+                };
+                else_expr.span
+            }
+        };
+        if !is_warn_only_branch(cx, mismatch_span) {
             return;
         }
         if !self.emitted_hir.insert(expr.hir_id) {
@@ -83,6 +95,110 @@ fn is_compatibility_mismatch_condition(cx: &LateContext<'_>, span: Span) -> bool
     let has_hash_subject = cond.contains("policy_hash") || cond.contains("roster_hash");
     let has_mismatch = cond.contains("!=") || cond.contains("==");
     has_hash_subject && has_mismatch
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MismatchBranch {
+    Then,
+    Else,
+}
+
+fn mismatch_branch(cx: &LateContext<'_>, cond: &Expr<'_>) -> Option<MismatchBranch> {
+    let mut branches = Vec::new();
+    collect_hash_comparison_branches(cx, cond, false, &mut branches);
+    let first = branches.first().copied()?;
+    if branches.iter().all(|branch| *branch == first) {
+        Some(first)
+    } else {
+        None
+    }
+}
+
+fn collect_hash_comparison_branches(
+    cx: &LateContext<'_>,
+    expr: &Expr<'_>,
+    negated: bool,
+    branches: &mut Vec<MismatchBranch>,
+) {
+    match expr.kind {
+        ExprKind::Unary(UnOp::Not, inner) => {
+            collect_hash_comparison_branches(cx, inner, !negated, branches);
+        }
+        ExprKind::Binary(op, lhs, rhs) => {
+            if matches!(op.node, BinOpKind::Eq | BinOpKind::Ne)
+                && (contains_hash_subject_expr(cx, lhs) || contains_hash_subject_expr(cx, rhs))
+            {
+                branches.push(comparison_mismatch_branch(op.node, negated));
+                return;
+            }
+            collect_hash_comparison_branches(cx, lhs, negated, branches);
+            collect_hash_comparison_branches(cx, rhs, negated, branches);
+        }
+        ExprKind::DropTemps(inner)
+        | ExprKind::AddrOf(_, _, inner)
+        | ExprKind::Field(inner, _)
+        | ExprKind::Cast(inner, _)
+        | ExprKind::Type(inner, _)
+        | ExprKind::Unary(_, inner) => collect_hash_comparison_branches(cx, inner, negated, branches),
+        ExprKind::Let(let_expr) => {
+            collect_hash_comparison_branches(cx, let_expr.init, negated, branches);
+        }
+        ExprKind::Block(block, _) => {
+            collect_hash_comparison_branches_in_block(cx, block, negated, branches);
+        }
+        _ => {}
+    }
+}
+
+fn collect_hash_comparison_branches_in_block(
+    cx: &LateContext<'_>,
+    block: &rustc_hir::Block<'_>,
+    negated: bool,
+    branches: &mut Vec<MismatchBranch>,
+) {
+    for stmt in block.stmts {
+        match stmt.kind {
+            StmtKind::Let(let_stmt) => {
+                if let Some(init) = let_stmt.init {
+                    collect_hash_comparison_branches(cx, init, negated, branches);
+                }
+                if let Some(else_block) = let_stmt.els {
+                    collect_hash_comparison_branches_in_block(cx, else_block, negated, branches);
+                }
+            }
+            StmtKind::Expr(stmt_expr) | StmtKind::Semi(stmt_expr) => {
+                collect_hash_comparison_branches(cx, stmt_expr, negated, branches);
+            }
+            StmtKind::Item(_) => {}
+        }
+    }
+    if let Some(tail) = block.expr {
+        collect_hash_comparison_branches(cx, tail, negated, branches);
+    }
+}
+
+fn contains_hash_subject_expr(cx: &LateContext<'_>, expr: &Expr<'_>) -> bool {
+    let Some(snippet) = snippet_opt(cx, expr.span) else {
+        return false;
+    };
+    let text = snippet.replace(char::is_whitespace, "");
+    text.contains("policy_hash") || text.contains("roster_hash")
+}
+
+fn comparison_mismatch_branch(op: BinOpKind, negated: bool) -> MismatchBranch {
+    let branch = match op {
+        BinOpKind::Ne => MismatchBranch::Then,
+        BinOpKind::Eq => MismatchBranch::Else,
+        _ => unreachable!("only Eq/Ne should call comparison_mismatch_branch"),
+    };
+    if negated {
+        match branch {
+            MismatchBranch::Then => MismatchBranch::Else,
+            MismatchBranch::Else => MismatchBranch::Then,
+        }
+    } else {
+        branch
+    }
 }
 
 fn is_warn_only_branch(cx: &LateContext<'_>, span: Span) -> bool {
