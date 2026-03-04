@@ -1,7 +1,7 @@
 use clippy_utils::diagnostics::span_lint_and_help;
 use clippy_utils::source::snippet_opt;
 use rustc_hir::intravisit::{walk_expr, Visitor};
-use rustc_hir::{Arm, Expr, ExprKind, Item, ItemKind, QPath};
+use rustc_hir::{Arm, BinOpKind, Expr, ExprKind, Item, ItemKind, QPath};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_span::Span;
 
@@ -143,7 +143,7 @@ impl<'v, 'tcx> Visitor<'v> for ReplayAnalyzer<'_, 'tcx> {
         match expr.kind {
             ExprKind::If(cond, then_expr, else_expr) => {
                 self.visit_expr(cond);
-                match condition_modes(self.cx, cond.span) {
+                match condition_modes(cond) {
                     Some((then_mode, else_mode)) => {
                         self.with_mode(then_mode, |this| this.visit_expr(then_expr));
                         if let Some(else_expr) = else_expr {
@@ -190,31 +190,78 @@ fn call_name<'hir>(expr: &'hir Expr<'hir>) -> Option<&'hir str> {
     }
 }
 
-fn condition_modes(cx: &LateContext<'_>, span: Span) -> Option<(ModeContext, ModeContext)> {
-    let normalized = normalize(&snippet_opt(cx, span)?);
-    if is_mode_equality(&normalized, "ReplayMode::CatchUp") {
-        return Some((ModeContext::CatchUp, ModeContext::Rebuild));
-    }
-    if is_mode_inequality(&normalized, "ReplayMode::CatchUp") {
-        return Some((ModeContext::Rebuild, ModeContext::CatchUp));
-    }
-    if is_mode_equality(&normalized, "ReplayMode::Rebuild") {
-        return Some((ModeContext::Rebuild, ModeContext::CatchUp));
-    }
-    if is_mode_inequality(&normalized, "ReplayMode::Rebuild") {
-        return Some((ModeContext::CatchUp, ModeContext::Rebuild));
-    }
-    None
+fn condition_modes(cond: &Expr<'_>) -> Option<(ModeContext, ModeContext)> {
+    let ExprKind::Binary(op, left, right) = cond.kind else {
+        return None;
+    };
+    let comparison = match op.node {
+        BinOpKind::Eq => ModeComparison::Equal,
+        BinOpKind::Ne => ModeComparison::NotEqual,
+        _ => return None,
+    };
+
+    mode_comparison_context(comparison, left, right)
+        .or_else(|| mode_comparison_context(comparison, right, left))
 }
 
-fn is_mode_equality(normalized: &str, variant: &str) -> bool {
-    normalized.contains(&format!("mode=={variant}"))
-        || normalized.contains(&format!("{variant}==mode"))
+#[derive(Clone, Copy)]
+enum ModeComparison {
+    Equal,
+    NotEqual,
 }
 
-fn is_mode_inequality(normalized: &str, variant: &str) -> bool {
-    normalized.contains(&format!("mode!={variant}"))
-        || normalized.contains(&format!("{variant}!=mode"))
+fn mode_comparison_context(
+    comparison: ModeComparison,
+    left: &Expr<'_>,
+    right: &Expr<'_>,
+) -> Option<(ModeContext, ModeContext)> {
+    if !is_mode_binding(left) {
+        return None;
+    }
+    let compared_mode = replay_mode_variant(right)?;
+    match (comparison, compared_mode) {
+        (ModeComparison::Equal, ModeContext::CatchUp) => {
+            Some((ModeContext::CatchUp, ModeContext::Rebuild))
+        }
+        (ModeComparison::NotEqual, ModeContext::CatchUp) => {
+            Some((ModeContext::Rebuild, ModeContext::CatchUp))
+        }
+        (ModeComparison::Equal, ModeContext::Rebuild) => {
+            Some((ModeContext::Rebuild, ModeContext::CatchUp))
+        }
+        (ModeComparison::NotEqual, ModeContext::Rebuild) => {
+            Some((ModeContext::CatchUp, ModeContext::Rebuild))
+        }
+        (_, ModeContext::Unknown) => None,
+    }
+}
+
+fn is_mode_binding(expr: &Expr<'_>) -> bool {
+    let ExprKind::Path(ref qpath) = expr.kind else {
+        return false;
+    };
+    match qpath {
+        QPath::Resolved(_, path) => path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident.name.as_str() == "mode"),
+        QPath::TypeRelative(_, segment) => segment.ident.name.as_str() == "mode",
+    }
+}
+
+fn replay_mode_variant(expr: &Expr<'_>) -> Option<ModeContext> {
+    let ExprKind::Path(ref qpath) = expr.kind else {
+        return None;
+    };
+    let variant = match qpath {
+        QPath::Resolved(_, path) => path.segments.last()?.ident.name.as_str(),
+        QPath::TypeRelative(_, segment) => segment.ident.name.as_str(),
+    };
+    match variant {
+        "CatchUp" => Some(ModeContext::CatchUp),
+        "Rebuild" => Some(ModeContext::Rebuild),
+        _ => None,
+    }
 }
 
 fn arm_mode(cx: &LateContext<'_>, arm: &Arm<'_>) -> Option<ModeContext> {
