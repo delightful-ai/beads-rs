@@ -46,6 +46,14 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: lint-${{ runner.os }}
+          workspaces: |
+            . -> target
+            lints -> lints/target
+          cache-directories: |
+            ~/.dylint_drivers
+          cache-all-crates: true
       - run: cargo install cargo-dylint dylint-link --locked
       - run: cargo fmt --all -- --check
       - run: cargo dylint --path lints --pattern beads_lints --all
