@@ -1,7 +1,7 @@
 use clippy_utils::diagnostics::span_lint_and_help;
 use clippy_utils::source::snippet_opt;
 use rustc_hir::intravisit::{walk_expr, Visitor};
-use rustc_hir::{Arm, BinOpKind, Expr, ExprKind, Item, ItemKind, QPath};
+use rustc_hir::{Arm, BinOpKind, Expr, ExprKind, Item, ItemKind, QPath, UnOp};
 use rustc_lint::{LateContext, LateLintPass, LintContext};
 use rustc_span::Span;
 
@@ -191,6 +191,10 @@ fn call_name<'hir>(expr: &'hir Expr<'hir>) -> Option<&'hir str> {
 }
 
 fn condition_modes(cond: &Expr<'_>) -> Option<(ModeContext, ModeContext)> {
+    let cond = peel_drop_temps(cond);
+    if let ExprKind::Unary(UnOp::Not, inner) = cond.kind {
+        return condition_modes(inner).map(|(then_mode, else_mode)| (else_mode, then_mode));
+    }
     let ExprKind::Binary(op, left, right) = cond.kind else {
         return None;
     };
@@ -202,6 +206,15 @@ fn condition_modes(cond: &Expr<'_>) -> Option<(ModeContext, ModeContext)> {
 
     mode_comparison_context(comparison, left, right)
         .or_else(|| mode_comparison_context(comparison, right, left))
+}
+
+fn peel_drop_temps<'hir>(mut expr: &'hir Expr<'hir>) -> &'hir Expr<'hir> {
+    loop {
+        match expr.kind {
+            ExprKind::DropTemps(inner) => expr = inner,
+            _ => return expr,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]
