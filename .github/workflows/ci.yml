@@ -13,6 +13,16 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  migration-compat:
+    name: Migration Compat
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p beads-rs --test integration cli::migration::test_migrate_to_1_upgrades_exact_v0_1_26_store_without_data_loss -- --exact
+
   test:
     name: Test
     strategy:

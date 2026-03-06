@@ -18,7 +18,7 @@ use crate::core::{
     ReplicaId, StoreId, WallClock, Watermarks,
 };
 use crate::error::{Effect, Transience};
-use crate::git::SyncError;
+use crate::git::{SyncError, WireError};
 use crate::runtime::store::runtime::StoreRuntimeError;
 use crate::runtime::wal::EventWalError;
 use beads_daemon_core::durability::DurabilityError;
@@ -592,8 +592,30 @@ impl From<StoreRuntimeError> for OpError {
 
 impl From<SyncError> for OpError {
     fn from(err: SyncError) -> Self {
+        if let Some(op) = legacy_deps_migration_hint(&err) {
+            return op;
+        }
         OpError::Sync(Box::new(err))
     }
+}
+
+fn legacy_deps_migration_hint(err: &SyncError) -> Option<OpError> {
+    let message = match err {
+        SyncError::Wire(WireError::Json(source)) => source.to_string(),
+        SyncError::Wire(WireError::InvalidValue(message)) => message.clone(),
+        _ => return None,
+    };
+    let missing_cc = message.contains("missing field `cc`")
+        || message.contains("missing field 'cc'")
+        || message.contains("legacy line-per-edge");
+    if !missing_cc {
+        return None;
+    }
+    Some(OpError::ValidationFailed {
+        field: "migrate".into(),
+        reason: "legacy deps store detected; run `bd migrate detect` and then `bd migrate to 1`"
+            .into(),
+    })
 }
 
 impl From<EventWalError> for OpError {
@@ -693,6 +715,27 @@ mod tests {
 
         patch.title = beads_surface::ops::Patch::Clear;
         assert!(ValidatedSurfaceBeadPatch::try_from(patch).is_err());
+    }
+
+    #[test]
+    fn sync_error_missing_cc_maps_to_migration_hint() {
+        #[derive(Debug, serde::Deserialize)]
+        #[allow(dead_code)]
+        struct NeedsCc {
+            cc: serde_json::Value,
+        }
+
+        let err = SyncError::Wire(WireError::Json(
+            serde_json::from_str::<NeedsCc>("{}").expect_err("expected missing field json error"),
+        ));
+        let mapped = OpError::from(err);
+        match mapped {
+            OpError::ValidationFailed { field, reason } => {
+                assert_eq!(field, "migrate");
+                assert!(reason.contains("bd migrate to 1"), "{reason}");
+            }
+            other => panic!("expected validation hint, got {other:?}"),
+        }
     }
 }
 

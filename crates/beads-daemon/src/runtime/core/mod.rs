@@ -1736,7 +1736,7 @@ mod tests {
     }
 
     #[test]
-    fn load_from_checkpoint_ref_rejects_policy_hash_mismatch_pre_merge() {
+    fn load_from_checkpoint_ref_skips_policy_hash_mismatch_checkpoint() {
         let _tmp = test_store_dir();
         let checkpoint_policy_hash = ContentHash::from_bytes([9u8; 32]);
 
@@ -1746,20 +1746,9 @@ mod tests {
                 None,
                 "bd-checkpoint-policy-mismatch",
             );
-        let err = daemon
+        daemon
             .apply_loaded_repo_state(store_id, &remote, repo_dir.path(), empty_load_result())
-            .expect_err("policy mismatch should fail before merge");
-
-        match err {
-            OpError::ValidationFailed { field, reason } => {
-                assert_eq!(field, "checkpoint_compatibility");
-                assert!(
-                    reason.contains("policy hash mismatch"),
-                    "unexpected reason: {reason}"
-                );
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+            .expect("policy mismatch should warn and continue");
 
         let store = daemon
             .store_sessions
@@ -1770,7 +1759,7 @@ mod tests {
     }
 
     #[test]
-    fn load_from_checkpoint_ref_rejects_roster_hash_mismatch_pre_merge() {
+    fn load_from_checkpoint_ref_skips_roster_hash_mismatch_checkpoint() {
         let _tmp = test_store_dir();
         let (mut daemon, remote, repo_dir, store_id, checkpoint_bead_id) =
             setup_checkpoint_import_fixture(
@@ -1778,20 +1767,9 @@ mod tests {
                 Some(ContentHash::from_bytes([8u8; 32])),
                 "bd-checkpoint-roster-mismatch",
             );
-        let err = daemon
+        daemon
             .apply_loaded_repo_state(store_id, &remote, repo_dir.path(), empty_load_result())
-            .expect_err("roster mismatch should fail before merge");
-
-        match err {
-            OpError::ValidationFailed { field, reason } => {
-                assert_eq!(field, "checkpoint_compatibility");
-                assert!(
-                    reason.contains("roster hash mismatch"),
-                    "unexpected reason: {reason}"
-                );
-            }
-            other => panic!("unexpected error: {other:?}"),
-        }
+            .expect("roster mismatch should warn and continue");
 
         let store = daemon
             .store_sessions

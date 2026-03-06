@@ -80,3 +80,70 @@ The canonical store lives on its own git ref. If you want a “checkpoint” bef
 git show-ref refs/heads/beads/store >/dev/null 2>&1 && \
   git branch beads/store-backup refs/heads/beads/store
 ```
+
+## Legacy Deps Cutover (`deps.jsonl` line-per-edge -> OR-Set v1)
+
+Some historical repos have `refs/heads/beads/store` with legacy `deps.jsonl`
+that stores one edge per JSON line. Current runtime loads expect strict OR-Set
+deps with `cc` and `entries`. When an old local or remote-tracking ref is still
+on the legacy shape, strict load paths can fail with errors like:
+
+```text
+missing field `cc`
+```
+
+Use the explicit migration flow:
+
+1. Detect structural state:
+
+   ```bash
+   bd migrate detect
+   ```
+
+   Important fields in the JSON:
+   - `"deps_format":"legacy_edges"` means deps still need cutover
+   - `"notes_present":false` means `notes.jsonl` will be backfilled
+   - `"checksums_present":false` means `meta.json` checksums will be backfilled
+   - `"needs_migration":true` means at least one store ref still needs rewrite
+
+2. Preview the rewrite:
+
+   ```bash
+   bd migrate to 1 --dry-run
+   ```
+
+3. Execute the rewrite:
+
+   ```bash
+   bd migrate to 1
+   ```
+
+   Useful flags:
+   - `--no-push` rewrites only the local ref
+   - `--force` continues through warningful legacy parses or divergent local/remote history
+
+`bd migrate to 1` rewrites `refs/heads/beads/store` into canonical v1 shape:
+`state.jsonl`, `tombstones.jsonl`, `deps.jsonl`, `notes.jsonl`, and `meta.json`.
+It converts legacy line-per-edge deps to strict OR-Set deps, backfills missing
+`notes.jsonl`, and writes store checksums into `meta.json`.
+
+Checkpoint imports handle legacy deps differently: incompatible checkpoint deps
+are skipped and rebuilt from canonical store state rather than being parsed in
+runtime compatibility mode.
+
+### Rollback snippet
+
+```bash
+git show-ref refs/heads/beads/store >/dev/null 2>&1 && \
+  git branch beads/store-backup refs/heads/beads/store
+
+# ... run migration ...
+
+git show-ref refs/heads/beads/store-backup >/dev/null 2>&1 && \
+  git update-ref refs/heads/beads/store refs/heads/beads/store-backup
+```
+
+### Compatibility note
+
+This is a hard cutover. Older binaries that expect line-per-edge `deps.jsonl`
+will not be able to read the migrated store after `bd migrate to 1`.

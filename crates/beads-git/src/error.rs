@@ -56,6 +56,9 @@ pub enum SyncError {
     #[error("no common ancestor between local and remote")]
     NoCommonAncestor,
 
+    #[error("migration aborted due to parse warnings; rerun with --force to proceed")]
+    MigrationWarnings(Vec<String>),
+
     #[error(transparent)]
     Wire(#[from] WireError),
 
@@ -99,6 +102,7 @@ impl SyncError {
             | SyncError::BuildTree(_)
             | SyncError::Commit(_)
             | SyncError::NoCommonAncestor
+            | SyncError::MigrationWarnings(_)
             | SyncError::Wire(_)
             | SyncError::Git(_) => Transience::Permanent,
         }
@@ -140,6 +144,18 @@ impl IntoErrorPayload for SyncError {
                 }),
             _ => ErrorPayload::new(CliErrorCode::SyncFailed.into(), message, retryable),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migration_warnings_report_no_side_effects() {
+        let err = SyncError::MigrationWarnings(vec!["warn".into()]);
+        assert_eq!(err.effect(), Effect::None);
+        assert!(!err.transience().is_retryable());
     }
 }
 
