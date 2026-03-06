@@ -123,6 +123,12 @@ pub enum CheckpointImportError {
         #[source]
         source: serde_json::Error,
     },
+    #[error("checkpoint deps format incompatible at {path:?} line {line}: {reason}")]
+    IncompatibleDepsFormat {
+        path: PathBuf,
+        line: u64,
+        reason: String,
+    },
     #[error(
         "checkpoint jsonl shard entry limit exceeded at {path:?}: max {max_entries}, got {got_entries}"
     )]
@@ -286,11 +292,12 @@ pub fn import_checkpoint(
                     Ok(())
                 },
             )?,
-            CheckpointFileKind::Deps => parse_jsonl_file::<WireDepStoreV1, _>(
+            CheckpointFileKind::Deps => parse_jsonl_file::<Value, _>(
                 &full_path,
                 &rel_path.namespace,
                 limits,
-                |line, wire| {
+                |line, value| {
+                    let wire = parse_dep_store_line(value, &full_path, line.line_no)?;
                     ensure_dep_entry_order(&wire, &full_path, line.line_no)?;
                     let ns = line.namespace.clone();
                     let dep_store = dep_store_from_wire(&wire, &full_path, line)?;
@@ -457,12 +464,13 @@ fn import_checkpoint_export_parsed(
                     Ok(())
                 },
             )?,
-            CheckpointFileKind::Deps => parse_jsonl_bytes::<WireDepStoreV1, _>(
+            CheckpointFileKind::Deps => parse_jsonl_bytes::<Value, _>(
                 bytes,
                 &path,
                 &rel_path.namespace,
                 limits,
-                |line, wire| {
+                |line, value| {
+                    let wire = parse_dep_store_line(value, &path, line.line_no)?;
                     ensure_dep_entry_order(&wire, &path, line.line_no)?;
                     let ns = line.namespace.clone();
                     let dep_store = dep_store_from_wire(&wire, &path, line)?;
@@ -752,6 +760,49 @@ fn parse_json_line<T: DeserializeOwned>(
         path: path.to_path_buf(),
         line: line_no,
         source,
+    })
+}
+
+fn parse_dep_store_line(
+    value: Value,
+    path: &Path,
+    line_no: u64,
+) -> Result<WireDepStoreV1, CheckpointImportError> {
+    match serde_json::from_value(value.clone()) {
+        Ok(wire) => Ok(wire),
+        Err(source) => {
+            if is_legacy_dep_edge_value(&value) {
+                return Err(CheckpointImportError::IncompatibleDepsFormat {
+                    path: path.to_path_buf(),
+                    line: line_no,
+                    reason: "legacy line-per-edge deps entry".into(),
+                });
+            }
+            Err(CheckpointImportError::JsonLine {
+                path: path.to_path_buf(),
+                line: line_no,
+                source,
+            })
+        }
+    }
+}
+
+fn is_legacy_dep_edge_value(value: &Value) -> bool {
+    let Some(obj) = value.as_object() else {
+        return false;
+    };
+
+    let has_from = has_non_empty_str_field(obj, &["from", "issue_id"]);
+    let has_to = has_non_empty_str_field(obj, &["to", "depends_on_id"]);
+    let has_kind = has_non_empty_str_field(obj, &["kind", "type", "dep_type"]);
+    has_from && has_to && has_kind
+}
+
+fn has_non_empty_str_field(obj: &serde_json::Map<String, Value>, candidates: &[&str]) -> bool {
+    candidates.iter().any(|field| {
+        obj.get(*field)
+            .and_then(Value::as_str)
+            .is_some_and(|raw| !raw.trim().is_empty())
     })
 }
 
@@ -1383,6 +1434,78 @@ mod tests {
 
         let err = import_checkpoint(dir, &Limits::default()).unwrap_err();
         assert!(matches!(err, CheckpointImportError::OutOfOrder { .. }));
+    }
+
+    #[test]
+    fn import_classifies_legacy_deps_checkpoint_as_incompatible() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let (mut manifest, mut meta) = minimal_manifest_and_meta(dir);
+        let shard_path =
+            CheckpointShardPath::new(NamespaceId::core(), CheckpointFileKind::Deps, shard_name(0));
+        let shard_rel = shard_path.to_path();
+        let line = br#"{"from":"bd-a","to":"bd-b","kind":"blocks"}
+"#;
+        write_file(&dir.join(&shard_rel), line);
+
+        manifest.files.insert(
+            shard_path,
+            ManifestFile {
+                sha256: ContentHash::from_bytes(sha256_bytes(line).0),
+                bytes: line.len() as u64,
+            },
+        );
+        meta.manifest_hash = manifest.manifest_hash().unwrap();
+        meta.content_hash = meta.compute_content_hash().unwrap();
+
+        write_file(&dir.join(META_FILE), meta.canon_bytes().unwrap().as_slice());
+        write_file(
+            &dir.join(MANIFEST_FILE),
+            manifest.canon_bytes().unwrap().as_slice(),
+        );
+
+        let err = import_checkpoint(dir, &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            CheckpointImportError::IncompatibleDepsFormat { .. }
+        ));
+    }
+
+    #[test]
+    fn import_keeps_non_legacy_deps_decode_errors_as_jsonline() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let (mut manifest, mut meta) = minimal_manifest_and_meta(dir);
+        let shard_path =
+            CheckpointShardPath::new(NamespaceId::core(), CheckpointFileKind::Deps, shard_name(0));
+        let shard_rel = shard_path.to_path();
+        let line = br#"{"foo":"bar"}
+"#;
+        write_file(&dir.join(&shard_rel), line);
+
+        manifest.files.insert(
+            shard_path,
+            ManifestFile {
+                sha256: ContentHash::from_bytes(sha256_bytes(line).0),
+                bytes: line.len() as u64,
+            },
+        );
+        meta.manifest_hash = manifest.manifest_hash().unwrap();
+        meta.content_hash = meta.compute_content_hash().unwrap();
+
+        write_file(&dir.join(META_FILE), meta.canon_bytes().unwrap().as_slice());
+        write_file(
+            &dir.join(MANIFEST_FILE),
+            manifest.canon_bytes().unwrap().as_slice(),
+        );
+
+        let err = import_checkpoint(dir, &Limits::default()).unwrap_err();
+        assert!(
+            matches!(err, CheckpointImportError::JsonLine { .. }),
+            "expected JsonLine for non-legacy malformed deps, got: {err:?}"
+        );
     }
 
     #[test]

@@ -10,6 +10,7 @@ pub mod git;
 pub mod identity;
 pub mod ipc_stream;
 pub mod load_gen;
+pub mod migration_store;
 pub mod mutation;
 pub mod realtime;
 pub mod receipt;

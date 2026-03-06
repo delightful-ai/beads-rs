@@ -15,7 +15,7 @@ use crate::core::{ActorId, BeadSlug, CanonicalState, StoreId, WriteStamp};
 use crate::git::checkpoint::{
     CHECKPOINT_FORMAT_VERSION, CheckpointCache, CheckpointExport, CheckpointExportError,
     CheckpointExportInput, CheckpointPublishError, CheckpointPublishOutcome, CheckpointSnapshot,
-    CheckpointStoreMeta, export_checkpoint,
+    CheckpointStoreMeta, export_checkpoint, import_checkpoint_export,
 };
 use crate::git::error::SyncError;
 use crate::git::observe::SyncObserver;
@@ -332,6 +332,20 @@ impl GitWorker {
                     cache_previous.as_ref()
                 }
             };
+            let previous = previous.and_then(|previous| {
+                if import_checkpoint_export(previous, &self.limits).is_ok() {
+                    Some(previous)
+                } else {
+                    if previous_from_map.is_some() {
+                        drop_in_memory_previous = true;
+                    }
+                    tracing::warn!(
+                        checkpoint_group = %snapshot.checkpoint_group,
+                        "checkpoint previous payload invalid; exporting full snapshot instead"
+                    );
+                    None
+                }
+            });
 
             match previous {
                 Some(previous) => match export_checkpoint(CheckpointExportInput {
