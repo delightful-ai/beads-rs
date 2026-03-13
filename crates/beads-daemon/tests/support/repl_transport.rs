@@ -264,7 +264,7 @@ impl ChannelTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fixtures::identity;
+    use crate::support::identity;
     use uuid::Uuid;
 
     use beads_core::ReplicaId;

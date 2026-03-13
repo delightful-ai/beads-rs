@@ -2,22 +2,25 @@
 
 use std::collections::BTreeMap;
 
+use super::identity;
+use super::repl_frames;
+use super::repl_transport::ChannelEndpoint;
 use beads_core::Limits;
 use beads_core::{
     Applied, Durable, EventId, EventShaLookupError, HeadStatus, NamespaceId, ReplicaId, Seq0, Seq1,
     Sha256, StoreIdentity, VerifiedEventFrame, Watermark,
 };
-use beads_daemon_core::repl::proto::{ReplMessage, WatermarkState};
-
-use super::daemon_boundary::repl::{
-    AdmissionController, AdmissionPermit, ContiguousBatch, Events, Inbound, InboundConnecting,
-    IngestOutcome, Outbound, OutboundConnecting, ReplError, ReplicaDurabilityRole, SessionAction,
-    SessionConfig, SessionPhase, SessionState, SessionStore, ValidatedAck, WalIndexError, Want,
-    WatermarkSnapshot, handle_inbound_message, handle_outbound_message,
+use beads_daemon::admission::{AdmissionController, AdmissionPermit};
+use beads_daemon::testkit::repl::session::{
+    Inbound, InboundConnecting, Outbound, OutboundConnecting, SessionPhase, SessionState,
+    SessionStore, handle_inbound_message, handle_outbound_message,
 };
-use super::identity;
-use super::repl_frames;
-use super::repl_transport::ChannelEndpoint;
+use beads_daemon::testkit::repl::{
+    ContiguousBatch, Events, IngestOutcome, ReplError, SessionAction, SessionConfig, ValidatedAck,
+    Want, WatermarkSnapshot,
+};
+use beads_daemon::testkit::wal::{ReplicaDurabilityRole, WalIndexError};
+use beads_daemon_core::repl::proto::{ReplMessage, WatermarkState};
 
 #[derive(Clone, Debug, Default)]
 pub struct MockStore {

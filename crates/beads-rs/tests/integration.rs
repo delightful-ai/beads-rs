@@ -7,8 +7,6 @@ mod cli;
 mod core;
 #[path = "integration/daemon/mod.rs"]
 mod daemon;
-#[path = "integration/repl/mod.rs"]
-mod repl;
 
 #[path = "integration/realtime_errors.rs"]
 mod realtime_errors;

@@ -11,9 +11,9 @@ use beads_daemon::testkit::repl::{
     ReplMessage, SessionAction, SessionConfig, WireEvents, WireReplMessage,
 };
 
-use crate::fixtures::identity;
-use crate::fixtures::repl_frames;
-use crate::fixtures::repl_peer::MockStore;
+use crate::support::identity;
+use crate::support::repl_frames;
+use crate::support::repl_peer::MockStore;
 
 fn inbound_session_with_limits(
     limits: Limits,

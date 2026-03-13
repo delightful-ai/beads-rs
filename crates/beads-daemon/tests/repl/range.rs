@@ -7,16 +7,22 @@ use beads_daemon::testkit::wal::{
     IndexDurabilityMode, SegmentConfig, SegmentSyncMode, SegmentWriter, SqliteWalIndex,
     WAL_FORMAT_VERSION, WalReplayError, rebuild_index,
 };
-use beads_rs::paths;
 use rusqlite::params;
 use tempfile::TempDir;
 
-use crate::fixtures::identity;
-use crate::fixtures::wal::record_for_seq;
+use crate::support::identity;
+use crate::support::wal::record_for_seq;
 
-fn setup_store(seed: u8) -> (TempDir, paths::DataDirOverride, StoreMeta, Limits) {
+fn setup_store(
+    seed: u8,
+) -> (
+    TempDir,
+    beads_daemon::paths::DataDirOverride,
+    StoreMeta,
+    Limits,
+) {
     let temp = TempDir::new().expect("temp dir");
-    let guard = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+    let guard = beads_daemon::paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
     let versions = StoreMetaVersions::new(
         1,
         WAL_FORMAT_VERSION,
@@ -25,7 +31,7 @@ fn setup_store(seed: u8) -> (TempDir, paths::DataDirOverride, StoreMeta, Limits)
         StoreMetaVersions::INDEX_SCHEMA_VERSION,
     );
     let meta = identity::store_meta_with_versions(seed, 0, 1_700_000_000_000, versions);
-    let store_dir = paths::store_dir(meta.store_id());
+    let store_dir = beads_daemon::paths::store_dir(meta.store_id());
     fs::create_dir_all(&store_dir).expect("create store dir");
     (temp, guard, meta, Limits::default())
 }
@@ -52,7 +58,7 @@ fn wal_range_reader_returns_contiguous_frames() {
     let origin = meta.replica_id;
     let record1 = record_for_seq(&meta, &namespace, origin, 1, None);
     let record2 = record_for_seq(&meta, &namespace, origin, 2, Some(record1.header().sha256));
-    let store_dir = paths::store_dir(meta.store_id());
+    let store_dir = beads_daemon::paths::store_dir(meta.store_id());
     write_records(
         &store_dir,
         &meta,
@@ -81,7 +87,7 @@ fn wal_range_reader_rejects_internal_gap() {
     let origin = meta.replica_id;
     let record1 = record_for_seq(&meta, &namespace, origin, 1, None);
     let record3 = record_for_seq(&meta, &namespace, origin, 3, Some(record1.header().sha256));
-    let store_dir = paths::store_dir(meta.store_id());
+    let store_dir = beads_daemon::paths::store_dir(meta.store_id());
     write_records(&store_dir, &meta, &namespace, &[record1, record3], &limits);
 
     let index =
@@ -97,7 +103,7 @@ fn wal_range_reader_rejects_prev_sha_mismatch() {
     let origin = meta.replica_id;
     let record1 = record_for_seq(&meta, &namespace, origin, 1, None);
     let record2 = record_for_seq(&meta, &namespace, origin, 2, Some(record1.header().sha256));
-    let store_dir = paths::store_dir(meta.store_id());
+    let store_dir = beads_daemon::paths::store_dir(meta.store_id());
     write_records(&store_dir, &meta, &namespace, &[record1, record2], &limits);
 
     let index =

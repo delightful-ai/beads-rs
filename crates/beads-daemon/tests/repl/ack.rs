@@ -21,13 +21,18 @@ use beads_daemon::testkit::repl::{
 use beads_daemon::testkit::wal::{
     IndexDurabilityMode, SegmentConfig, SegmentWriter, SqliteWalIndex, rebuild_index,
 };
-use beads_rs::paths;
+use tempfile::TempDir;
 
-use crate::fixtures::identity;
-use crate::fixtures::repl_frames;
-use crate::fixtures::repl_peer::MockStore;
-use crate::fixtures::store_dir::TempStoreDir;
-use crate::fixtures::wal::record_for_seq;
+use crate::support::identity;
+use crate::support::repl_frames;
+use crate::support::repl_peer::MockStore;
+use crate::support::wal::record_for_seq;
+
+fn temp_store_root() -> (TempDir, beads_daemon::paths::DataDirOverride) {
+    let temp = TempDir::new().expect("temp dir");
+    let guard = beads_daemon::paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+    (temp, guard)
+}
 
 fn inbound_session() -> (SessionState<Inbound>, MockStore, StoreIdentity) {
     let limits = Limits::default();
@@ -249,12 +254,12 @@ fn repl_prev_sha_mismatch_rejects() {
 
 #[test]
 fn repl_want_reads_from_wal() {
-    let _temp_store = TempStoreDir::new().expect("temp store dir");
+    let (_temp_store, _guard) = temp_store_root();
     let namespace = NamespaceId::core();
     let origin = ReplicaId::new(Uuid::from_bytes([7u8; 16]));
 
     let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
-    let store_dir = paths::store_dir(store_id);
+    let store_dir = beads_daemon::paths::store_dir(store_id);
     std::fs::create_dir_all(&store_dir).expect("create store dir");
     let identity = StoreIdentity::new(store_id, StoreEpoch::new(0));
     let replica_id = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
