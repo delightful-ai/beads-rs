@@ -73,6 +73,8 @@ fn data_dir() -> PathBuf {
 }
 
 fn config_data_dir_override() -> Option<PathBuf> {
+    // Checkpoint cache paths are git-owned, but the configured data-dir override
+    // is still injected from the host crate during startup.
     DATA_DIR_OVERRIDE
         .get()
         .and_then(|lock| lock.lock().ok().and_then(|path| path.clone()))

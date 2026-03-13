@@ -21,4 +21,5 @@ pub use sync::{
     DivergenceInfo, LoadedStore, LoadedStoreMigration, MigrateStoreToV1Outcome, SyncDiff,
     SyncOutcome, SyncProcess, init_beads_ref, migrate_store_ref_to_v1, read_state_at_oid,
     read_state_at_oid_for_migration, sync_with_retry, sync_with_retry_with_observer,
+    load_state, load_store,
 };
