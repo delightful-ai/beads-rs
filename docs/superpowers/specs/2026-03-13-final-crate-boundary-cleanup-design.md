@@ -78,9 +78,23 @@ Must not grow daemon policy, git logic, or app-config loading.
 
 ### `beads-cli`
 
-Owns parse/dispatch and the typed host trait used by the app package.
+Owns the `bd` command language and presentation layer:
+
+- clap command tree, flags, and subcommands
+- CLI-only validation and normalization
+- lowering argv into typed requests/backend calls
+- human/json rendering
+- typed host traits for the small set of app-owned operations it cannot own
+  itself
 
 Must not import daemon internals or git internals directly.
+
+Must not own bootstrap/runtime/package policy such as:
+
+- config discovery/load/merge
+- XDG/data/runtime path policy
+- telemetry initialization
+- self-upgrade implementation
 
 ### `beads-git`
 
@@ -143,6 +157,7 @@ Owns assembly only:
 - binary entrypoint wiring
 - CLI host implementation
 - daemon entrypoint wiring
+- app/bootstrap policy wiring
 - telemetry initialization and defaults
 - self-upgrade/install behavior
 
