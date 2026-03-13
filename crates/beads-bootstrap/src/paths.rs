@@ -1,5 +1,3 @@
-//! Shared path resolution helpers for CLI-facing support modules.
-
 use std::path::{Path, PathBuf};
 
 use beads_core::{NamespaceId, StoreId};
@@ -124,6 +122,9 @@ pub fn checkpoint_cache_dir(data_dir: &Path, store_id: StoreId) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::{Path, PathBuf};
+
+    use beads_core::StoreId;
 
     #[test]
     fn resolve_data_dir_prefers_env_override() {

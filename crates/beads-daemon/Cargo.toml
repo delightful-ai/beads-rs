@@ -16,6 +16,7 @@ model-testing = []
 [dependencies]
 beads-core = { path = "../beads-core" }
 beads-api = { path = "../beads-api" }
+beads-bootstrap = { path = "../beads-bootstrap" }
 beads-surface = { path = "../beads-surface" }
 beads-macros = { path = "../beads-macros" }
 beads-git = { path = "../beads-git" }

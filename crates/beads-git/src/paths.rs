@@ -1,8 +1,9 @@
 //! Minimal path helpers needed by checkpoint cache.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+use beads_bootstrap::paths as moved;
 use beads_core::StoreId;
 
 #[cfg(test)]
@@ -47,15 +48,7 @@ pub fn override_data_dir_for_tests(path: Option<PathBuf>) -> DataDirOverride {
 }
 
 pub fn checkpoint_cache_dir(store_id: StoreId) -> PathBuf {
-    store_dir(&data_dir(), store_id).join("checkpoint_cache")
-}
-
-fn stores_dir(data_dir: &Path) -> PathBuf {
-    data_dir.join("stores")
-}
-
-fn store_dir(data_dir: &Path, store_id: StoreId) -> PathBuf {
-    stores_dir(data_dir).join(store_id.to_string())
+    moved::checkpoint_cache_dir(&data_dir(), store_id)
 }
 
 fn data_dir() -> PathBuf {
@@ -76,17 +69,7 @@ fn data_dir() -> PathBuf {
         return dir;
     }
 
-    std::env::var("XDG_DATA_HOME")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("/tmp"))
-                .join(".local")
-                .join("share")
-        })
-        .join("beads-rs")
+    moved::resolve_data_dir(None, None)
 }
 
 fn config_data_dir_override() -> Option<PathBuf> {

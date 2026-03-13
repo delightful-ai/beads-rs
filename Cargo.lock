@@ -139,6 +139,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "beads-bootstrap"
+version = "0.2.0-alpha"
+dependencies = [
+ "beads-core",
+ "dirs",
+ "uuid",
+]
+
+[[package]]
 name = "beads-cli"
 version = "0.2.0-alpha"
 dependencies = [
@@ -181,6 +190,7 @@ name = "beads-daemon"
 version = "0.2.0-alpha"
 dependencies = [
  "beads-api",
+ "beads-bootstrap",
  "beads-core",
  "beads-daemon-core",
  "beads-git",
@@ -242,6 +252,7 @@ dependencies = [
 name = "beads-git"
 version = "0.2.0-alpha"
 dependencies = [
+ "beads-bootstrap",
  "beads-core",
  "bytes",
  "dirs",
@@ -270,6 +281,7 @@ version = "0.2.0-alpha"
 dependencies = [
  "assert_cmd",
  "beads-api",
+ "beads-bootstrap",
  "beads-cli",
  "beads-core",
  "beads-daemon",

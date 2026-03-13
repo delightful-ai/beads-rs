@@ -6,7 +6,6 @@ pub mod commands;
 pub mod filters;
 pub mod migrate;
 pub mod parsers;
-pub mod paths;
 pub mod render;
 pub mod runtime;
 pub mod upgrade;

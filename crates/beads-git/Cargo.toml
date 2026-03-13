@@ -9,6 +9,7 @@ description = "Git sync and checkpoint subsystem for beads"
 
 [dependencies]
 beads-core = { path = "../beads-core" }
+beads-bootstrap = { path = "../beads-bootstrap" }
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true

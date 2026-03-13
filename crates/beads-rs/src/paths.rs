@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 use crate::config::PathsConfig;
-use beads_cli::paths as moved;
+use beads_bootstrap::paths as moved;
 use beads_core::{NamespaceId, StoreId};
 
 // =============================================================================
