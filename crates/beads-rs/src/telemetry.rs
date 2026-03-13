@@ -1,13 +1,8 @@
-use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
-use tracing::field::{Field, Visit};
-use tracing::{Event, Level, Subscriber};
-use tracing_subscriber::layer::{Context, Layer, SubscriberExt};
-use tracing_subscriber::registry::LookupSpan;
+use tracing_subscriber::layer::{Layer, SubscriberExt};
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Registry};
 
@@ -16,85 +11,15 @@ use beads_bootstrap::config::{FileLoggingConfig, LogFormat, LogRotation, Logging
 
 const LOG_FILE_PREFIX: &str = "beads.log";
 
-pub mod schema {
-    pub const ACTOR_ID: &str = "actor_id";
-    pub const CHECKPOINT_GROUP: &str = "checkpoint_group";
-    pub const CLIENT_REQUEST_ID: &str = "client_request_id";
-    pub const DIRECTION: &str = "direction";
-    pub const NAMESPACE: &str = "namespace";
-    pub const ORIGIN_REPLICA_ID: &str = "origin_replica_id";
-    pub const ORIGIN_SEQ: &str = "origin_seq";
-    pub const PEER_ADDR: &str = "peer_addr";
-    pub const PEER_REPLICA_ID: &str = "peer_replica_id";
-    pub const READ_CONSISTENCY: &str = "read_consistency";
-    pub const REPLICA_ID: &str = "replica_id";
-    pub const REMOTE: &str = "remote";
-    pub const REPO: &str = "repo";
-    pub const REQUEST_TYPE: &str = "request_type";
-    pub const STORE_EPOCH: &str = "store_epoch";
-    pub const STORE_ID: &str = "store_id";
-    pub const TRACE_ID: &str = "trace_id";
-    pub const TXN_ID: &str = "txn_id";
-}
-
-#[derive(Clone, Debug)]
-pub struct SpanContext {
-    pub name: &'static str,
-    pub fields: BTreeMap<String, String>,
-}
-
-#[derive(Clone, Debug)]
-pub struct LogRecord {
-    pub timestamp: SystemTime,
-    pub level: Level,
-    pub target: &'static str,
-    pub name: &'static str,
-    pub message: Option<String>,
-    pub fields: BTreeMap<String, String>,
-    pub spans: Vec<SpanContext>,
-}
-
-#[derive(Clone, Debug)]
-pub struct SpanRecord {
-    pub id: u64,
-    pub parent_id: Option<u64>,
-    pub name: &'static str,
-    pub fields: BTreeMap<String, String>,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum SpanPhase {
-    New,
-    Enter,
-    Exit,
-    Close,
-}
-
-pub trait Logger: Send + Sync {
-    fn log(&self, record: LogRecord);
-}
-
-pub trait Tracer: Send + Sync {
-    fn on_span(&self, record: SpanRecord, phase: SpanPhase);
-    fn on_event(&self, record: LogRecord);
-}
-
 #[derive(Clone)]
 pub struct TelemetryConfig {
     pub verbosity: u8,
     pub logging: LoggingConfig,
-    pub logger: Option<Arc<dyn Logger>>,
-    pub tracer: Option<Arc<dyn Tracer>>,
 }
 
 impl TelemetryConfig {
     pub fn new(verbosity: u8, logging: LoggingConfig) -> Self {
-        Self {
-            verbosity,
-            logging,
-            logger: None,
-            tracer: None,
-        }
+        Self { verbosity, logging }
     }
 }
 
@@ -182,10 +107,6 @@ pub fn init(config: TelemetryConfig) -> TelemetryGuard {
         }
     }
 
-    if let Some(layer) = TelemetryLayer::new(config.logger, config.tracer) {
-        layers.push(Box::new(layer.with_filter(build_filter())));
-    }
-
     Registry::default().with(layers).init();
 
     if let Some(report) = file_prune_report {
@@ -249,197 +170,6 @@ fn build_env_filter_inner(
 fn add_default_metrics_filter(filter: EnvFilter) -> EnvFilter {
     let directive = "metrics=info".parse().expect("metrics filter directive");
     filter.add_directive(directive)
-}
-
-#[derive(Clone, Debug, Default)]
-struct SpanFields {
-    fields: BTreeMap<String, String>,
-}
-
-#[derive(Default)]
-struct FieldVisitor {
-    message: Option<String>,
-    fields: BTreeMap<String, String>,
-}
-
-impl FieldVisitor {
-    fn record(&mut self, field: &Field, value: String) {
-        if field.name() == "message" {
-            self.message = Some(value);
-        } else {
-            self.fields.insert(field.name().to_string(), value);
-        }
-    }
-}
-
-impl Visit for FieldVisitor {
-    fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
-        self.record(field, format!("{value:?}"));
-    }
-
-    fn record_str(&mut self, field: &Field, value: &str) {
-        self.record(field, value.to_string());
-    }
-
-    fn record_i64(&mut self, field: &Field, value: i64) {
-        self.record(field, value.to_string());
-    }
-
-    fn record_u64(&mut self, field: &Field, value: u64) {
-        self.record(field, value.to_string());
-    }
-
-    fn record_bool(&mut self, field: &Field, value: bool) {
-        self.record(field, value.to_string());
-    }
-
-    fn record_error(&mut self, field: &Field, value: &(dyn std::error::Error + 'static)) {
-        self.record(field, value.to_string());
-    }
-}
-
-#[derive(Clone)]
-struct TelemetryLayer {
-    logger: Option<Arc<dyn Logger>>,
-    tracer: Option<Arc<dyn Tracer>>,
-}
-
-impl TelemetryLayer {
-    fn new(logger: Option<Arc<dyn Logger>>, tracer: Option<Arc<dyn Tracer>>) -> Option<Self> {
-        if logger.is_none() && tracer.is_none() {
-            None
-        } else {
-            Some(Self { logger, tracer })
-        }
-    }
-}
-
-impl<S> Layer<S> for TelemetryLayer
-where
-    S: Subscriber + for<'a> LookupSpan<'a>,
-{
-    fn on_new_span(
-        &self,
-        attrs: &tracing::span::Attributes<'_>,
-        id: &tracing::Id,
-        ctx: Context<'_, S>,
-    ) {
-        let mut visitor = FieldVisitor::default();
-        attrs.record(&mut visitor);
-        if let Some(span) = ctx.span(id) {
-            span.extensions_mut().insert(SpanFields {
-                fields: visitor.fields.clone(),
-            });
-            if let Some(tracer) = &self.tracer {
-                tracer.on_span(
-                    SpanRecord {
-                        id: id.into_u64(),
-                        parent_id: span.parent().map(|p| p.id().into_u64()),
-                        name: span.metadata().name(),
-                        fields: visitor.fields,
-                    },
-                    SpanPhase::New,
-                );
-            }
-        }
-    }
-
-    fn on_record(&self, id: &tracing::Id, values: &tracing::span::Record<'_>, ctx: Context<'_, S>) {
-        if let Some(span) = ctx.span(id) {
-            let mut visitor = FieldVisitor::default();
-            values.record(&mut visitor);
-            let mut extensions = span.extensions_mut();
-            if extensions.get_mut::<SpanFields>().is_none() {
-                extensions.insert(SpanFields::default());
-            }
-            let fields = extensions.get_mut::<SpanFields>().expect("span fields");
-            fields.fields.extend(visitor.fields);
-        }
-    }
-
-    fn on_enter(&self, id: &tracing::Id, ctx: Context<'_, S>) {
-        self.emit_span_event(id, ctx, SpanPhase::Enter);
-    }
-
-    fn on_exit(&self, id: &tracing::Id, ctx: Context<'_, S>) {
-        self.emit_span_event(id, ctx, SpanPhase::Exit);
-    }
-
-    fn on_close(&self, id: tracing::Id, ctx: Context<'_, S>) {
-        self.emit_span_event(&id, ctx, SpanPhase::Close);
-    }
-
-    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
-        let record = build_log_record(event, ctx);
-        if let Some(logger) = &self.logger {
-            logger.log(record.clone());
-        }
-        if let Some(tracer) = &self.tracer {
-            tracer.on_event(record);
-        }
-    }
-}
-
-impl TelemetryLayer {
-    fn emit_span_event<S>(&self, id: &tracing::Id, ctx: Context<'_, S>, phase: SpanPhase)
-    where
-        S: Subscriber + for<'a> LookupSpan<'a>,
-    {
-        let Some(tracer) = &self.tracer else {
-            return;
-        };
-        let Some(span) = ctx.span(id) else {
-            return;
-        };
-        let fields = span
-            .extensions()
-            .get::<SpanFields>()
-            .map(|fields| fields.fields.clone())
-            .unwrap_or_default();
-        tracer.on_span(
-            SpanRecord {
-                id: id.into_u64(),
-                parent_id: span.parent().map(|parent| parent.id().into_u64()),
-                name: span.metadata().name(),
-                fields,
-            },
-            phase,
-        );
-    }
-}
-
-fn build_log_record<S>(event: &Event<'_>, ctx: Context<'_, S>) -> LogRecord
-where
-    S: Subscriber + for<'a> LookupSpan<'a>,
-{
-    let mut visitor = FieldVisitor::default();
-    event.record(&mut visitor);
-    let spans = ctx
-        .event_scope(event)
-        .map(|scope| {
-            scope
-                .from_root()
-                .map(|span| SpanContext {
-                    name: span.metadata().name(),
-                    fields: span
-                        .extensions()
-                        .get::<SpanFields>()
-                        .map(|fields| fields.fields.clone())
-                        .unwrap_or_default(),
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    LogRecord {
-        timestamp: SystemTime::now(),
-        level: *event.metadata().level(),
-        target: event.metadata().target(),
-        name: event.metadata().name(),
-        message: visitor.message,
-        fields: visitor.fields,
-        spans,
-    }
 }
 
 fn build_stdout_layer(

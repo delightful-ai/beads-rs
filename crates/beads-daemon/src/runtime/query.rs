@@ -16,5 +16,4 @@ mod tests {
         assert!(filters.priority.is_none());
         assert!(!filters.unclaimed);
     }
-
 }

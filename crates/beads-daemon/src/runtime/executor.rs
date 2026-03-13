@@ -784,13 +784,13 @@ mod tests {
     use tempfile::TempDir;
     use uuid::Uuid;
 
+    use crate::clock::Clock;
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadType, CanonicalState, Claim, ClientRequestId,
         DurabilityReceipt, EventId, Labels, Lww, NamespaceId, NoteAppendV1, NoteId, Priority, Seq1,
         Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnId,
         TxnOpV1, WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp,
     };
-    use crate::clock::Clock;
     use crate::remote::RemoteUrl;
     use crate::runtime::core::Daemon;
     use crate::runtime::core::{HandleOutcome, insert_store_for_tests};
