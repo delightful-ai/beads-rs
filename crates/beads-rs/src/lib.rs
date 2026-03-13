@@ -79,7 +79,7 @@ fn init_cli_tracing(verbose: u8, is_daemon: bool) -> telemetry::TelemetryGuard {
 pub fn run_daemon_command() -> Result<()> {
     let config = config::load_or_init();
     paths::init_from_config(&config.paths);
-    let _socket_dir = beads_daemon::runtime::ipc::ensure_socket_dir()?;
+    let _socket_dir = beads_surface::ipc::ensure_socket_dir()?;
 
     let actor = daemon_actor_from_config(&config)?;
     let layout = daemon_layout_from_paths();
@@ -90,7 +90,7 @@ pub fn run_daemon_command() -> Result<()> {
 pub(crate) fn daemon_layout_from_paths() -> beads_daemon::layout::DaemonLayout {
     beads_daemon::layout::DaemonLayout::new(
         paths::data_dir(),
-        beads_daemon::runtime::ipc::socket_path(),
+        beads_surface::ipc::socket_path(),
         paths::log_dir(),
     )
 }
