@@ -50,6 +50,9 @@ pub enum SyncError {
     #[error("failed to push: {0}")]
     Push(#[source] git2::Error),
 
+    #[error("I/O error: {0}")]
+    Io(#[source] std::io::Error),
+
     #[error("too many sync retries ({0})")]
     TooManyRetries(usize),
 
@@ -73,8 +76,27 @@ pub enum SyncError {
 }
 
 impl SyncError {
+    pub fn legacy_deps_runtime_hint(&self) -> Option<&'static str> {
+        match self {
+            SyncError::Wire(WireError::InvalidValue(msg))
+                if is_legacy_deps_missing_cc_message(msg) =>
+            {
+                Some("Run `bd migrate to 1`")
+            }
+            SyncError::Wire(WireError::Json(err))
+                if is_legacy_deps_missing_cc_message(&err.to_string()) =>
+            {
+                Some("Run `bd migrate to 1`")
+            }
+            _ => None,
+        }
+    }
+
     pub fn code(&self) -> ErrorCode {
         match self {
+            err if err.legacy_deps_runtime_hint().is_some() => {
+                CliErrorCode::ValidationFailed.into()
+            }
             SyncError::Wire(WireError::ChecksumMismatch { .. }) => {
                 ProtocolErrorCode::Corruption.into()
             }
@@ -88,6 +110,7 @@ impl SyncError {
             SyncError::Fetch(_)
             | SyncError::NonFastForward
             | SyncError::Push(_)
+            | SyncError::Io(_)
             | SyncError::PushRejected(_)
             | SyncError::TooManyRetries(_)
             | SyncError::InitFailed(_) => Transience::Retryable,
@@ -118,8 +141,8 @@ impl SyncError {
             | SyncError::TooManyRetries(_)
             | SyncError::InitFailed(_) => Effect::Some,
 
-            // Low-level git2 errors can happen at any phase.
-            SyncError::Git(_) => Effect::Unknown,
+            // Low-level/git-adjacent failures can happen before or after a local commit exists.
+            SyncError::Git(_) | SyncError::Io(_) => Effect::Unknown,
 
             // Everything else fails before committing.
             _ => Effect::None,
@@ -129,7 +152,12 @@ impl SyncError {
 
 impl IntoErrorPayload for SyncError {
     fn into_error_payload(self) -> ErrorPayload {
-        let message = self.to_string();
+        let hint = self.legacy_deps_runtime_hint();
+        let base_message = self.to_string();
+        let message = match hint {
+            Some(hint) => format!("{base_message}. {hint}"),
+            None => base_message.clone(),
+        };
         let retryable = self.transience().is_retryable();
         match self {
             SyncError::Wire(WireError::ChecksumMismatch {
@@ -142,21 +170,22 @@ impl IntoErrorPayload for SyncError {
                     expected_sha256: expected.to_hex(),
                     got_sha256: actual.to_hex(),
                 }),
+            _ if hint.is_some() => {
+                ErrorPayload::new(CliErrorCode::ValidationFailed.into(), message, retryable)
+                    .with_details(error_details::ValidationFailedDetails {
+                        field: "store".into(),
+                        reason: format!(
+                            "strict store load rejected legacy deps format: {base_message}"
+                        ),
+                    })
+            }
             _ => ErrorPayload::new(CliErrorCode::SyncFailed.into(), message, retryable),
         }
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn migration_warnings_report_no_side_effects() {
-        let err = SyncError::MigrationWarnings(vec!["warn".into()]);
-        assert_eq!(err.effect(), Effect::None);
-        assert!(!err.transience().is_retryable());
-    }
+fn is_legacy_deps_missing_cc_message(message: &str) -> bool {
+    message.contains("deps.jsonl") && message.contains("missing field `cc`")
 }
 
 /// Errors that can occur during wire format serialization/deserialization.
@@ -187,4 +216,72 @@ pub enum WireError {
 #[error("push rejected: {message}")]
 pub struct PushRejected {
     pub message: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::core::error::details;
+
+    #[test]
+    fn legacy_deps_runtime_hint_only_matches_strict_deps_missing_cc() {
+        let legacy = SyncError::Wire(WireError::InvalidValue(
+            "deps.jsonl: missing field `cc` at line 1 column 42".into(),
+        ));
+        let unrelated = SyncError::Wire(WireError::InvalidValue(
+            "deps.jsonl: invalid type: sequence, expected struct WireDepStoreV1 at line 1 column 1"
+                .into(),
+        ));
+        let other_file = SyncError::Wire(WireError::InvalidValue(
+            "state.jsonl: missing field `cc` at line 1 column 7".into(),
+        ));
+
+        assert_eq!(
+            legacy.legacy_deps_runtime_hint(),
+            Some("Run `bd migrate to 1`")
+        );
+        assert_eq!(unrelated.legacy_deps_runtime_hint(), None);
+        assert_eq!(other_file.legacy_deps_runtime_hint(), None);
+    }
+
+    #[test]
+    fn legacy_deps_runtime_hint_maps_payload_to_validation_failed() {
+        let payload = SyncError::Wire(WireError::InvalidValue(
+            "deps.jsonl: missing field `cc` at line 1 column 42".into(),
+        ))
+        .into_error_payload();
+
+        assert_eq!(payload.code, CliErrorCode::ValidationFailed.into());
+        assert!(
+            payload.message.contains("Run `bd migrate to 1`"),
+            "{}",
+            payload.message
+        );
+        let details = serde_json::from_value::<details::ValidationFailedDetails>(
+            payload.details.expect("details"),
+        )
+        .expect("validation details");
+        assert_eq!(details.field, "store");
+        assert!(
+            details
+                .reason
+                .contains("strict store load rejected legacy deps format"),
+            "{}",
+            details.reason
+        );
+    }
+
+    #[test]
+    fn migration_warnings_report_no_side_effects() {
+        let err = SyncError::MigrationWarnings(vec!["warning".into()]);
+
+        assert_eq!(err.effect(), Effect::None);
+    }
+
+    #[test]
+    fn io_errors_report_no_side_effects() {
+        let err = SyncError::Io(std::io::Error::other("preview tempdir failed"));
+
+        assert_eq!(err.effect(), Effect::Unknown);
+    }
 }

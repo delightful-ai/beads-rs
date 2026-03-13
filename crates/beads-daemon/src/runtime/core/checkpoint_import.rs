@@ -9,15 +9,34 @@ use super::{
 use crate::git::checkpoint::CheckpointImportError;
 use crate::runtime::checkpoint_scheduler::CheckpointGroupSnapshot;
 
+pub(super) struct LoadedCheckpointImports {
+    pub(super) imports: Vec<CheckpointImport>,
+    pub(super) incompatible_groups: Vec<CheckpointGroupSnapshot>,
+}
+
+enum CheckpointImportOutcome {
+    Imported(CheckpointImport),
+    Incompatible,
+    Absent,
+}
+
+enum CheckpointHashMismatch {
+    Policy,
+    Roster,
+}
+
 impl Daemon {
     pub(super) fn load_checkpoint_imports(
         &self,
         store_id: StoreId,
         repo: &Path,
-    ) -> Vec<CheckpointImport> {
+    ) -> LoadedCheckpointImports {
         let groups = self.checkpoint_group_snapshots(store_id);
         if groups.is_empty() {
-            return Vec::new();
+            return LoadedCheckpointImports {
+                imports: Vec::new(),
+                incompatible_groups: Vec::new(),
+            };
         }
 
         let local_policy_hash = self.local_policy_hash(store_id);
@@ -37,35 +56,65 @@ impl Daemon {
         };
 
         let mut imports = Vec::new();
+        let mut incompatible_groups = Vec::new();
         for group in groups {
-            if let Some(import) = self.import_checkpoint_from_cache(store_id, &group) {
-                if !self.checkpoint_hashes_compatible(
-                    store_id,
-                    &import,
-                    local_policy_hash,
-                    local_roster_hash,
-                ) {
-                    continue;
+            let mut incompatible = false;
+            let mut selected_import = None;
+
+            match self.import_checkpoint_from_cache(store_id, &group) {
+                CheckpointImportOutcome::Imported(import) => {
+                    if self
+                        .ensure_checkpoint_hashes_compatible(
+                            store_id,
+                            &import,
+                            local_policy_hash,
+                            local_roster_hash,
+                        )
+                        .is_ok()
+                    {
+                        selected_import = Some(import);
+                    }
                 }
-                imports.push(import);
-                continue;
+                CheckpointImportOutcome::Incompatible => incompatible = true,
+                CheckpointImportOutcome::Absent => {}
             }
-            if let Some(repo) = repo_handle.as_ref()
-                && let Some(import) = self.import_checkpoint_from_git(repo, &group)
-            {
-                if !self.checkpoint_hashes_compatible(
-                    store_id,
-                    &import,
-                    local_policy_hash,
-                    local_roster_hash,
-                ) {
-                    continue;
+
+            if let Some(repo) = repo_handle.as_ref() {
+                match self.import_checkpoint_from_git(repo, &group) {
+                    CheckpointImportOutcome::Imported(import) => {
+                        if selected_import.is_none()
+                            && self
+                                .ensure_checkpoint_hashes_compatible(
+                                    store_id,
+                                    &import,
+                                    local_policy_hash,
+                                    local_roster_hash,
+                                )
+                                .is_ok()
+                        {
+                            selected_import = Some(import);
+                        }
+                    }
+                    CheckpointImportOutcome::Incompatible => incompatible = true,
+                    CheckpointImportOutcome::Absent => {}
                 }
+            }
+
+            if let Some(import) = selected_import {
                 imports.push(import);
+            }
+            // Any legacy-incompatible source for the group should be rebuilt so
+            // future loads do not keep tripping over stale checkpoint artifacts,
+            // even if another source was usable for this load.
+            if incompatible {
+                incompatible_groups.push(group);
             }
         }
 
-        imports
+        LoadedCheckpointImports {
+            imports,
+            incompatible_groups,
+        }
     }
 
     fn local_policy_hash(&self, store_id: StoreId) -> Option<ContentHash> {
@@ -110,18 +159,16 @@ impl Daemon {
         }
     }
 
-    pub(super) fn checkpoint_hashes_compatible(
+    fn ensure_checkpoint_hashes_compatible(
         &self,
         store_id: StoreId,
         import: &CheckpointImport,
         local_policy_hash: Option<ContentHash>,
         local_roster_hash: Option<ContentHash>,
-    ) -> bool {
-        let mut compatible = true;
+    ) -> Result<(), CheckpointHashMismatch> {
         if let Some(local_policy_hash) = local_policy_hash
             && import.policy_hash != local_policy_hash
         {
-            compatible = false;
             let checkpoint_policy_hash = import.policy_hash.to_hex();
             let local_policy_hash = local_policy_hash.to_hex();
             tracing::warn!(
@@ -131,10 +178,10 @@ impl Daemon {
                 checkpoint_policy_hash = %checkpoint_policy_hash,
                 "checkpoint policy hash mismatch; skipping checkpoint import"
             );
+            return Err(CheckpointHashMismatch::Policy);
         }
 
         if import.roster_hash.is_some() && import.roster_hash != local_roster_hash {
-            compatible = false;
             let checkpoint_roster_hash = import.roster_hash.map(|hash| hash.to_hex());
             let local_roster_hash = local_roster_hash.map(|hash| hash.to_hex());
             tracing::warn!(
@@ -144,15 +191,16 @@ impl Daemon {
                 checkpoint_roster_hash = ?checkpoint_roster_hash,
                 "checkpoint roster hash mismatch; skipping checkpoint import"
             );
+            return Err(CheckpointHashMismatch::Roster);
         }
-        compatible
+        Ok(())
     }
 
     fn import_checkpoint_from_cache(
         &self,
         store_id: StoreId,
         group: &CheckpointGroupSnapshot,
-    ) -> Option<CheckpointImport> {
+    ) -> CheckpointImportOutcome {
         let cache = CheckpointCache::new(store_id, group.group.clone());
         match cache.load_current() {
             Ok(Some(entry)) => match import_checkpoint(&entry.dir, self.limits()) {
@@ -163,7 +211,7 @@ impl Daemon {
                         checkpoint_id = %entry.checkpoint_id,
                         "checkpoint cache import succeeded"
                     );
-                    Some(import)
+                    CheckpointImportOutcome::Imported(import)
                 }
                 Err(CheckpointImportError::IncompatibleDepsFormat { .. }) => {
                     tracing::warn!(
@@ -171,7 +219,7 @@ impl Daemon {
                         checkpoint_group = %group.group,
                         "checkpoint cache import incompatible deps format; ignoring and rebuilding from canonical store"
                     );
-                    None
+                    CheckpointImportOutcome::Incompatible
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -180,10 +228,10 @@ impl Daemon {
                         error = ?err,
                         "checkpoint cache import failed"
                     );
-                    None
+                    CheckpointImportOutcome::Absent
                 }
             },
-            Ok(None) => None,
+            Ok(None) => CheckpointImportOutcome::Absent,
             Err(err) => {
                 tracing::warn!(
                     store_id = %store_id,
@@ -191,7 +239,7 @@ impl Daemon {
                     error = ?err,
                     "checkpoint cache load failed"
                 );
-                None
+                CheckpointImportOutcome::Absent
             }
         }
     }
@@ -200,10 +248,10 @@ impl Daemon {
         &self,
         repo: &Repository,
         group: &CheckpointGroupSnapshot,
-    ) -> Option<CheckpointImport> {
+    ) -> CheckpointImportOutcome {
         let oid = match checkpoint_ref_oid(repo, &group.git_ref) {
             Ok(Some(oid)) => oid,
-            Ok(None) => return None,
+            Ok(None) => return CheckpointImportOutcome::Absent,
             Err(err) => {
                 tracing::warn!(
                     checkpoint_group = %group.group,
@@ -211,7 +259,7 @@ impl Daemon {
                     error = ?err,
                     "checkpoint ref lookup failed"
                 );
-                return None;
+                return CheckpointImportOutcome::Absent;
             }
         };
         let commit = match repo.find_commit(oid) {
@@ -223,7 +271,7 @@ impl Daemon {
                     error = ?err,
                     "checkpoint ref is not a commit"
                 );
-                return None;
+                return CheckpointImportOutcome::Absent;
             }
         };
 
@@ -236,7 +284,7 @@ impl Daemon {
                     error = ?err,
                     "checkpoint tree read failed"
                 );
-                return None;
+                return CheckpointImportOutcome::Absent;
             }
         };
 
@@ -249,7 +297,7 @@ impl Daemon {
                     error = ?err,
                     "checkpoint tempdir creation failed"
                 );
-                return None;
+                return CheckpointImportOutcome::Absent;
             }
         };
 
@@ -260,7 +308,7 @@ impl Daemon {
                 error = ?err,
                 "checkpoint tree export failed"
             );
-            return None;
+            return CheckpointImportOutcome::Absent;
         }
 
         match import_checkpoint(temp.path(), self.limits()) {
@@ -270,7 +318,7 @@ impl Daemon {
                     git_ref = %group.git_ref,
                     "checkpoint git import succeeded"
                 );
-                Some(import)
+                CheckpointImportOutcome::Imported(import)
             }
             Err(CheckpointImportError::IncompatibleDepsFormat { .. }) => {
                 tracing::warn!(
@@ -278,7 +326,7 @@ impl Daemon {
                     git_ref = %group.git_ref,
                     "checkpoint git import incompatible deps format; skipping legacy checkpoint"
                 );
-                None
+                CheckpointImportOutcome::Incompatible
             }
             Err(err) => {
                 tracing::warn!(
@@ -287,7 +335,7 @@ impl Daemon {
                     error = ?err,
                     "checkpoint git import failed"
                 );
-                None
+                CheckpointImportOutcome::Absent
             }
         }
     }

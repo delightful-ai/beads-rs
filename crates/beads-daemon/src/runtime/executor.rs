@@ -800,6 +800,7 @@ mod tests {
     };
     use tracing::Subscriber;
     use tracing::field::{Field, Visit};
+    use tracing_subscriber::filter::LevelFilter;
     use tracing_subscriber::layer::{Context, SubscriberExt};
     use tracing_subscriber::registry::LookupSpan;
     use tracing_subscriber::{Layer, Registry};
@@ -1014,12 +1015,6 @@ mod tests {
         ) {
             let mut visitor = FieldVisitor::default();
             attrs.record(&mut visitor);
-            if attrs.metadata().name() == "mutation" {
-                self.spans
-                    .lock()
-                    .expect("span capture")
-                    .push(visitor.fields.clone());
-            }
             if let Some(span) = ctx.span(id) {
                 span.extensions_mut().insert(SpanFields {
                     fields: visitor.fields,
@@ -1044,6 +1039,21 @@ mod tests {
                 fields.fields.extend(visitor.fields);
             }
         }
+
+        fn on_close(&self, id: tracing::Id, ctx: Context<'_, S>) {
+            let Some(span) = ctx.span(&id) else {
+                return;
+            };
+            if span.metadata().name() != "mutation" {
+                return;
+            }
+            let fields = span
+                .extensions()
+                .get::<SpanFields>()
+                .map(|fields| fields.fields.clone())
+                .unwrap_or_default();
+            self.spans.lock().expect("span capture").push(fields);
+        }
     }
 
     #[test]
@@ -1064,10 +1074,8 @@ mod tests {
         insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).unwrap();
 
         let spans = Arc::new(Mutex::new(Vec::new()));
-        let layer = CaptureLayer::new(spans.clone());
-        let subscriber = Registry::default()
-            .with(layer)
-            .with(tracing_subscriber::filter::LevelFilter::TRACE);
+        let layer = CaptureLayer::new(spans.clone()).with_filter(LevelFilter::TRACE);
+        let subscriber = Registry::default().with(layer);
 
         let (git_tx, _git_rx) = crossbeam::channel::unbounded();
         let request = Request::Create {
@@ -1106,12 +1114,7 @@ mod tests {
         }
 
         let captured = spans.lock().expect("span capture");
-        assert!(!captured.is_empty(), "expected mutation span fields");
-        let fields = captured
-            .iter()
-            .find(|fields| fields.contains_key(schema::STORE_ID))
-            .cloned()
-            .unwrap_or_default();
+        let fields = captured.last().cloned().unwrap_or_default();
 
         for key in [
             schema::STORE_ID,

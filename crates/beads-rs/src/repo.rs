@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use git2::Repository;
 
-use crate::Error;
+use crate::{Error, OpError};
 use beads_core::CanonicalState;
 use beads_git::SyncError;
 use beads_git::sync::{LoadedStore, read_state_at_oid};
@@ -97,7 +97,9 @@ pub fn load_state(repo: &Repository) -> Result<CanonicalState, Error> {
     let oid = repo
         .refname_to_id("refs/heads/beads/store")
         .map_err(|_| SyncError::NoLocalRef("refs/heads/beads/store".into()))?;
-    Ok(read_state_at_oid(repo, oid)?.state)
+    Ok(read_state_at_oid(repo, oid)
+        .map_err(map_strict_store_load_error)?
+        .state)
 }
 
 /// Load state and metadata from the beads store ref.
@@ -107,5 +109,15 @@ pub fn load_store(repo: &Repository) -> Result<LoadedStore, Error> {
     let oid = repo
         .refname_to_id("refs/heads/beads/store")
         .map_err(|_| SyncError::NoLocalRef("refs/heads/beads/store".into()))?;
-    Ok(read_state_at_oid(repo, oid)?)
+    read_state_at_oid(repo, oid).map_err(map_strict_store_load_error)
+}
+
+fn map_strict_store_load_error(err: SyncError) -> Error {
+    if let Some(hint) = err.legacy_deps_runtime_hint() {
+        return Error::Op(OpError::ValidationFailed {
+            field: "store".into(),
+            reason: format!("{}; {hint}", err),
+        });
+    }
+    err.into()
 }

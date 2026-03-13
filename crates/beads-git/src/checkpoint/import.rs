@@ -1509,6 +1509,42 @@ mod tests {
     }
 
     #[test]
+    fn import_classifies_legacy_alias_deps_shape_as_incompatible() {
+        let tmp = TempDir::new().unwrap();
+        let dir = tmp.path();
+
+        let (mut manifest, mut meta) = minimal_manifest_and_meta(dir);
+        let shard_path =
+            CheckpointShardPath::new(NamespaceId::core(), CheckpointFileKind::Deps, shard_name(0));
+        let shard_rel = shard_path.to_path();
+        let line = br#"{"issue_id":"bd-a","depends_on_id":"bd-b","type":"related"}
+"#;
+        write_file(&dir.join(&shard_rel), line);
+
+        manifest.files.insert(
+            shard_path,
+            ManifestFile {
+                sha256: ContentHash::from_bytes(sha256_bytes(line).0),
+                bytes: line.len() as u64,
+            },
+        );
+        meta.manifest_hash = manifest.manifest_hash().unwrap();
+        meta.content_hash = meta.compute_content_hash().unwrap();
+
+        write_file(&dir.join(META_FILE), meta.canon_bytes().unwrap().as_slice());
+        write_file(
+            &dir.join(MANIFEST_FILE),
+            manifest.canon_bytes().unwrap().as_slice(),
+        );
+
+        let err = import_checkpoint(dir, &Limits::default()).unwrap_err();
+        assert!(matches!(
+            err,
+            CheckpointImportError::IncompatibleDepsFormat { .. }
+        ));
+    }
+
+    #[test]
     fn merge_store_states_is_commutative() {
         let mut left = StoreState::new();
         let mut right = StoreState::new();

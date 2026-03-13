@@ -2,16 +2,22 @@
 //!
 //! Tests importing issues.jsonl from Go beads export format.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::time::Duration;
 
 use crate::fixtures::daemon_runtime::shutdown_daemon;
 use crate::fixtures::git::{init_bare_repo, init_repo, init_repo_with_origin};
-use crate::fixtures::migration_store::legacy_v0_1_26_minimal;
+use crate::fixtures::legacy_store::{fetch_remote_store_ref, fixture};
 use assert_cmd::Command;
-use beads_core::BeadId;
+use beads_core::{
+    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey, DepKind,
+    Lww, Priority, Stamp, Workflow, WriteStamp,
+};
+use beads_git::sync::migrate_store_ref_to_v1_with_before_push_for_testing;
 use beads_git::wire::{StoreChecksums, serialize_meta};
-use git2::{ObjectType, Repository, Signature};
+use git2::{ObjectType, Oid, Repository, Signature, Time};
 use predicates::prelude::*;
 use tempfile::TempDir;
 
@@ -71,10 +77,6 @@ impl TestRepo {
         self.work_dir.path()
     }
 
-    fn remote_path(&self) -> &std::path::Path {
-        self.remote_dir.path()
-    }
-
     fn bd(&self) -> Command {
         let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
         cmd.current_dir(self.path());
@@ -107,64 +109,103 @@ fn write_store_commit(
     include_notes: bool,
     include_meta: bool,
 ) {
-    write_store_commit_to_ref(
-        repo_path,
-        "refs/heads/beads/store",
-        deps_bytes,
-        include_notes,
-        include_meta,
-    );
-}
-
-fn write_store_commit_to_ref(
-    repo_path: &Path,
-    refname: &str,
-    deps_bytes: &[u8],
-    include_notes: bool,
-    include_meta: bool,
-) {
-    let state_bytes = b"".to_vec();
-    let tombs_bytes = b"".to_vec();
-    let notes_bytes = if include_notes {
-        b"".to_vec()
-    } else {
-        Vec::new()
-    };
+    let repo = Repository::open(repo_path).expect("open repo");
+    let state_bytes = b"";
+    let tombs_bytes = b"";
+    let notes_bytes = include_notes.then_some(b"" as &[u8]);
     let meta_bytes = if include_meta {
-        let checksums =
-            StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, deps_bytes, Some(&notes_bytes));
+        let checksums = StoreChecksums::from_bytes(state_bytes, tombs_bytes, deps_bytes, Some(b""));
         Some(serialize_meta(Some("bd"), None, &checksums).expect("meta bytes"))
     } else {
         None
     };
-    write_store_commit_fixture_to_ref(
-        repo_path,
-        refname,
-        &state_bytes,
-        &tombs_bytes,
+    write_store_commit_bytes(
+        &repo,
+        state_bytes,
+        tombs_bytes,
         deps_bytes,
-        if include_notes {
-            Some(notes_bytes.as_slice())
-        } else {
-            None
-        },
+        notes_bytes,
         meta_bytes.as_deref(),
     );
 }
 
-fn write_store_commit_fixture_to_ref(
-    repo_path: &Path,
-    refname: &str,
+fn write_strict_store_commit(repo_path: &Path) {
+    let repo = Repository::open(repo_path).expect("open repo");
+    let state = CanonicalState::new();
+    let state_bytes = beads_git::wire::serialize_state(&state).expect("state bytes");
+    let tombs_bytes = beads_git::wire::serialize_tombstones(&state).expect("tombstones bytes");
+    let deps_bytes = beads_git::wire::serialize_deps(&state).expect("deps bytes");
+    let notes_bytes = beads_git::wire::serialize_notes(&state).expect("notes bytes");
+    let checksums =
+        StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes, Some(&notes_bytes));
+    let meta_bytes = serialize_meta(Some("bd"), None, &checksums).expect("meta bytes");
+    write_store_commit_bytes(
+        &repo,
+        &state_bytes,
+        &tombs_bytes,
+        &deps_bytes,
+        Some(&notes_bytes),
+        Some(&meta_bytes),
+    );
+}
+
+fn make_stamp(wall_ms: u64, actor: &str) -> Stamp {
+    Stamp::new(
+        WriteStamp::new(wall_ms, 0),
+        ActorId::new(actor).expect("actor"),
+    )
+}
+
+fn make_bead(id: &str, stamp: &Stamp) -> Bead {
+    let core = BeadCore::new(BeadId::parse(id).expect("bead id"), stamp.clone(), None);
+    let fields = BeadFields {
+        title: Lww::new("test".to_string(), stamp.clone()),
+        description: Lww::new(String::new(), stamp.clone()),
+        design: Lww::new(None, stamp.clone()),
+        acceptance_criteria: Lww::new(None, stamp.clone()),
+        priority: Lww::new(Priority::new(2).expect("priority"), stamp.clone()),
+        bead_type: Lww::new(BeadType::Task, stamp.clone()),
+        external_ref: Lww::new(None, stamp.clone()),
+        source_repo: Lww::new(None, stamp.clone()),
+        estimated_minutes: Lww::new(None, stamp.clone()),
+        workflow: Lww::new(Workflow::Open, stamp.clone()),
+        claim: Lww::new(Claim::default(), stamp.clone()),
+    };
+    Bead::new(core, fields)
+}
+
+fn write_nonempty_strict_store_commit(repo_path: &Path) {
+    let repo = Repository::open(repo_path).expect("open repo");
+    let mut state = CanonicalState::new();
+    let stamp = make_stamp(1_765_500_000_000, "migration-test");
+    state.insert_live(make_bead("bd-nonempty", &stamp));
+    let state_bytes = beads_git::wire::serialize_state(&state).expect("state bytes");
+    let tombs_bytes = beads_git::wire::serialize_tombstones(&state).expect("tombstones bytes");
+    let deps_bytes = beads_git::wire::serialize_deps(&state).expect("deps bytes");
+    let notes_bytes = beads_git::wire::serialize_notes(&state).expect("notes bytes");
+    let checksums =
+        StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes, Some(&notes_bytes));
+    let meta_bytes = serialize_meta(Some("bd"), None, &checksums).expect("meta bytes");
+    write_store_commit_bytes(
+        &repo,
+        &state_bytes,
+        &tombs_bytes,
+        &deps_bytes,
+        Some(&notes_bytes),
+        Some(&meta_bytes),
+    );
+}
+
+fn write_store_commit_bytes(
+    repo: &Repository,
     state_bytes: &[u8],
     tombs_bytes: &[u8],
     deps_bytes: &[u8],
     notes_bytes: Option<&[u8]>,
     meta_bytes: Option<&[u8]>,
 ) {
-    let repo = Repository::open(repo_path).expect("open repo");
-
-    let state_oid = repo.blob(&state_bytes).expect("state blob");
-    let tombs_oid = repo.blob(&tombs_bytes).expect("tombs blob");
+    let state_oid = repo.blob(state_bytes).expect("state blob");
+    let tombs_oid = repo.blob(tombs_bytes).expect("tombs blob");
     let deps_oid = repo.blob(deps_bytes).expect("deps blob");
     let notes_oid = notes_bytes.map(|bytes| repo.blob(bytes).expect("notes blob"));
     let meta_oid = meta_bytes.map(|bytes| repo.blob(bytes).expect("meta blob"));
@@ -194,15 +235,504 @@ fn write_store_commit_fixture_to_ref(
     let tree = repo.find_tree(tree_oid).expect("find tree");
     let sig = Signature::now("test", "test@example.com").expect("signature");
     let parent = repo
-        .refname_to_id(refname)
+        .refname_to_id("refs/heads/beads/store")
         .ok()
         .and_then(|oid| repo.find_commit(oid).ok());
     let parent_refs: Vec<_> = parent.iter().collect();
     let commit_oid = repo
         .commit(None, &sig, &sig, "test store commit", &tree, &parent_refs)
         .expect("commit");
-    repo.reference(refname, commit_oid, true, "test update store ref")
-        .expect("update store ref");
+    repo.reference(
+        "refs/heads/beads/store",
+        commit_oid,
+        true,
+        "test update store ref",
+    )
+    .expect("update store ref");
+}
+
+fn read_store_state(repo_path: &Path) -> CanonicalState {
+    let repo = Repository::open(repo_path).expect("open repo");
+    let oid = repo
+        .refname_to_id("refs/heads/beads/store")
+        .expect("store ref");
+    beads_git::read_state_at_oid(&repo, oid)
+        .expect("strict store load")
+        .state
+}
+
+fn store_ref_oid(repo_path: &Path, refname: &str) -> Option<Oid> {
+    let repo = Repository::open(repo_path).expect("open repo");
+    repo.refname_to_id(refname).ok()
+}
+
+fn backup_ref_oid(repo_path: &Path, oid: Oid) -> Option<Oid> {
+    store_ref_oid(repo_path, &format!("refs/beads/backup/{oid}"))
+}
+
+fn backup_ref_targets(repo_path: &Path) -> BTreeSet<Oid> {
+    let repo = Repository::open(repo_path).expect("open repo");
+    let refs = repo
+        .references_glob("refs/beads/backup/*")
+        .expect("backup refs");
+    refs.filter_map(|reference| {
+        let reference = reference.expect("backup reference");
+        reference.target()
+    })
+    .collect()
+}
+
+fn create_detached_store_commit(repo_path: &Path, time_secs: i64, message: &str) -> Oid {
+    let repo = Repository::open(repo_path).expect("open repo");
+    let store_oid = repo
+        .refname_to_id("refs/heads/beads/store")
+        .expect("store ref for detached commit");
+    let tree = repo
+        .find_commit(store_oid)
+        .expect("store commit")
+        .tree()
+        .expect("store tree");
+    let sig =
+        Signature::new("test", "test@example.com", &Time::new(time_secs, 0)).expect("signature");
+    repo.commit(None, &sig, &sig, message, &tree, &[])
+        .expect("detached commit")
+}
+
+fn create_backup_ref(repo_path: &Path, oid: Oid) {
+    let repo = Repository::open(repo_path).expect("open repo");
+    repo.reference(
+        &format!("refs/beads/backup/{oid}"),
+        oid,
+        true,
+        "test seed backup ref",
+    )
+    .expect("seed backup ref");
+}
+
+fn store_first_parent_oid(repo_path: &Path, refname: &str) -> Option<Oid> {
+    let repo = Repository::open(repo_path).expect("open repo");
+    let oid = repo.refname_to_id(refname).ok()?;
+    let commit = repo.find_commit(oid).expect("store commit");
+    commit.parent_id(0).ok()
+}
+
+fn read_tree_blob(repo: &Repository, name: &str) -> Option<Vec<u8>> {
+    let oid = repo
+        .refname_to_id("refs/heads/beads/store")
+        .expect("store ref");
+    let commit = repo.find_commit(oid).expect("store commit");
+    let tree = commit.tree().expect("store tree");
+    let entry = tree.get_name(name)?;
+    let blob = repo
+        .find_object(entry.id(), Some(ObjectType::Blob))
+        .expect("blob object")
+        .peel_to_blob()
+        .expect("blob");
+    Some(blob.content().to_vec())
+}
+
+fn read_store_meta_json(repo_path: &Path) -> serde_json::Value {
+    let repo = Repository::open(repo_path).expect("open repo");
+    let meta_bytes = read_tree_blob(&repo, "meta.json").expect("meta.json");
+    serde_json::from_slice(&meta_bytes).expect("meta json")
+}
+
+fn rewrite_store_meta(repo_path: &Path, meta_bytes: Option<&[u8]>) {
+    let repo = Repository::open(repo_path).expect("open repo");
+    let state_bytes = read_tree_blob(&repo, "state.jsonl").expect("state.jsonl");
+    let tombs_bytes = read_tree_blob(&repo, "tombstones.jsonl").expect("tombstones.jsonl");
+    let deps_bytes = read_tree_blob(&repo, "deps.jsonl").expect("deps.jsonl");
+    let notes_bytes = read_tree_blob(&repo, "notes.jsonl");
+    write_store_commit_bytes(
+        &repo,
+        &state_bytes,
+        &tombs_bytes,
+        &deps_bytes,
+        notes_bytes.as_deref(),
+        meta_bytes,
+    );
+}
+
+fn note_ids_for(state: &CanonicalState, id: &BeadId) -> BTreeSet<String> {
+    state
+        .notes_for(id)
+        .iter()
+        .map(|note| note.id.as_str().to_owned())
+        .collect()
+}
+
+fn expected_note_ids(ids: &[&str]) -> BTreeSet<String> {
+    ids.iter().map(|id| (*id).to_owned()).collect()
+}
+
+fn assert_note_payload(
+    state: &CanonicalState,
+    bead: &BeadId,
+    note_id: &str,
+    content: &str,
+    author: &str,
+    wall_ms: u64,
+    counter: u32,
+) {
+    let note = state
+        .notes_for(bead)
+        .into_iter()
+        .find(|note| note.id.as_str() == note_id)
+        .unwrap_or_else(|| panic!("missing note {note_id} on {}", bead.as_str()));
+    assert_eq!(
+        note.content, content,
+        "note {note_id} content should be preserved"
+    );
+    assert_eq!(
+        note.author.as_str(),
+        author,
+        "note {note_id} author should be preserved"
+    );
+    assert_eq!(
+        note.at.wall_ms, wall_ms,
+        "note {note_id} wall_ms should be preserved"
+    );
+    assert_eq!(
+        note.at.counter, counter,
+        "note {note_id} counter should be preserved"
+    );
+}
+
+fn assert_meta_checksums_match_store(repo_path: &Path) {
+    let repo = Repository::open(repo_path).expect("open repo");
+    let state_bytes = read_tree_blob(&repo, "state.jsonl").expect("state.jsonl");
+    let tombs_bytes = read_tree_blob(&repo, "tombstones.jsonl").expect("tombstones.jsonl");
+    let deps_bytes = read_tree_blob(&repo, "deps.jsonl").expect("deps.jsonl");
+    let notes_bytes = read_tree_blob(&repo, "notes.jsonl").expect("notes.jsonl");
+    let checksums =
+        StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes, Some(&notes_bytes));
+    let meta_json = read_store_meta_json(repo_path);
+    let state_sha = checksums.state.to_string();
+    let tombs_sha = checksums.tombstones.to_string();
+    let deps_sha = checksums.deps.to_string();
+    let notes_sha = checksums.notes.expect("notes checksum").to_string();
+    assert_eq!(
+        meta_json
+            .get("state_sha256")
+            .and_then(|value| value.as_str()),
+        Some(state_sha.as_str()),
+        "meta.json should carry the recomputed state checksum"
+    );
+    assert_eq!(
+        meta_json
+            .get("tombstones_sha256")
+            .and_then(|value| value.as_str()),
+        Some(tombs_sha.as_str()),
+        "meta.json should carry the recomputed tombstones checksum"
+    );
+    assert_eq!(
+        meta_json
+            .get("deps_sha256")
+            .and_then(|value| value.as_str()),
+        Some(deps_sha.as_str()),
+        "meta.json should carry the recomputed deps checksum"
+    );
+    assert_eq!(
+        meta_json
+            .get("notes_sha256")
+            .and_then(|value| value.as_str()),
+        Some(notes_sha.as_str()),
+        "meta.json should carry the recomputed notes checksum"
+    );
+}
+
+fn run_bd_json(repo: &TestRepo, args: &[&str]) -> serde_json::Value {
+    let output = repo
+        .bd()
+        .args(args)
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    serde_json::from_slice(&output).expect("json")
+}
+
+fn assert_detect_outcome(
+    json: &serde_json::Value,
+    meta_format_version: Option<u64>,
+    deps_format: &str,
+    notes_present: bool,
+    checksums_present: bool,
+    effective_format_version: u64,
+    needs_migration: bool,
+    expected_reasons: &[&str],
+) {
+    assert_eq!(
+        json.get("meta_format_version")
+            .and_then(|value| value.as_u64()),
+        meta_format_version,
+        "unexpected meta_format_version: {json}"
+    );
+    assert_eq!(
+        json.get("deps_format").and_then(|value| value.as_str()),
+        Some(deps_format),
+        "unexpected deps_format: {json}"
+    );
+    assert_eq!(
+        json.get("notes_present").and_then(|value| value.as_bool()),
+        Some(notes_present),
+        "unexpected notes_present: {json}"
+    );
+    assert_eq!(
+        json.get("checksums_present")
+            .and_then(|value| value.as_bool()),
+        Some(checksums_present),
+        "unexpected checksums_present: {json}"
+    );
+    assert_eq!(
+        json.get("effective_format_version")
+            .and_then(|value| value.as_u64()),
+        Some(effective_format_version),
+        "unexpected effective_format_version: {json}"
+    );
+    assert_eq!(
+        json.get("needs_migration")
+            .and_then(|value| value.as_bool()),
+        Some(needs_migration),
+        "unexpected needs_migration: {json}"
+    );
+
+    let mut actual_reasons: Vec<String> = json
+        .get("reasons")
+        .and_then(|value| value.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|value| value.as_str().map(ToOwned::to_owned))
+        .collect();
+    actual_reasons.sort();
+
+    let mut expected_reasons: Vec<String> = expected_reasons
+        .iter()
+        .map(|reason| (*reason).to_owned())
+        .collect();
+    expected_reasons.sort();
+    assert_eq!(
+        actual_reasons, expected_reasons,
+        "unexpected migration reasons: {json}"
+    );
+}
+
+fn bead_id(raw: &str) -> BeadId {
+    BeadId::parse(raw).expect("valid bead id")
+}
+
+fn dep_key(from: &str, to: &str, kind: DepKind) -> DepKey {
+    DepKey::new(bead_id(from), bead_id(to), kind).expect("valid dep key")
+}
+
+fn push_store_ref(repo_path: &Path) {
+    let repo = Repository::open(repo_path).expect("open repo");
+    let mut remote = repo.find_remote("origin").expect("origin remote");
+    remote
+        .push(&["refs/heads/beads/store:refs/heads/beads/store"], None)
+        .expect("push store ref");
+}
+
+fn assert_rich_workflow_state(
+    state: &CanonicalState,
+    expect_related_dep: bool,
+    expect_peer_bead: bool,
+    expected_claimed_notes: &[&str],
+) {
+    let claimed_id = bead_id("bd-rich-claimed");
+    let claimed = state
+        .bead_view(&claimed_id)
+        .expect("claimed bead should exist after migration");
+    assert!(
+        matches!(claimed.bead.fields.claim.value, Claim::Claimed { .. }),
+        "claimed bead should remain claimed"
+    );
+    assert_eq!(
+        note_ids_for(state, &claimed_id),
+        expected_note_ids(expected_claimed_notes),
+        "claimed bead should preserve the exact embedded note ids through migration"
+    );
+    assert_note_payload(
+        state,
+        &claimed_id,
+        "note-rich-claimed-a",
+        "First embedded note",
+        "darin@dusk",
+        1_765_400_000_100,
+        0,
+    );
+    if expected_claimed_notes.contains(&"note-rich-claimed-b") {
+        assert_note_payload(
+            state,
+            &claimed_id,
+            "note-rich-claimed-b",
+            "Second embedded note",
+            "alice",
+            1_765_400_000_200,
+            0,
+        );
+    }
+    if expected_claimed_notes.contains(&"note-rich-claimed-c") {
+        assert_note_payload(
+            state,
+            &claimed_id,
+            "note-rich-claimed-c",
+            "Peer-side note for divergence coverage",
+            "alice",
+            1_765_400_000_250,
+            0,
+        );
+    }
+    assert!(
+        state
+            .dep_store()
+            .contains(&dep_key("bd-rich-claimed", "bd-rich-open", DepKind::Blocks)),
+        "primary blocks dependency should survive migration"
+    );
+    assert_eq!(
+        state
+            .dep_store()
+            .dots_for(&dep_key("bd-rich-claimed", "bd-rich-open", DepKind::Blocks))
+            .map(|dots| dots.len()),
+        Some(1),
+        "shared local/remote legacy edge should converge to one deterministic dot"
+    );
+
+    let closed = state
+        .bead_view(&bead_id("bd-rich-closed"))
+        .expect("closed bead should exist after migration");
+    assert!(
+        matches!(closed.bead.fields.workflow.value, Workflow::Closed(_)),
+        "closed bead should remain closed"
+    );
+    assert_eq!(
+        note_ids_for(state, &bead_id("bd-rich-closed")),
+        expected_note_ids(&["note-rich-closed-a"]),
+        "closed bead should preserve its note identity"
+    );
+    assert_note_payload(
+        state,
+        &bead_id("bd-rich-closed"),
+        "note-rich-closed-a",
+        "Closed with legacy redundant fields omitted",
+        "darin@dusk",
+        1_765_400_001_300,
+        0,
+    );
+
+    let open = state
+        .bead_view(&bead_id("bd-rich-open"))
+        .expect("open bead should exist after migration");
+    assert!(
+        open.labels.contains("migration"),
+        "legacy labels should survive migration"
+    );
+    assert!(
+        open.labels.contains("frontend"),
+        "legacy labels array should survive migration"
+    );
+    assert_eq!(
+        note_ids_for(state, &bead_id("bd-rich-open")),
+        expected_note_ids(&["note-rich-open-a"]),
+        "open bead should preserve its note identity"
+    );
+    assert_note_payload(
+        state,
+        &bead_id("bd-rich-open"),
+        "note-rich-open-a",
+        "Open note from legacy state",
+        "codex@book",
+        1_765_400_002_100,
+        0,
+    );
+    if expect_related_dep {
+        assert!(
+            state.dep_store().contains(&dep_key(
+                "bd-rich-open",
+                "bd-rich-closed",
+                DepKind::Related
+            )),
+            "alias-shaped related dependency should survive migration"
+        );
+        assert_eq!(
+            state
+                .dep_store()
+                .dots_for(&dep_key("bd-rich-open", "bd-rich-closed", DepKind::Related))
+                .map(|dots| dots.len()),
+            Some(1),
+            "alias-shaped related dependency should migrate to a single deterministic dot"
+        );
+    }
+
+    if expect_peer_bead {
+        assert!(
+            state.bead_view(&bead_id("bd-rich-review")).is_some(),
+            "peer-only bead should be present after divergence merge"
+        );
+        assert!(
+            claimed.labels.contains("peer"),
+            "peer-side label should survive divergence merge"
+        );
+        assert!(
+            open.labels.contains("api"),
+            "peer-side legacy label should survive divergence merge"
+        );
+        assert!(
+            state
+                .dep_store()
+                .contains(&dep_key("bd-rich-review", "bd-rich-open", DepKind::Blocks)),
+            "peer-only dependency should survive divergence merge"
+        );
+        assert_eq!(
+            state
+                .dep_store()
+                .dots_for(&dep_key("bd-rich-review", "bd-rich-open", DepKind::Blocks))
+                .map(|dots| dots.len()),
+            Some(1),
+            "peer-only dependency should migrate to a single deterministic dot"
+        );
+    }
+}
+
+fn assert_tombstone_deleted_dep_state(state: &CanonicalState) {
+    let live_id = bead_id("bd-tomb-live");
+    assert!(
+        state.bead_view(&live_id).is_some(),
+        "live bead should survive migration"
+    );
+    assert_eq!(
+        note_ids_for(state, &live_id),
+        expected_note_ids(&["note-tomb-live-a"]),
+        "tombstone fixture should preserve the embedded note id through notes backfill"
+    );
+    assert_note_payload(
+        state,
+        &live_id,
+        "note-tomb-live-a",
+        "Fixture note for deleted dep coverage",
+        "darin@dusk",
+        1_765_400_011_100,
+        0,
+    );
+    assert!(
+        state
+            .iter_tombstones()
+            .any(|(_, tomb)| tomb.id == bead_id("bd-tomb-gone")),
+        "tombstone should survive migration"
+    );
+    assert!(
+        state
+            .dep_store()
+            .contains(&dep_key("bd-tomb-live", "bd-tomb-target", DepKind::Blocks)),
+        "active legacy dep should survive migration"
+    );
+    assert!(
+        !state
+            .dep_store()
+            .contains(&dep_key("bd-tomb-live", "bd-tomb-gone", DepKind::Related)),
+        "deleted legacy dep should remain absent after migration"
+    );
 }
 
 /// Sample Go beads JSONL export using a repo-name slug (beads-go default).
@@ -278,6 +808,7 @@ fn test_migrate_dry_run() {
 fn test_migrate_detect_returns_structural_payload() {
     let repo = TestRepo::new();
 
+    // Canonical strict deps payload (single object) with checksums + notes.
     write_store_commit(
         repo.path(),
         br#"{"cc":{"max":{},"dots":[]},"entries":[]}
@@ -286,128 +817,8 @@ fn test_migrate_detect_returns_structural_payload() {
         true,
     );
 
-    let output = repo
-        .bd()
-        .args(["migrate", "detect"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&output).expect("json");
-
-    assert!(
-        json.get("deps_format").is_some(),
-        "missing deps_format: {json}"
-    );
-    assert!(
-        json.get("effective_format_version").is_some(),
-        "missing effective_format_version: {json}"
-    );
-    assert!(json.get("reasons").is_some(), "missing reasons: {json}");
-}
-
-#[test]
-fn test_migrate_detect_flags_legacy_deps_even_with_meta_v1() {
-    let repo = TestRepo::new();
-    write_store_commit(
-        repo.path(),
-        br#"{"from":"bd-abc1","to":"bd-abc2","kind":"blocks"}
-"#,
-        true,
-        true,
-    );
-
-    let output = repo
-        .bd()
-        .args(["migrate", "detect"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&output).expect("json");
-    assert_eq!(
-        json.get("deps_format").and_then(|v| v.as_str()),
-        Some("legacy_edges"),
-        "expected legacy deps classification, got: {json}"
-    );
-    assert_eq!(
-        json.get("needs_migration").and_then(|v| v.as_bool()),
-        Some(true),
-        "expected needs_migration=true, got: {json}"
-    );
-}
-
-#[test]
-fn test_migrate_detect_uses_remote_tracking_ref_when_local_missing() {
-    let repo = TestRepo::new_local_only();
-    write_store_commit_to_ref(
-        repo.path(),
-        "refs/remotes/origin/beads/store",
-        br#"{"cc":{"max":{},"dots":[]},"entries":[]}
-"#,
-        true,
-        true,
-    );
-
-    let output = repo
-        .bd()
-        .args(["migrate", "detect"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&output).expect("json");
-
-    assert_eq!(
-        json.get("effective_format_version")
-            .and_then(|v| v.as_u64()),
-        Some(1),
-        "remote canonical ref should be treated as migration-ready: {json}"
-    );
-    assert_eq!(
-        json.get("needs_migration").and_then(|v| v.as_bool()),
-        Some(false),
-        "remote canonical ref should not need migration: {json}"
-    );
-}
-
-#[test]
-fn test_migrate_detect_fetches_remote_tracking_before_probing() {
-    let repo = TestRepo::new();
-    write_store_commit_to_ref(
-        repo.remote_path(),
-        "refs/heads/beads/store",
-        br#"{"cc":{"max":{},"dots":[]},"entries":[]}
-"#,
-        true,
-        true,
-    );
-
-    let output = repo
-        .bd()
-        .args(["migrate", "detect"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&output).expect("json");
-
-    assert_eq!(
-        json.get("effective_format_version")
-            .and_then(|value| value.as_u64()),
-        Some(1),
-        "detect should fetch origin beads/store before probing: {json}"
-    );
-    assert_eq!(
-        json.get("needs_migration")
-            .and_then(|value| value.as_bool()),
-        Some(false),
-        "freshly fetched remote canonical ref should be migration-ready: {json}"
-    );
+    let json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
+    assert_detect_outcome(&json, Some(1), "orset_v1", true, true, 1, false, &[]);
 }
 
 #[test]
@@ -421,27 +832,39 @@ fn test_migrate_to_1_dry_run_is_implemented() {
         true,
     );
 
-    repo.bd()
-        .args(["migrate", "to", "1", "--dry-run"])
+    let output = repo
+        .bd()
+        .args(["migrate", "to", "1", "--dry-run", "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"dry_run\": true"));
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("json");
+    assert_eq!(
+        json.get("dry_run").and_then(|value| value.as_bool()),
+        Some(true)
+    );
+    assert_eq!(
+        json.get("push").and_then(|value| value.as_str()),
+        Some("skipped_no_push"),
+        "dry-run migration should report push skipped: {json}"
+    );
 }
 
 #[test]
 fn test_migrate_to_1_noop_when_already_canonical() {
     let repo = TestRepo::new();
-    write_store_commit(
-        repo.path(),
-        br#"{"cc":{"max":{},"dots":[]},"entries":[]}
-"#,
-        true,
-        true,
+    write_strict_store_commit(repo.path());
+    assert_eq!(
+        store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store"),
+        None,
+        "test setup should start without a remote store ref"
     );
 
     let output = repo
         .bd()
-        .args(["migrate", "to", "1"])
+        .args(["migrate", "to", "1", "--json"])
         .assert()
         .success()
         .get_output()
@@ -458,6 +881,28 @@ fn test_migrate_to_1_noop_when_already_canonical() {
         Some(false),
         "expected converted_deps=false for no-op migration: {json}"
     );
+    assert_eq!(
+        json.get("added_notes_file")
+            .and_then(|value| value.as_bool()),
+        Some(false),
+        "expected added_notes_file=false for no-op migration: {json}"
+    );
+    assert_eq!(
+        json.get("wrote_checksums")
+            .and_then(|value| value.as_bool()),
+        Some(false),
+        "expected wrote_checksums=false for no-op migration: {json}"
+    );
+    assert_eq!(
+        json.get("push").and_then(|value| value.as_str()),
+        Some("pushed"),
+        "canonical local store with origin should publish the missing remote store ref: {json}"
+    );
+    assert_eq!(
+        store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store"),
+        store_ref_oid(repo.path(), "refs/heads/beads/store"),
+        "no-op publish should create the remote store ref without rewriting local history"
+    );
 }
 
 #[test]
@@ -470,14 +915,17 @@ fn test_migrate_to_1_rewrites_legacy_deps_and_store_invariants() {
         false,
         false,
     );
-    let git = Repository::open(repo.path()).expect("open repo");
-    let old_oid = git
-        .refname_to_id("refs/heads/beads/store")
-        .expect("pre-migration store ref");
+    let local_before = store_ref_oid(repo.path(), "refs/heads/beads/store")
+        .expect("local store ref before migration");
+    assert_eq!(
+        store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store"),
+        None,
+        "test setup should start without a remote store ref"
+    );
 
     let output = repo
         .bd()
-        .args(["migrate", "to", "1", "--no-push"])
+        .args(["migrate", "to", "1", "--no-push", "--json"])
         .assert()
         .success()
         .get_output()
@@ -510,11 +958,20 @@ fn test_migrate_to_1_rewrites_legacy_deps_and_store_invariants() {
         .refname_to_id("refs/heads/beads/store")
         .expect("store ref");
     assert_eq!(head_oid.to_string(), commit_oid);
-    let backup_ref = format!("refs/beads/backup/{old_oid}");
     assert_eq!(
-        git.refname_to_id(&backup_ref).expect("backup ref"),
-        old_oid,
-        "migration should preserve a rollback ref"
+        json.get("push").and_then(|value| value.as_str()),
+        Some("skipped_no_push"),
+        "--no-push migration must report skipped push disposition: {json}"
+    );
+    assert_eq!(
+        backup_ref_oid(repo.path(), local_before),
+        Some(local_before),
+        "case-2 local rewrite must create a backup ref for the previous local store head"
+    );
+    assert_eq!(
+        store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store"),
+        None,
+        "--no-push local rewrite must not create a remote store ref when origin has none"
     );
 
     let commit = git.find_commit(head_oid).expect("find commit");
@@ -534,103 +991,7 @@ fn test_migrate_to_1_rewrites_legacy_deps_and_store_invariants() {
 }
 
 #[test]
-fn test_migrate_to_1_upgrades_exact_v0_1_26_store_without_data_loss() {
-    let repo = TestRepo::new_local_only();
-    let fixture = legacy_v0_1_26_minimal();
-    write_store_commit_fixture_to_ref(
-        repo.path(),
-        "refs/heads/beads/store",
-        &fixture.state,
-        &fixture.tombstones,
-        &fixture.deps,
-        fixture.notes.as_deref(),
-        fixture.meta.as_deref(),
-    );
-
-    let detect = repo
-        .bd()
-        .args(["migrate", "detect"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let detect_json: serde_json::Value = serde_json::from_slice(&detect).expect("json");
-    assert_eq!(
-        detect_json
-            .get("deps_format")
-            .and_then(|value| value.as_str()),
-        Some("legacy_edges"),
-        "exact v0.1.26 deps should classify as legacy edges: {detect_json}"
-    );
-    assert_eq!(
-        detect_json
-            .get("notes_present")
-            .and_then(|value| value.as_bool()),
-        Some(false),
-        "exact v0.1.26 store should start without notes.jsonl: {detect_json}"
-    );
-    assert_eq!(
-        detect_json
-            .get("checksums_present")
-            .and_then(|value| value.as_bool()),
-        Some(false),
-        "exact v0.1.26 store should start without checksums: {detect_json}"
-    );
-
-    let output = repo
-        .bd()
-        .args(["migrate", "to", "1", "--no-push"])
-        .assert()
-        .success()
-        .get_output()
-        .stdout
-        .clone();
-    let json: serde_json::Value = serde_json::from_slice(&output).expect("json");
-    assert_eq!(
-        json.get("converted_deps").and_then(|value| value.as_bool()),
-        Some(true),
-        "expected exact v0.1.26 deps conversion: {json}"
-    );
-    assert_eq!(
-        json.get("added_notes_file")
-            .and_then(|value| value.as_bool()),
-        Some(true),
-        "expected notes.jsonl backfill for exact v0.1.26 store: {json}"
-    );
-    assert_eq!(
-        json.get("wrote_checksums")
-            .and_then(|value| value.as_bool()),
-        Some(true),
-        "expected checksum write for exact v0.1.26 store: {json}"
-    );
-
-    let git = Repository::open(repo.path()).expect("open repo");
-    let head_oid = git
-        .refname_to_id("refs/heads/beads/store")
-        .expect("migrated store ref");
-    let loaded = beads_git::read_state_at_oid(&git, head_oid).expect("strict store load");
-    let bead_id = BeadId::parse("bd-abc1").expect("bead id");
-    let notes = loaded.state.notes_for(&bead_id);
-    assert_eq!(
-        notes.len(),
-        1,
-        "legacy embedded note should survive migration"
-    );
-    assert_eq!(notes[0].content, "preserve this note");
-    assert!(
-        loaded.state.labels_for(&bead_id).contains("legacy"),
-        "legacy labels array should survive migration"
-    );
-    assert_eq!(
-        loaded.state.dep_count(),
-        1,
-        "legacy dep should survive migration"
-    );
-}
-
-#[test]
-fn test_migrate_to_1_reports_pushed_false_without_origin() {
+fn test_migrate_to_1_reports_skipped_no_remote_without_origin() {
     let repo = TestRepo::new_local_only();
     write_store_commit(
         repo.path(),
@@ -642,7 +1003,7 @@ fn test_migrate_to_1_reports_pushed_false_without_origin() {
 
     let output = repo
         .bd()
-        .args(["migrate", "to", "1"])
+        .args(["migrate", "to", "1", "--json"])
         .assert()
         .success()
         .get_output()
@@ -656,46 +1017,1533 @@ fn test_migrate_to_1_reports_pushed_false_without_origin() {
         "migration should write a local commit: {json}"
     );
     assert_eq!(
-        json.get("pushed").and_then(|value| value.as_bool()),
-        Some(false),
-        "migration without origin must report pushed=false: {json}"
+        json.get("push").and_then(|value| value.as_str()),
+        Some("skipped_no_remote"),
+        "migration without origin must report skipped_no_remote: {json}"
     );
 }
 
 #[test]
-fn test_migrate_to_1_no_push_skips_fetch_when_origin_is_unreachable() {
+fn test_migrate_to_1_noop_without_origin_reports_skipped_no_remote() {
+    let repo = TestRepo::new_local_only();
+    write_strict_store_commit(repo.path());
+    let before_oid = store_ref_oid(repo.path(), "refs/heads/beads/store");
+
+    let json = run_bd_json(&repo, &["migrate", "to", "1", "--json"]);
+    assert_eq!(
+        json.get("commit_oid"),
+        Some(&serde_json::Value::Null),
+        "canonical store without origin should remain a no-op: {json}"
+    );
+    assert_eq!(
+        json.get("push").and_then(|value| value.as_str()),
+        Some("skipped_no_remote"),
+        "no-origin no-op must not look like a converged pushed repo: {json}"
+    );
+    assert_eq!(
+        store_ref_oid(repo.path(), "refs/heads/beads/store"),
+        before_oid,
+        "no-origin no-op should leave the local store ref unchanged"
+    );
+}
+
+#[test]
+fn test_migrate_to_1_nonempty_canonical_without_last_write_stamp_is_noop() {
+    let repo = TestRepo::new_local_only();
+    write_nonempty_strict_store_commit(repo.path());
+    let before_oid = store_ref_oid(repo.path(), "refs/heads/beads/store");
+    let before_meta = read_store_meta_json(repo.path());
+    assert!(
+        before_meta.get("last_write_stamp").is_none(),
+        "test setup should start without a last_write_stamp"
+    );
+
+    let detect_json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
+    assert_detect_outcome(&detect_json, Some(1), "orset_v1", true, true, 1, false, &[]);
+
+    let json = run_bd_json(&repo, &["migrate", "to", "1", "--json"]);
+    assert_eq!(
+        json.get("commit_oid"),
+        Some(&serde_json::Value::Null),
+        "non-empty canonical store without last_write_stamp should remain a no-op: {json}"
+    );
+    assert_eq!(
+        json.get("push").and_then(|value| value.as_str()),
+        Some("skipped_no_remote"),
+        "no-origin canonical no-op should still report skipped_no_remote: {json}"
+    );
+    assert_eq!(
+        store_ref_oid(repo.path(), "refs/heads/beads/store"),
+        before_oid,
+        "no-op migration should leave the local store ref unchanged"
+    );
+    let after_meta = read_store_meta_json(repo.path());
+    assert!(
+        after_meta.get("last_write_stamp").is_none(),
+        "migration should preserve an absent last_write_stamp"
+    );
+}
+
+#[test]
+fn test_migrate_equal_local_and_remote_legacy_rewrites_once_and_creates_backup_ref() {
     let repo = TestRepo::new();
+    let base_oid = fixture("rich_workflow").install(repo.path());
+    push_store_ref(repo.path());
+    assert_eq!(
+        store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store"),
+        Some(base_oid),
+        "test setup should start from equal local and remote store refs"
+    );
+    let remote_before = store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store");
+
+    let json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    assert!(
+        json.get("commit_oid")
+            .and_then(|value| value.as_str())
+            .is_some(),
+        "equal local/remote legacy migration should write a local rewrite commit: {json}"
+    );
+    assert_eq!(
+        json.get("push").and_then(|value| value.as_str()),
+        Some("skipped_no_push"),
+        "equal local/remote migration should honor --no-push: {json}"
+    );
+    assert_eq!(
+        store_first_parent_oid(repo.path(), "refs/heads/beads/store"),
+        Some(base_oid),
+        "equal local/remote migration must parent the rewrite on the remote head"
+    );
+    assert_eq!(
+        store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store"),
+        remote_before,
+        "--no-push equal-history migration must not mutate origin"
+    );
+    assert_eq!(
+        backup_ref_oid(repo.path(), base_oid),
+        Some(base_oid),
+        "equal-history rewrite must create a backup ref for the previous local store head"
+    );
+
+    let state = read_store_state(repo.path());
+    assert_rich_workflow_state(
+        &state,
+        true,
+        false,
+        &["note-rich-claimed-a", "note-rich-claimed-b"],
+    );
+    assert_meta_checksums_match_store(repo.path());
+}
+
+#[test]
+fn test_migrate_local_rewrite_prunes_backup_refs_to_cap_and_keeps_current_target() {
+    let repo = TestRepo::new_local_only();
+    let base_oid = fixture("rich_workflow").install(repo.path());
+    let mut seeded_backups = Vec::new();
+    for idx in 0..64 {
+        let oid = create_detached_store_commit(
+            repo.path(),
+            1_700_000_000 + idx as i64,
+            &format!("backup-seed-{idx}"),
+        );
+        create_backup_ref(repo.path(), oid);
+        seeded_backups.push(oid);
+    }
+    assert_eq!(
+        backup_ref_targets(repo.path()).len(),
+        64,
+        "test setup should start at the backup ref cap"
+    );
+    let oldest_seed = seeded_backups[0];
+
+    let json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    assert!(
+        json.get("commit_oid")
+            .and_then(|value| value.as_str())
+            .is_some(),
+        "legacy rewrite should still commit under backup pressure: {json}"
+    );
+    assert_eq!(
+        json.get("push").and_then(|value| value.as_str()),
+        Some("skipped_no_push"),
+        "backup-pruning coverage should stay in the local rewrite path: {json}"
+    );
+
+    let backup_targets = backup_ref_targets(repo.path());
+    assert_eq!(
+        backup_targets.len(),
+        64,
+        "migration rewrite should prune backup refs back to the configured cap"
+    );
+    assert!(
+        backup_targets.contains(&base_oid),
+        "migration rewrite must preserve the protected backup ref for the previous local store head"
+    );
+    assert!(
+        !backup_targets.contains(&oldest_seed),
+        "migration rewrite should prune the oldest backup when backup pressure exceeds the cap"
+    );
+    assert_meta_checksums_match_store(repo.path());
+}
+
+#[test]
+fn test_migrate_local_rewrite_prunes_when_the_protected_backup_ref_already_exists() {
+    let repo = TestRepo::new_local_only();
+    let base_oid = fixture("rich_workflow").install(repo.path());
+    create_backup_ref(repo.path(), base_oid);
+    let mut seeded_backups = Vec::new();
+    for idx in 0..64 {
+        let oid = create_detached_store_commit(
+            repo.path(),
+            1_700_001_000 + idx as i64,
+            &format!("existing-protected-backup-seed-{idx}"),
+        );
+        create_backup_ref(repo.path(), oid);
+        seeded_backups.push(oid);
+    }
+    assert_eq!(
+        backup_ref_targets(repo.path()).len(),
+        65,
+        "test setup should start over the backup ref cap with the protected ref already present"
+    );
+    let oldest_seed = seeded_backups[0];
+
+    let json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    assert!(
+        json.get("commit_oid")
+            .and_then(|value| value.as_str())
+            .is_some(),
+        "legacy rewrite should still commit when the protected backup ref already exists: {json}"
+    );
+
+    let backup_targets = backup_ref_targets(repo.path());
+    assert_eq!(
+        backup_targets.len(),
+        64,
+        "migration rewrite should prune backup refs back to the configured cap even when the protected ref already existed"
+    );
+    assert!(
+        backup_targets.contains(&base_oid),
+        "migration rewrite must preserve the preexisting protected backup ref for the previous local store head"
+    );
+    assert!(
+        !backup_targets.contains(&oldest_seed),
+        "migration rewrite should still prune the oldest backup when the protected ref already existed"
+    );
+    assert_meta_checksums_match_store(repo.path());
+}
+
+#[test]
+fn test_migrate_detect_flags_legacy_deps_even_with_meta_v1() {
+    let repo = TestRepo::new();
+    // Legacy line-per-edge deps content plus v1 meta/checksums.
+    write_store_commit(
+        repo.path(),
+        br#"{"from":"bd-abc1","to":"bd-abc2","kind":"blocks"}
+"#,
+        true,
+        true,
+    );
+
+    let json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
+    assert_detect_outcome(
+        &json,
+        Some(1),
+        "legacy_edges",
+        true,
+        true,
+        0,
+        true,
+        &["deps.jsonl is legacy line-per-edge (missing cc)"],
+    );
+}
+
+#[test]
+fn test_migrate_detect_flags_missing_notes_and_checksums() {
+    let repo = TestRepo::new_local_only();
+    write_store_commit(
+        repo.path(),
+        br#"{"cc":{"max":{},"dots":[]},"entries":[]}
+"#,
+        false,
+        false,
+    );
+
+    let json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
+    assert_detect_outcome(
+        &json,
+        None,
+        "orset_v1",
+        false,
+        false,
+        0,
+        true,
+        &["meta checksums missing", "notes.jsonl missing"],
+    );
+}
+
+#[test]
+fn test_migrate_detect_flags_missing_notes_checksum_in_v1_meta() {
+    let repo = TestRepo::new_local_only();
+    write_strict_store_commit(repo.path());
+
+    let state_bytes = read_tree_blob(
+        &Repository::open(repo.path()).expect("open repo"),
+        "state.jsonl",
+    )
+    .expect("state.jsonl");
+    let tombs_bytes = read_tree_blob(
+        &Repository::open(repo.path()).expect("open repo"),
+        "tombstones.jsonl",
+    )
+    .expect("tombstones.jsonl");
+    let deps_bytes = read_tree_blob(
+        &Repository::open(repo.path()).expect("open repo"),
+        "deps.jsonl",
+    )
+    .expect("deps.jsonl");
+    let notes_bytes = read_tree_blob(
+        &Repository::open(repo.path()).expect("open repo"),
+        "notes.jsonl",
+    )
+    .expect("notes.jsonl");
+    let checksums =
+        StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes, Some(&notes_bytes));
+    let meta_bytes = serde_json::to_vec(&serde_json::json!({
+        "format_version": 1,
+        "root_slug": "bd",
+        "state_sha256": checksums.state.to_string(),
+        "tombstones_sha256": checksums.tombstones.to_string(),
+        "deps_sha256": checksums.deps.to_string()
+    }))
+    .expect("meta json");
+    rewrite_store_meta(repo.path(), Some(&meta_bytes));
+
+    let json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
+    assert_detect_outcome(
+        &json,
+        Some(1),
+        "orset_v1",
+        true,
+        false,
+        0,
+        true,
+        &["meta checksums missing"],
+    );
+}
+
+#[test]
+fn test_migrate_detect_uses_live_remote_when_local_and_tracking_are_missing() {
+    let repo = TestRepo::new();
+    write_store_commit(
+        repo.remote_dir.path(),
+        br#"{"from":"bd-abc1","to":"bd-abc2","kind":"blocks"}
+"#,
+        false,
+        true,
+    );
+
+    let json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
+    assert_detect_outcome(
+        &json,
+        Some(1),
+        "legacy_edges",
+        false,
+        true,
+        0,
+        true,
+        &[
+            "deps.jsonl is legacy line-per-edge (missing cc)",
+            "notes.jsonl missing",
+        ],
+    );
+}
+
+#[test]
+fn test_migrate_detect_uses_live_remote_without_mutating_stale_tracking_ref() {
+    let repo = TestRepo::new();
+    write_strict_store_commit(repo.remote_dir.path());
+    let stale_tracking_oid = fetch_remote_store_ref(repo.path());
+    write_store_commit(
+        repo.remote_dir.path(),
+        br#"{"from":"bd-abc1","to":"bd-abc2","kind":"blocks"}
+"#,
+        false,
+        true,
+    );
+
+    let json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
+    assert_detect_outcome(
+        &json,
+        Some(1),
+        "legacy_edges",
+        false,
+        true,
+        0,
+        true,
+        &[
+            "deps.jsonl is legacy line-per-edge (missing cc)",
+            "notes.jsonl missing",
+        ],
+    );
+    assert_eq!(
+        store_ref_oid(repo.path(), "refs/remotes/origin/beads/store"),
+        Some(stale_tracking_oid),
+        "detect should classify the live remote without mutating tracking refs"
+    );
+}
+
+#[test]
+fn test_migrate_dry_run_uses_live_remote_without_mutating_stale_tracking_ref() {
+    let repo = TestRepo::new();
+    write_strict_store_commit(repo.remote_dir.path());
+    let stale_tracking_oid = fetch_remote_store_ref(repo.path());
+    write_store_commit(
+        repo.remote_dir.path(),
+        br#"{"from":"bd-abc1","to":"bd-abc2","kind":"blocks"}
+"#,
+        false,
+        true,
+    );
+
+    let json = run_bd_json(&repo, &["migrate", "to", "1", "--dry-run", "--json"]);
+    assert_eq!(
+        json.get("from_effective_version")
+            .and_then(|value| value.as_u64()),
+        Some(0),
+        "dry-run should classify the fetched remote legacy state: {json}"
+    );
+    assert_eq!(
+        json.get("deps_format_before")
+            .and_then(|value| value.as_str()),
+        Some("legacy_edges"),
+        "dry-run should classify the fetched remote legacy deps: {json}"
+    );
+    assert_eq!(
+        json.get("commit_oid"),
+        Some(&serde_json::Value::Null),
+        "dry-run should not create a commit: {json}"
+    );
+    assert_eq!(
+        store_ref_oid(repo.path(), "refs/remotes/origin/beads/store"),
+        Some(stale_tracking_oid),
+        "dry-run should classify live remote state without mutating tracking refs"
+    );
+}
+
+#[test]
+fn test_migrate_detect_uses_local_store_when_origin_preview_is_broken() {
+    let repo = TestRepo::new();
+    fixture("rich_workflow").install(repo.path());
+    fs::remove_dir_all(repo.remote_dir.path()).expect("remove remote dir");
+
+    let json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
+    assert_detect_outcome(
+        &json,
+        Some(1),
+        "legacy_edges",
+        false,
+        false,
+        0,
+        true,
+        &[
+            "deps.jsonl is legacy line-per-edge (missing cc)",
+            "meta checksums missing",
+            "notes.jsonl missing",
+        ],
+    );
+}
+
+#[test]
+fn test_migrate_detect_uses_local_store_without_trusting_stale_tracking_when_origin_is_broken() {
+    let repo = TestRepo::new();
+    write_strict_store_commit(repo.path());
+    write_store_commit(
+        repo.remote_dir.path(),
+        br#"{"from":"bd-abc1","to":"bd-abc2","kind":"blocks"}
+"#,
+        false,
+        true,
+    );
+    let stale_tracking_oid = fetch_remote_store_ref(repo.path());
+    fs::remove_dir_all(repo.remote_dir.path()).expect("remove remote dir");
+
+    let json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
+    assert_detect_outcome(&json, Some(1), "orset_v1", true, true, 1, false, &[]);
+    assert_eq!(
+        store_ref_oid(repo.path(), "refs/remotes/origin/beads/store"),
+        Some(stale_tracking_oid),
+        "detect should leave stale tracking refs untouched while falling back to local-only classification"
+    );
+}
+
+#[test]
+fn test_migrate_detect_fails_when_local_missing_and_origin_preview_is_broken() {
+    let repo = TestRepo::new();
+    write_store_commit(
+        repo.remote_dir.path(),
+        br#"{"from":"bd-abc1","to":"bd-abc2","kind":"blocks"}
+"#,
+        false,
+        true,
+    );
+    fs::remove_dir_all(repo.remote_dir.path()).expect("remove remote dir");
+
+    repo.bd()
+        .args(["migrate", "detect", "--json"])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn test_migrate_dry_run_fails_without_trusting_stale_tracking_when_origin_is_broken() {
+    let repo = TestRepo::new();
+    write_strict_store_commit(repo.path());
+    write_store_commit(
+        repo.remote_dir.path(),
+        br#"{"from":"bd-abc1","to":"bd-abc2","kind":"blocks"}
+"#,
+        false,
+        true,
+    );
+    let stale_tracking_oid = fetch_remote_store_ref(repo.path());
+    let before_oid = store_ref_oid(repo.path(), "refs/heads/beads/store");
+    fs::remove_dir_all(repo.remote_dir.path()).expect("remove remote dir");
+
+    repo.bd()
+        .args(["migrate", "to", "1", "--dry-run", "--json"])
+        .assert()
+        .failure();
+    assert_eq!(
+        store_ref_oid(repo.path(), "refs/heads/beads/store"),
+        before_oid,
+        "dry-run should leave the local store ref unchanged on preview failure"
+    );
+    assert_eq!(
+        store_ref_oid(repo.path(), "refs/remotes/origin/beads/store"),
+        Some(stale_tracking_oid),
+        "dry-run should not mutate tracking refs while surfacing the live preview error"
+    );
+}
+
+#[test]
+fn test_migrate_no_push_succeeds_without_fetch_when_origin_is_broken() {
+    let repo = TestRepo::new();
+    let local_before = fixture("rich_workflow").install(repo.path());
+    fs::remove_dir_all(repo.remote_dir.path()).expect("remove remote dir");
+
+    let json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    assert_eq!(
+        json.get("push").and_then(|value| value.as_str()),
+        Some("skipped_no_push"),
+        "offline --no-push migration should stay local-only: {json}"
+    );
+    assert!(
+        json.get("commit_oid")
+            .and_then(|value| value.as_str())
+            .is_some(),
+        "offline --no-push migration should still rewrite the local store: {json}"
+    );
+    assert_eq!(
+        store_first_parent_oid(repo.path(), "refs/heads/beads/store"),
+        Some(local_before),
+        "offline --no-push migration should parent the rewrite on the local store head"
+    );
+    assert_eq!(
+        backup_ref_oid(repo.path(), local_before),
+        Some(local_before),
+        "offline --no-push migration must preserve a backup ref for the previous local store head"
+    );
+
+    let state = read_store_state(repo.path());
+    assert_rich_workflow_state(
+        &state,
+        true,
+        false,
+        &["note-rich-claimed-a", "note-rich-claimed-b"],
+    );
+}
+
+#[test]
+fn test_migrate_fixture_rich_workflow_rewrites_and_preserves_state() {
+    let repo = TestRepo::new_local_only();
+    fixture("rich_workflow").install(repo.path());
+    let before_dry_run = store_ref_oid(repo.path(), "refs/heads/beads/store");
+
+    let detect_json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
+    assert_detect_outcome(
+        &detect_json,
+        Some(1),
+        "legacy_edges",
+        false,
+        false,
+        0,
+        true,
+        &[
+            "deps.jsonl is legacy line-per-edge (missing cc)",
+            "meta checksums missing",
+            "notes.jsonl missing",
+        ],
+    );
+
+    let dry_run_json = run_bd_json(&repo, &["migrate", "to", "1", "--dry-run", "--json"]);
+    assert_eq!(
+        dry_run_json.get("commit_oid"),
+        Some(&serde_json::Value::Null),
+        "dry-run should not create a commit: {dry_run_json}"
+    );
+    assert_eq!(
+        store_ref_oid(repo.path(), "refs/heads/beads/store"),
+        before_dry_run,
+        "dry-run must not mutate the store ref"
+    );
+
+    let migrate_json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    assert_eq!(
+        migrate_json
+            .get("converted_deps")
+            .and_then(|value| value.as_bool()),
+        Some(true),
+        "fixture migration should rewrite legacy deps: {migrate_json}"
+    );
+    assert_eq!(
+        migrate_json
+            .get("added_notes_file")
+            .and_then(|value| value.as_bool()),
+        Some(true),
+        "fixture migration should backfill notes.jsonl: {migrate_json}"
+    );
+    assert_eq!(
+        migrate_json
+            .get("wrote_checksums")
+            .and_then(|value| value.as_bool()),
+        Some(true),
+        "fixture migration should backfill checksums: {migrate_json}"
+    );
+    assert_eq!(
+        migrate_json.get("push").and_then(|value| value.as_str()),
+        Some("skipped_no_push"),
+        "fixture migration should honor --no-push: {migrate_json}"
+    );
+
+    let post_detect_json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
+    assert_detect_outcome(
+        &post_detect_json,
+        Some(1),
+        "orset_v1",
+        true,
+        true,
+        1,
+        false,
+        &[],
+    );
+
+    let state = read_store_state(repo.path());
+    assert_rich_workflow_state(
+        &state,
+        true,
+        false,
+        &["note-rich-claimed-a", "note-rich-claimed-b"],
+    );
+}
+
+#[test]
+fn test_migrate_fixture_rich_workflow_peer_runs_full_round_trip() {
+    let repo = TestRepo::new_local_only();
+    fixture("rich_workflow_peer").install(repo.path());
+    let before_dry_run = store_ref_oid(repo.path(), "refs/heads/beads/store");
+
+    let detect_json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
+    assert_detect_outcome(
+        &detect_json,
+        Some(1),
+        "legacy_edges",
+        false,
+        false,
+        0,
+        true,
+        &[
+            "deps.jsonl is legacy line-per-edge (missing cc)",
+            "meta checksums missing",
+            "notes.jsonl missing",
+        ],
+    );
+
+    let dry_run_json = run_bd_json(&repo, &["migrate", "to", "1", "--dry-run", "--json"]);
+    assert_eq!(
+        dry_run_json.get("commit_oid"),
+        Some(&serde_json::Value::Null),
+        "dry-run should not create a commit: {dry_run_json}"
+    );
+    assert_eq!(
+        store_ref_oid(repo.path(), "refs/heads/beads/store"),
+        before_dry_run,
+        "dry-run must not mutate the store ref"
+    );
+
+    let migrate_json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    assert_eq!(
+        migrate_json.get("push").and_then(|value| value.as_str()),
+        Some("skipped_no_push"),
+        "fixture migration should honor --no-push: {migrate_json}"
+    );
+
+    let post_detect_json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
+    assert_detect_outcome(
+        &post_detect_json,
+        Some(1),
+        "orset_v1",
+        true,
+        true,
+        1,
+        false,
+        &[],
+    );
+
+    let state = read_store_state(repo.path());
+    assert_rich_workflow_state(
+        &state,
+        false,
+        true,
+        &["note-rich-claimed-a", "note-rich-claimed-c"],
+    );
+}
+
+#[test]
+fn test_migrate_fixture_tombstone_deleted_dep_preserves_semantics() {
+    let repo = TestRepo::new_local_only();
+    fixture("tombstone_deleted_dep").install(repo.path());
+    let before_dry_run = store_ref_oid(repo.path(), "refs/heads/beads/store");
+
+    let detect_json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
+    assert_detect_outcome(
+        &detect_json,
+        None,
+        "legacy_edges",
+        false,
+        false,
+        0,
+        true,
+        &[
+            "deps.jsonl is legacy line-per-edge (missing cc)",
+            "meta checksums missing",
+            "notes.jsonl missing",
+        ],
+    );
+
+    let dry_run_json = run_bd_json(&repo, &["migrate", "to", "1", "--dry-run", "--json"]);
+    assert_eq!(
+        dry_run_json.get("commit_oid"),
+        Some(&serde_json::Value::Null),
+        "dry-run should not create a commit: {dry_run_json}"
+    );
+    assert_eq!(
+        store_ref_oid(repo.path(), "refs/heads/beads/store"),
+        before_dry_run,
+        "dry-run must not mutate the store ref"
+    );
+
+    let migrate_json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    assert_eq!(
+        migrate_json.get("push").and_then(|value| value.as_str()),
+        Some("skipped_no_push"),
+        "fixture migration should honor --no-push: {migrate_json}"
+    );
+
+    let post_detect_json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
+    assert_detect_outcome(
+        &post_detect_json,
+        Some(1),
+        "orset_v1",
+        true,
+        true,
+        1,
+        false,
+        &[],
+    );
+
+    let state = read_store_state(repo.path());
+    assert_tombstone_deleted_dep_state(&state);
+}
+
+#[test]
+fn test_migrate_fixture_remote_only_detect_dry_run_and_local_rewrite() {
+    let repo = TestRepo::new();
+    let remote_oid = fixture("rich_workflow").install(repo.remote_dir.path());
+    let remote_before = store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store");
+    assert_eq!(
+        store_ref_oid(repo.path(), "refs/heads/beads/store"),
+        None,
+        "remote-only setup should not create a local store ref before migration"
+    );
+
+    let detect_json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
+    assert_detect_outcome(
+        &detect_json,
+        Some(1),
+        "legacy_edges",
+        false,
+        false,
+        0,
+        true,
+        &[
+            "deps.jsonl is legacy line-per-edge (missing cc)",
+            "meta checksums missing",
+            "notes.jsonl missing",
+        ],
+    );
+
+    let dry_run_json = run_bd_json(&repo, &["migrate", "to", "1", "--dry-run", "--json"]);
+    assert_eq!(
+        dry_run_json.get("commit_oid"),
+        Some(&serde_json::Value::Null),
+        "dry-run should not create a commit: {dry_run_json}"
+    );
+    assert_eq!(
+        store_ref_oid(repo.path(), "refs/heads/beads/store"),
+        None,
+        "remote-only dry-run must not materialize a local store ref"
+    );
+
+    let migrate_json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    assert_eq!(
+        migrate_json.get("push").and_then(|value| value.as_str()),
+        Some("skipped_no_push"),
+        "remote-only migration should honor --no-push: {migrate_json}"
+    );
+    assert_eq!(
+        store_first_parent_oid(repo.path(), "refs/heads/beads/store"),
+        Some(remote_oid),
+        "remote-only migration must parent the local rewrite commit on the fetched remote ref"
+    );
+    assert_eq!(
+        store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store"),
+        remote_before,
+        "--no-push remote-only migration must not mutate origin"
+    );
+
+    let state = read_store_state(repo.path());
+    assert_rich_workflow_state(
+        &state,
+        true,
+        false,
+        &["note-rich-claimed-a", "note-rich-claimed-b"],
+    );
+}
+
+#[test]
+fn test_migrate_fixture_remote_only_pushes_rewritten_store_ref() {
+    let repo = TestRepo::new();
+    let remote_before_oid = fixture("rich_workflow").install(repo.remote_dir.path());
+
+    let migrate_json = run_bd_json(&repo, &["migrate", "to", "1", "--json"]);
+    assert_eq!(
+        migrate_json.get("push").and_then(|value| value.as_str()),
+        Some("pushed"),
+        "remote-only migration with origin should publish the rewritten store ref: {migrate_json}"
+    );
+
+    let local_oid =
+        store_ref_oid(repo.path(), "refs/heads/beads/store").expect("local store ref after push");
+    let remote_oid = fetch_remote_store_ref(repo.path());
+    assert_eq!(
+        local_oid, remote_oid,
+        "successful pushed migration should leave local and remote store refs aligned"
+    );
+    assert_eq!(
+        store_first_parent_oid(repo.path(), "refs/heads/beads/store"),
+        Some(remote_before_oid),
+        "remote-only pushed migration must parent the rewritten commit on the remote head"
+    );
+
+    let post_detect_json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
+    assert_detect_outcome(
+        &post_detect_json,
+        Some(1),
+        "orset_v1",
+        true,
+        true,
+        1,
+        false,
+        &[],
+    );
+
+    let state = read_store_state(repo.path());
+    assert_rich_workflow_state(
+        &state,
+        true,
+        false,
+        &["note-rich-claimed-a", "note-rich-claimed-b"],
+    );
+}
+
+#[test]
+fn test_migrate_remote_parent_preserves_existing_meta_root_slug_and_last_write_stamp() {
+    let repo = TestRepo::new();
+    fixture("rich_workflow").install(repo.remote_dir.path());
+
+    let remote_git = Repository::open(repo.remote_dir.path()).expect("open remote repo");
+    let state_bytes = read_tree_blob(&remote_git, "state.jsonl").expect("remote state.jsonl");
+    let tombs_bytes =
+        read_tree_blob(&remote_git, "tombstones.jsonl").expect("remote tombstones.jsonl");
+    let deps_bytes = read_tree_blob(&remote_git, "deps.jsonl").expect("remote deps.jsonl");
+    let notes_bytes = read_tree_blob(&remote_git, "notes.jsonl").unwrap_or_default();
+    let checksums =
+        StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes, Some(&notes_bytes));
+    let preserved_stamp = WriteStamp::new(1_765_401_111_000, 9);
+    let meta_bytes = serialize_meta(Some("remote-meta"), Some(&preserved_stamp), &checksums)
+        .expect("serialize remote meta");
+    rewrite_store_meta(repo.remote_dir.path(), Some(&meta_bytes));
+
+    run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+
+    let meta_json = read_store_meta_json(repo.path());
+    assert_eq!(
+        meta_json.get("root_slug").and_then(|value| value.as_str()),
+        Some("remote-meta"),
+        "remote-parented migration should preserve an existing remote root_slug"
+    );
+    assert_eq!(
+        meta_json
+            .get("last_write_stamp")
+            .and_then(|value| value.get(0))
+            .and_then(|value| value.as_u64()),
+        Some(preserved_stamp.wall_ms),
+        "remote-parented migration should preserve remote last_write_stamp wall_ms"
+    );
+    assert_eq!(
+        meta_json
+            .get("last_write_stamp")
+            .and_then(|value| value.get(1))
+            .and_then(|value| value.as_u64()),
+        Some(u64::from(preserved_stamp.counter)),
+        "remote-parented migration should preserve remote last_write_stamp counter"
+    );
+    assert_meta_checksums_match_store(repo.path());
+}
+
+#[test]
+fn test_migrate_hybrid_remote_canonical_local_legacy_no_push_parents_on_remote_and_preserves_remote_meta()
+ {
+    let repo = TestRepo::new();
+    write_strict_store_commit(repo.remote_dir.path());
+    let remote_git = Repository::open(repo.remote_dir.path()).expect("open remote repo");
+    let remote_state_bytes = read_tree_blob(&remote_git, "state.jsonl").expect("remote state");
+    let remote_tombs_bytes =
+        read_tree_blob(&remote_git, "tombstones.jsonl").expect("remote tombstones");
+    let remote_deps_bytes = read_tree_blob(&remote_git, "deps.jsonl").expect("remote deps");
+    let remote_notes_bytes = read_tree_blob(&remote_git, "notes.jsonl").expect("remote notes");
+    let remote_checksums = StoreChecksums::from_bytes(
+        &remote_state_bytes,
+        &remote_tombs_bytes,
+        &remote_deps_bytes,
+        Some(&remote_notes_bytes),
+    );
+    let remote_stamp = WriteStamp::new(1_765_401_777_000, 9);
+    let remote_meta_bytes =
+        serialize_meta(Some("remote-meta"), Some(&remote_stamp), &remote_checksums)
+            .expect("serialize remote meta");
+    rewrite_store_meta(repo.remote_dir.path(), Some(&remote_meta_bytes));
+    let remote_before = store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store");
+    let remote_tracking_oid = fetch_remote_store_ref(repo.path());
+    Repository::open(repo.path())
+        .expect("open local repo")
+        .reference(
+            "refs/heads/beads/store",
+            remote_tracking_oid,
+            true,
+            "seed local store ref from remote head",
+        )
+        .expect("seed local store ref");
+
     write_store_commit(
         repo.path(),
         br#"{"from":"bd-abc1","to":"bd-abc2","kind":"blocks"}
 "#,
         false,
-        false,
+        true,
     );
-    let git = Repository::open(repo.path()).expect("open repo");
-    git.remote_set_url("origin", "https://127.0.0.1:1/does-not-exist.git")
-        .expect("rewrite origin");
+    let local_git = Repository::open(repo.path()).expect("open local repo");
+    let local_state_bytes = read_tree_blob(&local_git, "state.jsonl").expect("local state");
+    let local_tombs_bytes =
+        read_tree_blob(&local_git, "tombstones.jsonl").expect("local tombstones");
+    let local_deps_bytes = read_tree_blob(&local_git, "deps.jsonl").expect("local deps");
+    let local_notes_bytes = Vec::new();
+    let local_checksums = StoreChecksums::from_bytes(
+        &local_state_bytes,
+        &local_tombs_bytes,
+        &local_deps_bytes,
+        Some(&local_notes_bytes),
+    );
+    let local_stamp = WriteStamp::new(1_765_401_666_000, 4);
+    let local_meta_bytes = serialize_meta(Some("local-meta"), Some(&local_stamp), &local_checksums)
+        .expect("serialize local meta");
+    rewrite_store_meta(repo.path(), Some(&local_meta_bytes));
+
+    let json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    assert_eq!(
+        json.get("push").and_then(|value| value.as_str()),
+        Some("skipped_no_push"),
+        "hybrid no-push migration should report skipped_no_push: {json}"
+    );
+    assert!(
+        json.get("commit_oid")
+            .and_then(|value| value.as_str())
+            .is_some(),
+        "hybrid no-push migration should still create a local rewrite commit: {json}"
+    );
+    assert_eq!(
+        store_first_parent_oid(repo.path(), "refs/heads/beads/store"),
+        remote_before,
+        "hybrid migration should parent the rewrite on the canonical remote head"
+    );
+    assert_eq!(
+        store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store"),
+        remote_before,
+        "hybrid --no-push migration must not mutate origin"
+    );
+
+    let meta_json = read_store_meta_json(repo.path());
+    assert_eq!(
+        meta_json.get("root_slug").and_then(|value| value.as_str()),
+        Some("remote-meta"),
+        "hybrid migration should prefer the remote root_slug"
+    );
+    assert_eq!(
+        meta_json
+            .get("last_write_stamp")
+            .and_then(|value| value.get(0))
+            .and_then(|value| value.as_u64()),
+        Some(remote_stamp.wall_ms),
+        "hybrid migration should preserve the max remote/local last_write_stamp wall_ms"
+    );
+    assert_eq!(
+        meta_json
+            .get("last_write_stamp")
+            .and_then(|value| value.get(1))
+            .and_then(|value| value.as_u64()),
+        Some(u64::from(remote_stamp.counter)),
+        "hybrid migration should preserve the max remote/local last_write_stamp counter"
+    );
+    assert_meta_checksums_match_store(repo.path());
+}
+
+#[cfg(feature = "slow-tests")]
+#[test]
+fn test_migrate_fixture_related_divergence_merges_realistic_fixtures() {
+    let repo = TestRepo::new();
+    let base_oid = fixture("rich_workflow").install(repo.path());
+    push_store_ref(repo.path());
+
+    let remote_oid =
+        fixture("rich_workflow_peer").install_with_parent(repo.remote_dir.path(), Some(base_oid));
+    let remote_before = store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store");
+
+    repo.bd()
+        .args(["migrate", "to", "1", "--no-push", "--json"])
+        .assert()
+        .success();
+    assert_eq!(
+        store_first_parent_oid(repo.path(), "refs/heads/beads/store"),
+        Some(remote_oid),
+        "related-divergence migration must parent the local rewrite on the fetched remote head"
+    );
+    assert_eq!(
+        store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store"),
+        remote_before,
+        "--no-push related-divergence migration must not mutate origin"
+    );
+    assert_eq!(
+        backup_ref_oid(repo.path(), base_oid),
+        Some(base_oid),
+        "related-divergence rewrite must create a backup ref for the previous local store head"
+    );
+
+    let state = read_store_state(repo.path());
+    assert_rich_workflow_state(
+        &state,
+        true,
+        true,
+        &[
+            "note-rich-claimed-a",
+            "note-rich-claimed-b",
+            "note-rich-claimed-c",
+        ],
+    );
+    let meta_json = read_store_meta_json(repo.path());
+    assert_eq!(
+        meta_json.get("root_slug").and_then(|value| value.as_str()),
+        Some("bd"),
+        "related-divergence migration should preserve the existing fixture root_slug"
+    );
+    assert!(
+        meta_json.get("last_write_stamp").is_none(),
+        "related-divergence migration should preserve absent last_write_stamp when neither side had one"
+    );
+    assert_meta_checksums_match_store(repo.path());
+}
+
+#[cfg(feature = "slow-tests")]
+#[test]
+fn test_migrate_fixture_unrelated_divergence_requires_force() {
+    let repo = TestRepo::new();
+    let local_before = fixture("rich_workflow_peer").install(repo.path());
+    let remote_oid = fixture("tombstone_deleted_dep").install(repo.remote_dir.path());
+    let remote_before = store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store");
+
+    repo.bd()
+        .args(["migrate", "to", "1", "--dry-run", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no common ancestor between local and remote",
+        ));
+
+    repo.bd()
+        .args(["migrate", "to", "1", "--force", "--dry-run", "--json"])
+        .assert()
+        .success();
+    assert_eq!(
+        store_ref_oid(repo.path(), "refs/heads/beads/store"),
+        Some(local_before),
+        "dry-run with --force must remain non-mutating"
+    );
+
+    repo.bd()
+        .args(["migrate", "to", "1", "--no-push", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "no common ancestor between local and remote",
+        ));
+
+    repo.bd()
+        .args(["migrate", "to", "1", "--force", "--no-push", "--json"])
+        .assert()
+        .success();
+    assert_eq!(
+        store_first_parent_oid(repo.path(), "refs/heads/beads/store"),
+        Some(remote_oid),
+        "forced unrelated-divergence migration must parent the rewrite on the fetched remote head"
+    );
+    assert_eq!(
+        store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store"),
+        remote_before,
+        "--no-push forced unrelated-divergence migration must not mutate origin"
+    );
+    assert_eq!(
+        backup_ref_oid(repo.path(), local_before),
+        Some(local_before),
+        "forced unrelated-divergence rewrite must create a backup ref for the previous local store head"
+    );
+
+    let state = read_store_state(repo.path());
+    assert_rich_workflow_state(
+        &state,
+        false,
+        true,
+        &["note-rich-claimed-a", "note-rich-claimed-c"],
+    );
+    assert_tombstone_deleted_dep_state(&state);
+    let meta_json = read_store_meta_json(repo.path());
+    assert_eq!(
+        meta_json.get("root_slug").and_then(|value| value.as_str()),
+        Some("bd"),
+        "forced unrelated-divergence migration should preserve the local fixture root_slug"
+    );
+    assert!(
+        meta_json.get("last_write_stamp").is_none(),
+        "forced unrelated-divergence migration should preserve absent last_write_stamp when neither side had one"
+    );
+    assert_meta_checksums_match_store(repo.path());
+}
+
+#[test]
+fn test_migrate_retryable_push_race_recomputes_and_preserves_backup_ref() {
+    let repo = TestRepo::new();
+    let base_oid = fixture("rich_workflow").install(repo.path());
+    push_store_ref(repo.path());
+
+    let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
+    let winner_oid = beads_git::sync::migrate_store_ref_to_v1(
+        &remote_repo,
+        repo.remote_dir.path(),
+        false,
+        false,
+        true,
+        0,
+    )
+    .expect("winner migration")
+    .commit_oid
+    .expect("winner commit oid");
+    remote_repo
+        .reference(
+            "refs/heads/beads/store",
+            base_oid,
+            true,
+            "reset remote to base",
+        )
+        .expect("reset remote store ref");
+    std::thread::sleep(Duration::from_secs(1));
+    fetch_remote_store_ref(repo.path());
+
+    let local_repo = Repository::open(repo.path()).expect("open local repo");
+    let outcome = migrate_store_ref_to_v1_with_before_push_for_testing(
+        &local_repo,
+        repo.path(),
+        false,
+        false,
+        false,
+        1,
+        |retries, _commit_oid| {
+            if retries == 0 {
+                remote_repo
+                    .reference(
+                        "refs/heads/beads/store",
+                        winner_oid,
+                        true,
+                        "simulate remote winner before first push",
+                    )
+                    .map_err(beads_git::SyncError::from)?;
+            }
+            Ok(())
+        },
+    )
+    .expect("migration should converge after retryable push race");
+
+    assert_eq!(
+        outcome.commit_oid, None,
+        "retryable push race should converge to the remote winner without minting a second rewrite"
+    );
+    assert_eq!(
+        outcome.push,
+        beads_git::sync::MigratePushDisposition::SkippedNoPush,
+        "retryable push race should finish as a converged no-op after refetch/recompute"
+    );
+    assert_eq!(
+        store_ref_oid(repo.path(), "refs/heads/beads/store"),
+        Some(winner_oid),
+        "local store ref should realign to the fetched remote winner"
+    );
+    assert_eq!(
+        store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store"),
+        Some(winner_oid),
+        "remote store ref should stay on the winner after the retry"
+    );
+    assert_eq!(
+        backup_ref_oid(repo.path(), base_oid),
+        Some(base_oid),
+        "lost push races must preserve a backup ref for the original local store head"
+    );
+    assert_meta_checksums_match_store(repo.path());
+}
+
+#[test]
+fn test_migrate_retryable_push_race_exhausts_retry_budget() {
+    let repo = TestRepo::new();
+    let base_oid = fixture("rich_workflow").install(repo.path());
+    push_store_ref(repo.path());
+
+    let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
+    let winner_oid = beads_git::sync::migrate_store_ref_to_v1(
+        &remote_repo,
+        repo.remote_dir.path(),
+        false,
+        false,
+        true,
+        0,
+    )
+    .expect("winner migration")
+    .commit_oid
+    .expect("winner commit oid");
+    remote_repo
+        .reference(
+            "refs/heads/beads/store",
+            base_oid,
+            true,
+            "reset remote to base",
+        )
+        .expect("reset remote store ref");
+    std::thread::sleep(Duration::from_secs(1));
+    fetch_remote_store_ref(repo.path());
+
+    let local_repo = Repository::open(repo.path()).expect("open local repo");
+    let err = migrate_store_ref_to_v1_with_before_push_for_testing(
+        &local_repo,
+        repo.path(),
+        false,
+        false,
+        false,
+        0,
+        |retries, _commit_oid| {
+            if retries == 0 {
+                remote_repo
+                    .reference(
+                        "refs/heads/beads/store",
+                        winner_oid,
+                        true,
+                        "simulate remote winner before first push",
+                    )
+                    .map_err(beads_git::SyncError::from)?;
+            }
+            Ok(())
+        },
+    )
+    .expect_err("migration should stop once the retry budget is exhausted");
+
+    let err_text = err.to_string();
+    match &err {
+        beads_git::SyncError::TooManyRetries(retries) => assert_eq!(*retries, 1),
+        other => panic!("expected TooManyRetries, got {other:?}"),
+    }
+    assert_eq!(
+        err_text, "too many sync retries (1)",
+        "retry exhaustion should surface the terminal sync error text"
+    );
+    assert_eq!(
+        store_ref_oid(repo.path(), "refs/heads/beads/store"),
+        Some(base_oid),
+        "retry exhaustion must restore the original local store ref"
+    );
+    assert_eq!(
+        store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store"),
+        Some(winner_oid),
+        "retry exhaustion must leave the remote winner intact"
+    );
+    assert_eq!(
+        backup_ref_oid(repo.path(), base_oid),
+        Some(base_oid),
+        "retry exhaustion must still preserve a backup ref for the original local store head"
+    );
+}
+
+#[test]
+fn test_migrate_cli_retryable_push_race_recomputes_and_preserves_backup_ref() {
+    let repo = TestRepo::new();
+    let base_oid = fixture("rich_workflow").install(repo.path());
+    push_store_ref(repo.path());
+
+    let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
+    let winner_oid = beads_git::sync::migrate_store_ref_to_v1(
+        &remote_repo,
+        repo.remote_dir.path(),
+        false,
+        false,
+        true,
+        0,
+    )
+    .expect("winner migration")
+    .commit_oid
+    .expect("winner commit oid");
+    remote_repo
+        .reference(
+            "refs/heads/beads/store",
+            base_oid,
+            true,
+            "reset remote to base",
+        )
+        .expect("reset remote store ref");
+    std::thread::sleep(Duration::from_secs(1));
 
     let output = repo
         .bd()
-        .args(["migrate", "to", "1", "--no-push"])
+        .env(
+            "BD_TEST_MIGRATE_BEFORE_PUSH_WINNER",
+            format!("once:{winner_oid}"),
+        )
+        .args(["migrate", "to", "1", "--json"])
         .assert()
         .success()
         .get_output()
         .stdout
         .clone();
     let json: serde_json::Value = serde_json::from_slice(&output).expect("json");
-    assert!(
-        json.get("commit_oid")
-            .and_then(|value| value.as_str())
-            .is_some(),
-        "local-only migration should succeed without fetching origin: {json}"
+
+    assert_eq!(
+        json.get("commit_oid"),
+        Some(&serde_json::Value::Null),
+        "CLI migrate should converge to the remote winner without minting a second rewrite: {json}"
     );
     assert_eq!(
-        json.get("pushed").and_then(|value| value.as_bool()),
-        Some(false),
-        "no-push migration should report pushed=false: {json}"
+        json.get("push").and_then(|value| value.as_str()),
+        Some("skipped_no_push"),
+        "CLI migrate should report converged retry as skipped_no_push after refetch/recompute: {json}"
     );
+    assert_eq!(
+        store_ref_oid(repo.path(), "refs/heads/beads/store"),
+        Some(winner_oid),
+        "CLI migrate should realign the local store ref to the fetched remote winner"
+    );
+    assert_eq!(
+        store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store"),
+        Some(winner_oid),
+        "CLI migrate should leave the remote store ref on the winner"
+    );
+    assert_eq!(
+        backup_ref_oid(repo.path(), base_oid),
+        Some(base_oid),
+        "CLI migrate should preserve a backup ref for the original local store head after a lost push race"
+    );
+}
+
+#[test]
+fn test_migrate_cli_retryable_push_race_exhausts_retry_budget() {
+    let repo = TestRepo::new();
+    let base_oid = fixture("rich_workflow").install(repo.path());
+    push_store_ref(repo.path());
+
+    let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
+    let winner_oid = beads_git::sync::migrate_store_ref_to_v1(
+        &remote_repo,
+        repo.remote_dir.path(),
+        false,
+        false,
+        true,
+        0,
+    )
+    .expect("winner migration")
+    .commit_oid
+    .expect("winner commit oid");
+    remote_repo
+        .reference(
+            "refs/heads/beads/store",
+            base_oid,
+            true,
+            "reset remote to base",
+        )
+        .expect("reset remote store ref");
+    std::thread::sleep(Duration::from_secs(1));
+
+    repo.bd()
+        .env(
+            "BD_TEST_MIGRATE_BEFORE_PUSH_WINNER",
+            format!("once:{winner_oid}"),
+        )
+        .env("BD_TEST_MIGRATE_MAX_RETRIES", "0")
+        .args(["migrate", "to", "1", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("too many sync retries (1)"));
+    assert_eq!(
+        store_ref_oid(repo.path(), "refs/heads/beads/store"),
+        Some(base_oid),
+        "CLI migrate should restore the original local store ref after retry exhaustion"
+    );
+    assert_eq!(
+        store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store"),
+        Some(winner_oid),
+        "CLI migrate should leave the remote winner intact after retry exhaustion"
+    );
+    assert_eq!(
+        backup_ref_oid(repo.path(), base_oid),
+        Some(base_oid),
+        "CLI migrate should preserve a backup ref for the original local store head after retry exhaustion"
+    );
+}
+
+#[test]
+fn test_migrate_infers_missing_root_slug_from_existing_ids() {
+    let repo_a = TestRepo::new_local_only();
+    fixture("rich_workflow").install(repo_a.path());
+    rewrite_store_meta(repo_a.path(), Some(br#"{"format_version":1}"#));
+
+    let repo_b = TestRepo::new_local_only();
+    fixture("rich_workflow").install(repo_b.path());
+    rewrite_store_meta(repo_b.path(), Some(br#"{"format_version":1}"#));
+
+    for repo in [&repo_a, &repo_b] {
+        run_bd_json(repo, &["migrate", "to", "1", "--no-push", "--json"]);
+
+        let meta_bytes = read_tree_blob(
+            &Repository::open(repo.path()).expect("open repo"),
+            "meta.json",
+        )
+        .expect("meta.json after migration");
+        let json: serde_json::Value = serde_json::from_slice(&meta_bytes).expect("meta json");
+        let id = json
+            .get("root_slug")
+            .and_then(|value| value.as_str())
+            .expect("migrated root_slug");
+        assert!(
+            id == "bd-rich",
+            "migrated root slug should be inferred from existing ids, got {id}"
+        );
+    }
+}
+
+#[test]
+fn test_migrate_preserves_existing_meta_root_slug_and_last_write_stamp() {
+    let repo = TestRepo::new_local_only();
+    fixture("rich_workflow").install(repo.path());
+
+    let git = Repository::open(repo.path()).expect("open repo");
+    let state_bytes = read_tree_blob(&git, "state.jsonl").expect("state.jsonl");
+    let tombs_bytes = read_tree_blob(&git, "tombstones.jsonl").expect("tombstones.jsonl");
+    let deps_bytes = read_tree_blob(&git, "deps.jsonl").expect("deps.jsonl");
+    let notes_bytes = read_tree_blob(&git, "notes.jsonl").unwrap_or_default();
+    let checksums =
+        StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes, Some(&notes_bytes));
+    let preserved_stamp = WriteStamp::new(1_765_400_555_000, 7);
+    let meta_bytes = serialize_meta(Some("kept-meta"), Some(&preserved_stamp), &checksums)
+        .expect("serialize meta");
+    rewrite_store_meta(repo.path(), Some(&meta_bytes));
+
+    run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+
+    let meta_json = read_store_meta_json(repo.path());
+    assert_eq!(
+        meta_json.get("root_slug").and_then(|value| value.as_str()),
+        Some("kept-meta"),
+        "migration should preserve an existing root_slug from meta.json"
+    );
+    assert_eq!(
+        meta_json
+            .get("last_write_stamp")
+            .and_then(|value| value.get(0))
+            .and_then(|value| value.as_u64()),
+        Some(preserved_stamp.wall_ms),
+        "migration should preserve an existing last_write_stamp wall_ms"
+    );
+    assert_eq!(
+        meta_json
+            .get("last_write_stamp")
+            .and_then(|value| value.get(1))
+            .and_then(|value| value.as_u64()),
+        Some(u64::from(preserved_stamp.counter)),
+        "migration should preserve an existing last_write_stamp counter"
+    );
+    assert_meta_checksums_match_store(repo.path());
+}
+
+#[test]
+fn test_runtime_strict_load_legacy_deps_shows_migration_hint() {
+    let repo = TestRepo::new();
+    write_store_commit(
+        repo.path(),
+        br#"{"from":"bd-abc1","to":"bd-abc2","kind":"blocks"}
+"#,
+        false,
+        true,
+    );
+
+    repo.bd()
+        .args(["list", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("bd migrate to 1"))
+        .stderr(predicate::str::contains("legacy deps store detected"));
+}
+
+#[test]
+fn test_runtime_strict_load_unrelated_parse_error_does_not_show_migration_hint() {
+    let repo = TestRepo::new();
+    write_store_commit(repo.path(), b"[]\n", false, true);
+
+    repo.bd()
+        .args(["list", "--json"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("deps.jsonl"))
+        .stderr(predicate::str::contains("bd migrate to 1").not());
 }
 
 #[test]
@@ -703,7 +2551,7 @@ fn test_migrate_to_1_missing_store_ref_errors_with_actionable_message() {
     let repo = TestRepo::new_local_only();
 
     repo.bd()
-        .args(["migrate", "to", "1"])
+        .args(["migrate", "to", "1", "--json"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -717,7 +2565,7 @@ fn test_migrate_to_rejects_unsupported_target_version() {
     let repo = TestRepo::new();
 
     repo.bd()
-        .args(["migrate", "to", "999"])
+        .args(["migrate", "to", "999", "--json"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -738,7 +2586,7 @@ fn test_migrate_to_without_force_fails_on_warningful_legacy_parse() {
     );
 
     repo.bd()
-        .args(["migrate", "to", "1", "--no-push"])
+        .args(["migrate", "to", "1", "--no-push", "--json"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("legacy deps parse produced"))
@@ -751,7 +2599,10 @@ fn test_migrate_to_force_no_push_allows_warningful_legacy_parse() {
     write_store_commit(
         repo.path(),
         br#"{"from":"bd-a","to":"bd-b","kind":"blocks"}
-{"from":"","to":"bd-c","kind":"blocks"}
+not-json
+[]
+{"from":"bd-a","to":"bd-c","kind":"not-a-kind"}
+{"from":"bd-a","to":"bd-a","kind":"blocks"}
 "#,
         false,
         false,
@@ -759,7 +2610,7 @@ fn test_migrate_to_force_no_push_allows_warningful_legacy_parse() {
 
     let output = repo
         .bd()
-        .args(["migrate", "to", "1", "--force", "--no-push"])
+        .args(["migrate", "to", "1", "--force", "--no-push", "--json"])
         .assert()
         .success()
         .get_output()
@@ -780,6 +2631,118 @@ fn test_migrate_to_force_no_push_allows_warningful_legacy_parse() {
     assert!(
         !warnings.is_empty(),
         "expected warning details when forcing through malformed legacy lines: {json}"
+    );
+    assert_eq!(
+        warnings.len(),
+        4,
+        "expected one warning per malformed legacy line class: {json}"
+    );
+    assert!(
+        warnings.iter().all(|warning| {
+            warning
+                .as_str()
+                .is_some_and(|text| text.starts_with("LEGACY_DEPS_"))
+        }),
+        "warning details should use stable LEGACY_DEPS_* prefixes: {json}"
+    );
+    let has_warning = |prefix: &str| {
+        warnings.iter().any(|warning| {
+            warning
+                .as_str()
+                .is_some_and(|text| text.starts_with(prefix))
+        })
+    };
+    assert!(
+        has_warning("LEGACY_DEPS_JSON(line=2):"),
+        "forced migration should surface JSON parse warnings with line context: {json}"
+    );
+    assert!(
+        has_warning("LEGACY_DEPS_SHAPE(line=3):"),
+        "forced migration should surface shape warnings with line context: {json}"
+    );
+    assert!(
+        has_warning("LEGACY_DEPS_KIND(line=4):"),
+        "forced migration should surface kind warnings with line context: {json}"
+    );
+    assert!(
+        has_warning("LEGACY_DEPS_KEY(line=5):"),
+        "forced migration should surface key warnings with line context: {json}"
+    );
+    assert_eq!(
+        json.get("push").and_then(|value| value.as_str()),
+        Some("skipped_no_push"),
+        "--no-push must report skipped_no_push: {json}"
+    );
+}
+
+#[test]
+fn test_migrate_to_1_ignores_blank_lines_and_collapses_duplicate_legacy_edges() {
+    let repo = TestRepo::new_local_only();
+    write_store_commit(
+        repo.path(),
+        br#"
+{"from":"bd-a","to":"bd-b","kind":"blocks"}
+
+{"from":"bd-a","to":"bd-b","kind":"blocks"}
+"#,
+        false,
+        false,
+    );
+
+    let json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    assert!(
+        json.get("commit_oid")
+            .and_then(|value| value.as_str())
+            .is_some(),
+        "duplicate-edge migration should still commit a canonical rewrite: {json}"
+    );
+    let warnings = json
+        .get("warnings")
+        .and_then(|value| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        warnings.is_empty(),
+        "blank lines and duplicate logical edge rows should not emit migration warnings: {json}"
+    );
+
+    let state = read_store_state(repo.path());
+    let key = dep_key("bd-a", "bd-b", DepKind::Blocks);
+    assert!(
+        state.dep_store().contains(&key),
+        "duplicate legacy edge rows should still migrate the dependency"
+    );
+    assert_eq!(
+        state.dep_store().dots_for(&key).map(|dots| dots.len()),
+        Some(1),
+        "duplicate logical edge rows should collapse to a single migrated dot"
+    );
+}
+
+#[test]
+fn test_migrate_from_go_reports_pushed_false_without_origin() {
+    let repo = TestRepo::new_local_only();
+    let export_path = repo.path().join("issues.jsonl");
+    fs::write(&export_path, sample_go_export()).expect("failed to write export");
+
+    let output = repo
+        .bd()
+        .args([
+            "migrate",
+            "from-go",
+            "--input",
+            export_path.to_str().unwrap(),
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let json: serde_json::Value = serde_json::from_slice(&output).expect("json");
+    assert_eq!(
+        json.get("pushed").and_then(|value| value.as_bool()),
+        Some(false),
+        "from-go migration without origin must report pushed=false: {json}"
     );
 }
 

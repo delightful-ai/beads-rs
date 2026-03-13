@@ -8,14 +8,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256 as Sha2};
-use uuid::Uuid;
 
 use super::error::WireError;
 use crate::core::{
-    ActorId, Bead, BeadSlug, BeadSnapshotWireV1, CanonicalState, DepKey, DepKind, Dot, Dvv,
-    NoteAppendV1, OrSet, OrSetValue, ReplicaId, SnapshotCodec, SnapshotWireV1, Stamp,
-    StateJsonlSha256, WireDepEntryV1, WireDepStoreV1, WireStamp, WireTombstoneV1, WriteStamp,
+    ActorId, Bead, BeadId, BeadSlug, BeadSnapshotWireV1, CanonicalState, DepKey, DepKind, Dot, Dvv,
+    NoteAppendV1, OrSet, OrSetValue, SnapshotCodec, SnapshotWireV1, Stamp, StateJsonlSha256,
+    WireDepEntryV1, WireDepStoreV1, WireStamp, WireTombstoneV1, WriteStamp,
 };
 
 // =============================================================================
@@ -301,7 +299,8 @@ fn parse_deps(bytes: &[u8]) -> Result<WireDepStoreV1, WireError> {
         return Ok(WireDepStoreV1::default());
     }
 
-    let wire: WireDepStoreV1 = serde_json::from_str(trimmed)?;
+    let wire: WireDepStoreV1 =
+        serde_json::from_str(trimmed).map_err(|err| map_json_error("deps.jsonl", err))?;
     SnapshotCodec::validate_dep_store(&wire)
         .map_err(|err| map_snapshot_error("deps.jsonl", err))?;
     Ok(wire)
@@ -342,7 +341,11 @@ pub fn parse_legacy_deps_edges(bytes: &[u8]) -> Result<(WireDepStoreV1, Vec<Stri
         let raw: serde_json::Value = match serde_json::from_str(trimmed) {
             Ok(value) => value,
             Err(err) => {
-                warnings.push(format!("deps.jsonl line {line_no}: invalid json ({err})"));
+                warnings.push(legacy_deps_warning(
+                    "JSON",
+                    line_no,
+                    format!("invalid json ({err})"),
+                ));
                 continue;
             }
         };
@@ -359,8 +362,10 @@ pub fn parse_legacy_deps_edges(bytes: &[u8]) -> Result<(WireDepStoreV1, Vec<Stri
             .entry(key)
             .and_modify(|status| {
                 if *status != next_status {
-                    warnings.push(format!(
-                        "deps.jsonl line {line_no}: conflicting active/deleted records; using last record"
+                    warnings.push(legacy_deps_warning(
+                        "SHAPE",
+                        line_no,
+                        "conflicting active/deleted records; using last record",
                     ));
                 }
                 *status = next_status;
@@ -506,59 +511,88 @@ fn parse_legacy_edge_line(
     warnings: &mut Vec<String>,
 ) -> Option<(DepKey, bool)> {
     let Some(obj) = raw.as_object() else {
-        warnings.push(format!(
-            "deps.jsonl line {line_no}: expected object, got {}",
-            value_kind(raw)
+        warnings.push(legacy_deps_warning(
+            "SHAPE",
+            line_no,
+            format!("expected object, got {}", value_kind(raw)),
         ));
         return None;
     };
 
-    let from = read_string_field(obj, &["from", "issue_id"]).and_then(|raw_id| {
-        crate::core::BeadId::parse(raw_id)
-            .map_err(|err| {
-                warnings.push(format!(
-                    "deps.jsonl line {line_no}: invalid from id `{raw_id}` ({err})"
-                ));
-            })
-            .ok()
-    });
-    let to = read_string_field(obj, &["to", "depends_on_id"]).and_then(|raw_id| {
-        crate::core::BeadId::parse(raw_id)
-            .map_err(|err| {
-                warnings.push(format!(
-                    "deps.jsonl line {line_no}: invalid to id `{raw_id}` ({err})"
-                ));
-            })
-            .ok()
-    });
-    let kind = read_string_field(obj, &["kind", "type", "dep_type"]).and_then(|raw_kind| {
-        DepKind::parse(raw_kind)
-            .map_err(|err| {
-                warnings.push(format!(
-                    "deps.jsonl line {line_no}: invalid kind `{raw_kind}` ({err})"
-                ));
-            })
-            .ok()
-    });
+    let Some(raw_from) = read_string_field(obj, &["from", "issue_id"]) else {
+        warnings.push(legacy_deps_warning(
+            "SHAPE",
+            line_no,
+            "missing required fields (expected from/to/kind)",
+        ));
+        return None;
+    };
+    let Some(raw_to) = read_string_field(obj, &["to", "depends_on_id"]) else {
+        warnings.push(legacy_deps_warning(
+            "SHAPE",
+            line_no,
+            "missing required fields (expected from/to/kind)",
+        ));
+        return None;
+    };
+    let Some(raw_kind) = read_string_field(obj, &["kind", "type", "dep_type"]) else {
+        warnings.push(legacy_deps_warning(
+            "SHAPE",
+            line_no,
+            "missing required fields (expected from/to/kind)",
+        ));
+        return None;
+    };
+
+    let from = BeadId::parse(raw_from)
+        .map_err(|err| {
+            warnings.push(legacy_deps_warning(
+                "KEY",
+                line_no,
+                format!("invalid from id `{raw_from}` ({err})"),
+            ));
+        })
+        .ok();
+    let to = BeadId::parse(raw_to)
+        .map_err(|err| {
+            warnings.push(legacy_deps_warning(
+                "KEY",
+                line_no,
+                format!("invalid to id `{raw_to}` ({err})"),
+            ));
+        })
+        .ok();
+    let kind = DepKind::parse(raw_kind)
+        .map_err(|err| {
+            warnings.push(legacy_deps_warning(
+                "KIND",
+                line_no,
+                format!("invalid kind `{raw_kind}` ({err})"),
+            ));
+        })
+        .ok();
 
     let (Some(from), Some(to), Some(kind)) = (from, to, kind) else {
-        warnings.push(format!(
-            "deps.jsonl line {line_no}: missing required fields (expected from/to/kind)"
-        ));
         return None;
     };
 
     let key = match DepKey::new(from, to, kind) {
         Ok(key) => key,
         Err(err) => {
-            warnings.push(format!(
-                "deps.jsonl line {line_no}: invalid dependency ({err})"
+            warnings.push(legacy_deps_warning(
+                "KEY",
+                line_no,
+                format!("invalid dep key ({err})"),
             ));
             return None;
         }
     };
     let deleted = read_deleted_flag(obj);
     Some((key, deleted))
+}
+
+fn legacy_deps_warning(code: &str, line_no: usize, message: impl std::fmt::Display) -> String {
+    format!("LEGACY_DEPS_{code}(line={line_no}): {message}")
 }
 
 fn read_string_field<'a>(
@@ -619,20 +653,7 @@ fn value_kind(value: &serde_json::Value) -> &'static str {
 }
 
 fn legacy_dep_dot_for_key(key: &DepKey) -> Dot {
-    let mut hasher = Sha2::new();
-    hasher.update(b"legacy-deps-v0");
-    hasher.update(key.collision_bytes());
-    let digest = hasher.finalize();
-
-    let mut replica_bytes = [0u8; 16];
-    replica_bytes.copy_from_slice(&digest[..16]);
-    let mut counter_bytes = [0u8; 8];
-    counter_bytes.copy_from_slice(&digest[16..24]);
-
-    Dot {
-        replica: ReplicaId::from(Uuid::from_bytes(replica_bytes)),
-        counter: u64::from_le_bytes(counter_bytes),
-    }
+    crate::core::wire_bead::legacy_hash_dot(b"legacy-deps-v0", &key.collision_bytes())
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -802,6 +823,10 @@ fn map_snapshot_error(file: &str, err: crate::core::SnapshotCodecError) -> WireE
     WireError::InvalidValue(format!("{file}: {err}"))
 }
 
+fn map_json_error(file: &str, err: serde_json::Error) -> WireError {
+    WireError::InvalidValue(format!("{file}: {err}"))
+}
+
 // =============================================================================
 // Conversion helpers
 // =============================================================================
@@ -827,6 +852,7 @@ fn wire_field_stamp(wire: &BeadSnapshotWireV1, field: &str) -> Stamp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::crdt::Crdt;
     use crate::core::state::LabelState;
     use crate::core::{
         ActorId, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Dvv, Label,
@@ -834,6 +860,7 @@ mod tests {
         WireDepEntryV1, WireFieldStamp, WireNoteV1, Workflow,
     };
     use proptest::prelude::*;
+    use sha2::{Digest, Sha256 as Sha2};
     use std::collections::{BTreeMap, BTreeSet};
     use uuid::Uuid;
 
@@ -1773,6 +1800,91 @@ mod tests {
     }
 
     #[test]
+    fn parse_legacy_deps_edges_supports_known_shapes_and_deletes() {
+        let bytes = br#"{"from":"bd-a","to":"bd-b","kind":"blocks"}
+{"issue_id":"bd-c","depends_on_id":"bd-d","type":"related","deleted_at":"2026-01-02T00:00:00Z"}
+"#;
+        let (wire, warnings) = parse_legacy_deps_edges(bytes).expect("legacy deps parse");
+        assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
+        assert_eq!(wire.entries.len(), 1, "deleted edge should not be active");
+
+        let active_key = DepKey::new(bead_id("bd-a"), bead_id("bd-b"), DepKind::Blocks).unwrap();
+        assert_eq!(wire.entries[0].key, active_key);
+        assert_eq!(wire.entries[0].dots.len(), 1);
+
+        let deleted_key = DepKey::new(bead_id("bd-c"), bead_id("bd-d"), DepKind::Related).unwrap();
+        let deleted_dot = legacy_dep_dot_for_key(&deleted_key);
+        assert!(
+            wire.cc.dominates(&deleted_dot),
+            "deleted edge dot should be represented in cc"
+        );
+    }
+
+    #[test]
+    fn parse_legacy_deps_edges_conflict_uses_last_record() {
+        let bytes = br#"{"from":"bd-a","to":"bd-b","kind":"blocks"}
+{"from":"bd-a","to":"bd-b","kind":"blocks","deleted_at":"2026-01-02T00:00:00Z"}
+"#;
+        let (wire, warnings) = parse_legacy_deps_edges(bytes).expect("legacy deps parse");
+        assert_eq!(wire.entries.len(), 0, "last deleted record should win");
+        assert_eq!(warnings.len(), 1, "expected one conflict warning");
+        assert_eq!(
+            warnings[0],
+            "LEGACY_DEPS_SHAPE(line=2): conflicting active/deleted records; using last record"
+        );
+
+        let key = DepKey::new(bead_id("bd-a"), bead_id("bd-b"), DepKind::Blocks).unwrap();
+        let deleted_dot = legacy_dep_dot_for_key(&key);
+        assert!(
+            wire.cc.dominates(&deleted_dot),
+            "deleted edge dot should be represented in cc when last record is deleted"
+        );
+    }
+
+    #[test]
+    fn migrated_legacy_active_and_deleted_join_preserves_deletion() {
+        let active_bytes = br#"{"from":"bd-a","to":"bd-b","kind":"blocks"}
+"#;
+        let deleted_bytes =
+            br#"{"from":"bd-a","to":"bd-b","kind":"blocks","deleted_at":"2026-01-02T00:00:00Z"}
+"#;
+
+        let (active_wire, active_warnings) =
+            parse_legacy_deps_edges(active_bytes).expect("active legacy parse");
+        assert!(
+            active_warnings.is_empty(),
+            "unexpected warnings: {active_warnings:?}"
+        );
+        let (deleted_wire, deleted_warnings) =
+            parse_legacy_deps_edges(deleted_bytes).expect("deleted legacy parse");
+        assert!(
+            deleted_warnings.is_empty(),
+            "unexpected warnings: {deleted_warnings:?}"
+        );
+
+        let active_store = SnapshotCodec::dep_store_from_wire(active_wire).expect("active store");
+        let deleted_store =
+            SnapshotCodec::dep_store_from_wire(deleted_wire).expect("deleted store");
+
+        let mut active_state = CanonicalState::new();
+        active_state.set_dep_store(active_store);
+        let mut deleted_state = CanonicalState::new();
+        deleted_state.set_dep_store(deleted_store);
+
+        let key = DepKey::new(bead_id("bd-a"), bead_id("bd-b"), DepKind::Blocks).unwrap();
+        let merged = active_state.join(&deleted_state);
+        assert!(
+            !merged.dep_store().contains(&key),
+            "deleted side should win when add dot is dominated by merged context"
+        );
+        let reverse = deleted_state.join(&active_state);
+        assert!(
+            !reverse.dep_store().contains(&key),
+            "deleted side should also win in reverse join order"
+        );
+    }
+
+    #[test]
     fn parse_state_allow_legacy_deps_migrates_legacy_edges_while_strict_rejects() {
         let state_bytes = b"";
         let tomb_bytes = b"";
@@ -1815,6 +1927,68 @@ mod tests {
             }
             other => panic!("unexpected error: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_legacy_deps_edges_emits_stable_warning_prefixes() {
+        let bytes = br#"{"from":"bd-a","to":"bd-b","kind":"blocks"}
+{"from":
+[]
+{"from":"bd-a","to":"bd-b","kind":"blocked-by"}
+{"from":"bd-a","to":"bd-a","kind":"blocks"}
+{"garbage":true}
+"#;
+
+        let (_wire, warnings) = parse_legacy_deps_edges(bytes).expect("legacy deps parse");
+        assert_eq!(warnings.len(), 5, "unexpected warnings: {warnings:?}");
+        assert!(
+            warnings[0].starts_with("LEGACY_DEPS_JSON(line=2):"),
+            "unexpected warning text: {:?}",
+            warnings
+        );
+        assert!(
+            warnings[1].starts_with("LEGACY_DEPS_SHAPE(line=3):"),
+            "unexpected warning text: {:?}",
+            warnings
+        );
+        assert!(
+            warnings[2].starts_with("LEGACY_DEPS_KIND(line=4):"),
+            "unexpected warning text: {:?}",
+            warnings
+        );
+        assert!(
+            warnings[3].starts_with("LEGACY_DEPS_KEY(line=5):"),
+            "unexpected warning text: {:?}",
+            warnings
+        );
+        assert!(
+            warnings[4].starts_with("LEGACY_DEPS_SHAPE(line=6):"),
+            "unexpected warning text: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn legacy_dep_dot_for_key_matches_legacy_namespace_seed_order() {
+        let key = DepKey::new(bead_id("bd-a"), bead_id("bd-b"), DepKind::Blocks).unwrap();
+
+        let dot = legacy_dep_dot_for_key(&key);
+
+        let mut hasher = Sha2::new();
+        hasher.update(b"legacy-deps-v0");
+        hasher.update(key.collision_bytes());
+        let digest = hasher.finalize();
+
+        let mut replica_bytes = [0u8; 16];
+        replica_bytes.copy_from_slice(&digest[..16]);
+        let mut counter_bytes = [0u8; 8];
+        counter_bytes.copy_from_slice(&digest[16..24]);
+
+        let expected = Dot {
+            replica: ReplicaId::from(Uuid::from_bytes(replica_bytes)),
+            counter: u64::from_le_bytes(counter_bytes),
+        };
+        assert_eq!(dot, expected);
     }
 
     proptest! {

@@ -10,6 +10,7 @@ use std::fmt;
 use serde::de;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::Value;
+use sha2::{Digest, Sha256 as Sha2};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -482,15 +483,11 @@ where
 }
 
 fn legacy_labels_to_wire(labels: Vec<Label>) -> WireLabelStateV1 {
-    let replica = legacy_labels_replica();
     let mut entries: BTreeMap<Label, BTreeSet<Dot>> = BTreeMap::new();
     let unique_labels: BTreeSet<Label> = labels.into_iter().collect();
-    for (idx, label) in unique_labels.into_iter().enumerate() {
+    for label in unique_labels {
         let mut dots = BTreeSet::new();
-        dots.insert(Dot {
-            replica,
-            counter: idx as u64 + 1,
-        });
+        dots.insert(legacy_label_dot(&label));
         entries.insert(label, dots);
     }
     WireLabelStateV1 {
@@ -499,8 +496,45 @@ fn legacy_labels_to_wire(labels: Vec<Label>) -> WireLabelStateV1 {
     }
 }
 
-fn legacy_labels_replica() -> ReplicaId {
-    ReplicaId::from(Uuid::from_u128(0))
+/// Derive a deterministic synthetic dot for legacy dependency rows.
+///
+/// We hash `namespace || seed` to preserve the legacy deps migration output
+/// that already shipped.
+pub fn legacy_hash_dot(namespace: &[u8], seed: &[u8]) -> Dot {
+    legacy_hash_dot_from_digest(legacy_hash_digest(namespace, seed))
+}
+
+fn legacy_hash_dot_nonzero(namespace: &[u8], seed: &[u8]) -> Dot {
+    legacy_hash_dot_from_digest_nonzero(legacy_hash_digest(namespace, seed))
+}
+
+fn legacy_hash_digest(namespace: &[u8], seed: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha2::new();
+    hasher.update(namespace);
+    hasher.update(seed);
+    hasher.finalize().into()
+}
+
+fn legacy_hash_dot_from_digest(digest: [u8; 32]) -> Dot {
+    let mut replica_bytes = [0u8; 16];
+    replica_bytes.copy_from_slice(&digest[..16]);
+    let mut counter_bytes = [0u8; 8];
+    counter_bytes.copy_from_slice(&digest[16..24]);
+
+    Dot {
+        replica: ReplicaId::from(Uuid::from_bytes(replica_bytes)),
+        counter: u64::from_le_bytes(counter_bytes),
+    }
+}
+
+fn legacy_hash_dot_from_digest_nonzero(digest: [u8; 32]) -> Dot {
+    let mut dot = legacy_hash_dot_from_digest(digest);
+    dot.counter = dot.counter.max(1);
+    dot
+}
+
+fn legacy_label_dot(label: &Label) -> Dot {
+    legacy_hash_dot_nonzero(b"legacy-labels-v0", label.as_str().as_bytes())
 }
 
 /// Canonical bead snapshot wire format (v1).
@@ -1733,6 +1767,71 @@ mod tests {
         let wire = WireNoteV1::from(&note);
         let back = Note::from(wire);
         assert_eq!(note, back);
+    }
+
+    #[test]
+    fn legacy_label_array_conversion_joins_without_cross_label_dot_collisions() {
+        let lineage = make_stamp(10, 0, "alice");
+        let label_stamp_a = make_stamp(20, 0, "alice");
+        let label_stamp_b = make_stamp(21, 0, "bob");
+        let id = bead_id("bd-legacy-label-merge");
+
+        let mut base_state = CanonicalState::new();
+        base_state.insert_live(make_bead("bd-legacy-label-merge", &lineage));
+        let mut base_labels = LabelStore::new();
+        base_labels.insert_state(
+            id.clone(),
+            lineage.clone(),
+            SnapshotCodec::label_state_from_wire(
+                legacy_labels_to_wire(vec![
+                    Label::parse("frontend").unwrap(),
+                    Label::parse("migration").unwrap(),
+                ]),
+                label_stamp_a,
+            )
+            .unwrap(),
+        );
+        base_state.set_label_store(base_labels);
+
+        let mut peer_state = CanonicalState::new();
+        peer_state.insert_live(make_bead("bd-legacy-label-merge", &lineage));
+        let mut peer_labels = LabelStore::new();
+        peer_labels.insert_state(
+            id.clone(),
+            lineage.clone(),
+            SnapshotCodec::label_state_from_wire(
+                legacy_labels_to_wire(vec![
+                    Label::parse("api").unwrap(),
+                    Label::parse("frontend").unwrap(),
+                    Label::parse("migration").unwrap(),
+                ]),
+                label_stamp_b,
+            )
+            .unwrap(),
+        );
+        peer_state.set_label_store(peer_labels);
+
+        let merged = CanonicalState::join(&base_state, &peer_state);
+        let labels = merged.labels_for(&id);
+        assert!(labels.contains("api"));
+        assert!(labels.contains("frontend"));
+        assert!(labels.contains("migration"));
+    }
+
+    #[test]
+    fn legacy_hash_dot_preserves_zero_counter_for_compatibility() {
+        let dot = legacy_hash_dot_from_digest([0u8; 32]);
+
+        assert_eq!(dot.replica, ReplicaId::from(Uuid::nil()));
+        assert_eq!(dot.counter, 0);
+    }
+
+    #[test]
+    fn legacy_hash_dot_nonzero_clamps_zero_counter_to_one() {
+        let dot = legacy_hash_dot_from_digest_nonzero([0u8; 32]);
+
+        assert_eq!(dot.replica, ReplicaId::from(Uuid::nil()));
+        assert_eq!(dot.counter, 1);
     }
 
     #[test]

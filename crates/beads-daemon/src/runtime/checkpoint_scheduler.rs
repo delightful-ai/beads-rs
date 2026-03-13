@@ -235,6 +235,23 @@ impl CheckpointScheduler {
         scheduled
     }
 
+    pub fn force_checkpoint_group(&mut self, store_id: StoreId, group: &str) -> bool {
+        let key = CheckpointGroupKey {
+            store_id,
+            group: group.to_string(),
+        };
+        let now = Instant::now();
+        let Some(max_events) = self.groups.get(&key).map(|state| state.config.max_events) else {
+            return false;
+        };
+        if let Some(state) = self.groups.get_mut(&key) {
+            state.record_event(now, max_events);
+        }
+        self.schedule_if_needed(&key, now);
+        self.groups.get(&key).is_some_and(|state| state.in_flight)
+            || self.pending.contains_key(&key)
+    }
+
     pub fn next_deadline(&mut self) -> Option<Instant> {
         self.pop_stale();
         self.heap.peek().map(|Reverse((t, _))| *t)
@@ -590,5 +607,36 @@ mod tests {
         let due = scheduler.drain_due(now);
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].store_id, store_b);
+    }
+
+    #[test]
+    fn force_checkpoint_group_marks_only_the_requested_group_dirty() {
+        let store_id = StoreId::new(Uuid::from_bytes([14u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([15u8; 16]));
+        let mut scheduler = CheckpointScheduler::new();
+
+        let mut core = config_with_limits(store_id, replica_id);
+        core.group = "core".to_string();
+        core.git_ref = format!("refs/beads/{store_id}/core");
+        scheduler.register_group(core);
+
+        let mut overlap = config_with_limits(store_id, replica_id);
+        overlap.group = "overlap".to_string();
+        overlap.git_ref = format!("refs/beads/{store_id}/overlap");
+        scheduler.register_group(overlap);
+
+        assert!(scheduler.force_checkpoint_group(store_id, "core"));
+
+        let snapshots = scheduler.snapshot_for_store(store_id);
+        let core = snapshots
+            .iter()
+            .find(|snapshot| snapshot.group == "core")
+            .expect("core group");
+        let overlap = snapshots
+            .iter()
+            .find(|snapshot| snapshot.group == "overlap")
+            .expect("overlap group");
+        assert!(core.dirty, "requested group should be dirty");
+        assert!(!overlap.dirty, "non-requested group should stay clean");
     }
 }

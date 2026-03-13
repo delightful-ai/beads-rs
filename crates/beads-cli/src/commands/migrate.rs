@@ -104,6 +104,7 @@ where
             })?;
 
             if !args.dry_run {
+                // Best-effort daemon refresh after migration write.
                 let _ = backend.notify_migrate_refresh(MigrateRefreshRequest::new(ctx.repo_ctx()));
             }
 

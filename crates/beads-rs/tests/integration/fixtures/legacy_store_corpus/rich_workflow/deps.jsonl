@@ -1,0 +1,2 @@
+{"from":"bd-rich-claimed","to":"bd-rich-open","kind":"blocks"}
+{"issue_id":"bd-rich-open","depends_on_id":"bd-rich-closed","type":"related"}

@@ -203,7 +203,7 @@ impl Daemon {
         let mut state = store_state_from_legacy(loaded.state);
         let root_slug = loaded.root_slug;
         let checkpoint_imports = self.load_checkpoint_imports(store_id, repo);
-        for import in &checkpoint_imports {
+        for import in &checkpoint_imports.imports {
             match merge_store_states(&state, &import.state) {
                 Ok(merged) => state = merged,
                 Err(err) => {
@@ -229,14 +229,24 @@ impl Daemon {
                 .get_mut(&store_id)
                 .expect("loaded store missing from state")
                 .runtime_mut();
-            if !checkpoint_imports.is_empty() {
-                apply_checkpoint_watermarks(store, &checkpoint_imports)?;
+            if !checkpoint_imports.imports.is_empty() {
+                apply_checkpoint_watermarks(store, &checkpoint_imports.imports)?;
             }
             let replay = pending_replay.acknowledge_checkpoint_dirty(store);
             if replay.replayed_any {
                 needs_sync = true;
             }
             last_seen_stamp = max_write_stamp(last_seen_stamp, replay.max_write_stamp);
+        }
+
+        for group in checkpoint_imports.incompatible_groups {
+            if self.force_checkpoint_group(store_id, &group.group) {
+                tracing::info!(
+                    store_id = %store_id,
+                    checkpoint_group = %group.group,
+                    "scheduled checkpoint rebuild after incompatible checkpoint import"
+                );
+            }
         }
 
         if let Some(max_stamp) = last_seen_stamp.as_ref() {
