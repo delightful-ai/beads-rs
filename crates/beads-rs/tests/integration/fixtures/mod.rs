@@ -1,8 +1,6 @@
 pub mod admin_status;
 pub mod apply_harness;
 pub mod cbor;
-pub mod checkpoint;
-pub mod checkpoint_diff;
 pub mod daemon_boundary;
 pub mod daemon_runtime;
 pub mod event_body;

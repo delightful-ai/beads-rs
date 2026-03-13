@@ -12,7 +12,5 @@ mod repl;
 #[path = "integration/wal/mod.rs"]
 mod wal;
 
-#[path = "integration/checkpoint.rs"]
-mod checkpoint;
 #[path = "integration/realtime_errors.rs"]
 mod realtime_errors;

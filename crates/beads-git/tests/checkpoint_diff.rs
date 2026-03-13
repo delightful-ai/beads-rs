@@ -1,5 +1,8 @@
 #![allow(dead_code)]
 
+#[path = "checkpoint_support.rs"]
+mod checkpoint_support;
+
 use std::collections::BTreeMap;
 
 use bytes::Bytes;
@@ -10,6 +13,8 @@ use beads_git::checkpoint::{
     CheckpointExport, CheckpointManifest, CheckpointMeta, CheckpointShardPath,
     CheckpointShardPayload,
 };
+
+use checkpoint_support::fixture_small_state;
 
 pub fn diff_exports(expected: &CheckpointExport, actual: &CheckpointExport) -> Vec<String> {
     let mut diffs = Vec::new();
@@ -136,30 +141,23 @@ pub fn corrupt_payload(payload: &CheckpointShardPayload) -> CheckpointShardPaylo
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[test]
+fn checkpoint_diff_empty_for_equal_exports() {
+    let fixture = fixture_small_state();
+    let diffs = diff_exports(&fixture.export, &fixture.export);
+    assert!(diffs.is_empty());
+}
 
-    use crate::fixtures::checkpoint::fixture_small_state;
-
-    #[test]
-    fn fixtures_checkpoint_diff_empty_for_equal_exports() {
-        let fixture = fixture_small_state();
-        let diffs = diff_exports(&fixture.export, &fixture.export);
-        assert!(diffs.is_empty());
-    }
-
-    #[test]
-    fn fixtures_checkpoint_diff_detects_payload_change() {
-        let fixture = fixture_small_state();
-        let mut mutated = fixture.export.clone();
-        let path = mutated.files.keys().next().expect("file path").clone();
-        let payload = mutated.files.get(&path).expect("payload").clone();
-        mutated
-            .files
-            .insert(path.clone(), corrupt_payload(&payload));
-        let diffs = diff_exports(&fixture.export, &mutated);
-        let path_str = path.to_path();
-        assert!(diffs.iter().any(|diff| diff.contains(&path_str)));
-    }
+#[test]
+fn checkpoint_diff_detects_payload_change() {
+    let fixture = fixture_small_state();
+    let mut mutated = fixture.export.clone();
+    let path = mutated.files.keys().next().expect("file path").clone();
+    let payload = mutated.files.get(&path).expect("payload").clone();
+    mutated
+        .files
+        .insert(path.clone(), corrupt_payload(&payload));
+    let diffs = diff_exports(&fixture.export, &mutated);
+    let path_str = path.to_path();
+    assert!(diffs.iter().any(|diff| diff.contains(&path_str)));
 }

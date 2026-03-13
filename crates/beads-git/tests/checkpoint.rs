@@ -1,4 +1,5 @@
-//! Checkpoint export/import determinism.
+#[path = "checkpoint_support.rs"]
+mod checkpoint_support;
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -17,7 +18,7 @@ use beads_git::checkpoint::{
     IncludedHeads, IncludedWatermarks, export_checkpoint, import_checkpoint,
 };
 
-use crate::fixtures::checkpoint::{
+use checkpoint_support::{
     assert_manifest_files, assert_meta_hashes, fixture_multi_namespace, fixture_small_state,
 };
 
