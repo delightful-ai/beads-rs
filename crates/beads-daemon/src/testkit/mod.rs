@@ -43,6 +43,8 @@ pub mod durability_coordinator {
     pub use crate::runtime::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 }
 
+pub mod e2e;
+
 pub mod durability {
     pub use crate::runtime::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 }

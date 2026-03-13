@@ -1,3 +1,7 @@
+//! E2E replication and daemon harness support.
+
+use crate as beads_daemon;
+
 use std::cell::RefCell;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -11,7 +15,6 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use uuid::Uuid;
 
-use crate::paths;
 use beads_core::time::{WallClockGuard, WallClockSource, set_wall_clock_source_for_tests};
 use beads_core::{
     ActorId, Applied, BeadId, DurabilityClass, Durable, EventId, EventShaLookupError, Limits,
@@ -48,6 +51,8 @@ use beads_daemon_core::repl::proto::{
     PROTOCOL_VERSION_V1, ReplEnvelope, WireReplEnvelope, decode_envelope, encode_envelope,
 };
 use std::io::Cursor;
+
+use crate::paths;
 
 #[derive(Clone)]
 pub struct TestClock {

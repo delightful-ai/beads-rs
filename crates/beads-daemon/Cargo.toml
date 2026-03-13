@@ -10,7 +10,7 @@ description = "Daemon runtime crate for beads-rs"
 [features]
 default = []
 slow-tests = []
-test-harness = []
+test-harness = ["beads-core/test-harness", "beads-daemon-core/test-harness"]
 model-testing = []
 
 [dependencies]

@@ -14,8 +14,6 @@ pub mod paths;
 mod repo;
 pub(crate) mod store_admin;
 mod telemetry;
-#[cfg(feature = "test-harness")]
-pub mod test_harness;
 mod upgrade;
 
 pub use beads_daemon::compat;
