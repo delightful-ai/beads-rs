@@ -39,8 +39,8 @@ pub use server::{
     ReplicationServer, ReplicationServerConfig, ReplicationServerError, ReplicationServerHandle,
 };
 pub use session::{
-    IngestOutcome, ProtocolRange, Session, SessionAction, SessionConfig, SessionPeer, SessionPhase,
-    SessionStore, ValidatedAck, WatermarkSnapshot,
+    IngestOutcome, ProtocolRange, SessionAction, SessionConfig, SessionStore, ValidatedAck,
+    WatermarkSnapshot,
 };
 pub use store::SharedSessionStore;
 

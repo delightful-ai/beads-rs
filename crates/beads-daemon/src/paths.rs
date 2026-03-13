@@ -162,8 +162,3 @@ pub fn wal_index_path(store_id: StoreId) -> PathBuf {
 pub fn checkpoint_cache_dir(store_id: StoreId) -> PathBuf {
     moved::checkpoint_cache_dir(&data_dir(), store_id)
 }
-
-pub(crate) fn config_dir() -> PathBuf {
-    let env_config_dir = std::env::var("BD_CONFIG_DIR").ok();
-    moved::resolve_config_dir(env_config_dir.as_deref())
-}

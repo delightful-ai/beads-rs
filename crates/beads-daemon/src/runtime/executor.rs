@@ -790,9 +790,9 @@ mod tests {
         Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnId,
         TxnOpV1, WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp,
     };
+    use crate::clock::Clock;
     use crate::remote::RemoteUrl;
-    use crate::runtime::Clock;
-    use crate::runtime::Daemon;
+    use crate::runtime::core::Daemon;
     use crate::runtime::core::{HandleOutcome, insert_store_for_tests};
     use crate::runtime::ipc::{CreatePayload, MutationCtx, MutationMeta, Request, ResponsePayload};
     use crate::runtime::wal::{

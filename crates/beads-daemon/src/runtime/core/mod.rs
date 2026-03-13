@@ -443,12 +443,12 @@ mod tests {
         ManifestFile, build_snapshot, export_checkpoint, policy_hash, publish_checkpoint,
         shard_for_bead, shard_name, store_state_from_legacy,
     };
-    use crate::runtime::OpResult;
     use crate::runtime::git_worker::LoadResult;
     use crate::runtime::store::lock::read_lock_meta;
     use crate::runtime::store::runtime::StoreRuntime;
     use crate::runtime::wal::frame::encode_frame;
     use crate::runtime::wal::{HlcRow, RecordHeader, RequestProof, SegmentHeader, VerifiedRecord};
+    use beads_surface::ops::OpResult;
     use tempfile::TempDir;
 
     fn test_actor() -> ActorId {
