@@ -1,8 +1,9 @@
 //! Event validation fixtures.
 
-use beads_core::{Limits, ValidatedEventBody};
+mod support;
 
-use crate::fixtures::event_body::sample_event_body;
+use beads_core::{Limits, ValidatedEventBody};
+use support::event_body::sample_event_body;
 
 #[test]
 fn sample_event_body_validates() {

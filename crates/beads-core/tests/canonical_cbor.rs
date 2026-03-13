@@ -1,8 +1,9 @@
 //! Core CBOR hashing + decode bounds.
 
-use beads_core::{DecodeError, Limits, decode_event_body, encode_event_body_canonical};
+mod support;
 
-use crate::fixtures::cbor::{
+use beads_core::{DecodeError, Limits, decode_event_body, encode_event_body_canonical};
+use support::cbor::{
     GOLDEN_EVENT_BODY_CBOR, GOLDEN_EVENT_BODY_SHA256_HEX, golden_event_body, sha256_hex,
 };
 

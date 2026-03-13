@@ -1,5 +1,7 @@
 //! Core apply semantics + LWW determinism.
 
+mod support;
+
 use beads_core::Label;
 use beads_core::NoteAppendV1;
 use beads_core::{
@@ -8,15 +10,14 @@ use beads_core::{
     WireDotV1, WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireStamp, WriteStamp, apply_event,
     sha256_bytes,
 };
-
-use crate::fixtures::apply_harness::{
+use std::collections::BTreeMap;
+use support::apply_harness::{
     ApplyHarness, assert_note_present, assert_outcome_contains_bead, assert_outcome_contains_note,
 };
-use crate::fixtures::event_body::{
+use support::event_body::{
     actor_id, bead_id, event_body_with_delta, note_id, sample_bead_patch, sample_event_body,
     sample_note,
 };
-use std::collections::BTreeMap;
 use uuid::Uuid;
 
 fn validated(body: EventBody) -> ValidatedEventBody {
