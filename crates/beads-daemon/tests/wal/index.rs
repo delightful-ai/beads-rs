@@ -10,7 +10,7 @@ use beads_daemon::testkit::wal::{
     rebuild_index,
 };
 
-use crate::fixtures::wal::{SegmentFixture, TempWalDir, record_for_seq};
+use crate::support::wal::{SegmentFixture, TempWalDir, record_for_seq};
 
 const MAX_RECORD_BYTES: usize = 1024 * 1024;
 

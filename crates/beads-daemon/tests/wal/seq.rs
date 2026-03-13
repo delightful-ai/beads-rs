@@ -5,7 +5,7 @@ use uuid::Uuid;
 use beads_core::{Limits, NamespaceId, ReplicaId, Seq1, StoreMeta};
 use beads_daemon::testkit::wal::{VerifiedRecord, WalIndex, rebuild_index};
 
-use crate::fixtures::wal::{TempWalDir, record_for_seq};
+use crate::support::wal::{TempWalDir, record_for_seq};
 
 #[test]
 fn seq_allocation_is_monotonic() {

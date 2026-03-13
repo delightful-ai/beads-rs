@@ -9,8 +9,6 @@ mod core;
 mod daemon;
 #[path = "integration/repl/mod.rs"]
 mod repl;
-#[path = "integration/wal/mod.rs"]
-mod wal;
 
 #[path = "integration/realtime_errors.rs"]
 mod realtime_errors;

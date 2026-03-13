@@ -10,8 +10,8 @@ use beads_daemon::testkit::wal::fsck::{
 };
 use beads_daemon::testkit::wal::{SegmentRow, VerifiedRecord, WalIndex, rebuild_index};
 
-use crate::fixtures::wal::{TempWalDir, record_for_seq};
-use crate::fixtures::wal_corrupt::{
+use crate::support::wal::{TempWalDir, record_for_seq};
+use crate::support::wal_corrupt::{
     corrupt_frame_body, corrupt_record_header_event_time, corrupt_record_header_sha, truncate_file,
     truncate_frame_mid_body,
 };

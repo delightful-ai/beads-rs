@@ -7,8 +7,8 @@ use beads_core::{Limits, NamespaceId, ReplicaId, decode_event_body};
 use beads_daemon::testkit::wal::{FrameReader, WalReplayError, rebuild_index};
 use uuid::Uuid;
 
-use crate::fixtures::wal::{TempWalDir, record_for_seq, sample_record};
-use crate::fixtures::wal_corrupt::{
+use crate::support::wal::{TempWalDir, record_for_seq, sample_record};
+use crate::support::wal_corrupt::{
     corrupt_frame_body, corrupt_record_header_event_time, truncated_segment,
 };
 

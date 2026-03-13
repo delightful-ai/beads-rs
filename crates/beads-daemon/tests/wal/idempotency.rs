@@ -5,9 +5,9 @@ use uuid::Uuid;
 use beads_core::{EventId, NamespaceId, Seq1, TxnId};
 use beads_daemon::testkit::wal::{ClientRequestEventIds, WalIndex, WalIndexError};
 
-use crate::fixtures::identity;
-use crate::fixtures::mutation;
-use crate::fixtures::wal::TempWalDir;
+use crate::support::identity;
+use crate::support::mutation;
+use crate::support::wal::TempWalDir;
 
 #[test]
 fn idempotency_mapping_reuses_txn_and_event_ids() {

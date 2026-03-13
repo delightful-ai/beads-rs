@@ -8,9 +8,9 @@ use beads_core::{
 };
 use beads_daemon::testkit::wal::{ClientRequestEventIds, WalIndex, rebuild_index};
 
-use crate::fixtures::identity;
-use crate::fixtures::receipt;
-use crate::fixtures::wal::{TempWalDir, record_for_seq};
+use crate::support::identity;
+use crate::support::receipt;
+use crate::support::wal::{TempWalDir, record_for_seq};
 
 #[test]
 fn receipt_min_seen_is_monotonic() {
