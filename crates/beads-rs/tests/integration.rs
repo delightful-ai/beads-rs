@@ -3,8 +3,6 @@ mod fixtures;
 
 #[path = "integration/cli/mod.rs"]
 mod cli;
-#[path = "integration/core/mod.rs"]
-mod core;
 #[path = "integration/daemon/mod.rs"]
 mod daemon;
 

@@ -68,6 +68,30 @@ fn remaining_daemon_facing_tests_are_documented_as_assembly_owned() {
     );
 }
 
+#[test]
+fn mixed_owner_core_tests_do_not_live_under_beads_rs_integration_core() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("canonical repo root");
+    let core_mod = repo_root.join("crates/beads-rs/tests/integration/core/mod.rs");
+    if !core_mod.exists() {
+        return;
+    }
+
+    let core_contents = fs::read_to_string(&core_mod)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", core_mod.display()));
+
+    assert!(
+        !core_contents.contains("mod deps;"),
+        "mixed-owner deps coverage should not live under beads-rs integration/core"
+    );
+    assert!(
+        !core_contents.contains("mod identity;"),
+        "mixed-owner identity coverage should not live under beads-rs integration/core"
+    );
+}
+
 fn collect_forbidden_daemon_imports(root: &Path, daemon_root: &Path, matches: &mut Vec<String>) {
     let runtime_path = ["beads_daemon", "::runtime::"].concat();
     let git_path = ["beads_daemon", "::git::"].concat();
