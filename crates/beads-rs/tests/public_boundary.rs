@@ -20,6 +20,30 @@ fn daemon_runtime_paths_are_not_imported_outside_daemon_crate() {
     );
 }
 
+#[test]
+fn upgrade_support_is_not_exported_from_cli_or_public_beads_rs_surface() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("canonical repo root");
+    let beads_cli_lib = repo_root.join("crates/beads-cli/src/lib.rs");
+    let beads_rs_lib = repo_root.join("crates/beads-rs/src/lib.rs");
+
+    let beads_cli_contents = fs::read_to_string(&beads_cli_lib)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", beads_cli_lib.display()));
+    let beads_rs_contents = fs::read_to_string(&beads_rs_lib)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", beads_rs_lib.display()));
+
+    assert!(
+        !beads_cli_contents.contains("pub mod upgrade;"),
+        "beads-cli should not publicly export upgrade support"
+    );
+    assert!(
+        !beads_rs_contents.contains("pub mod upgrade;"),
+        "beads-rs should not publicly export upgrade internals"
+    );
+}
+
 fn collect_forbidden_daemon_imports(root: &Path, daemon_root: &Path, matches: &mut Vec<String>) {
     let runtime_path = ["beads_daemon", "::runtime::"].concat();
     let git_path = ["beads_daemon", "::git::"].concat();

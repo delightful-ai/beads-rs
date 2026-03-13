@@ -168,7 +168,6 @@ dependencies = [
  "thiserror 1.0.69",
  "time",
  "tracing",
- "ureq",
  "uuid",
  "whoami",
 ]

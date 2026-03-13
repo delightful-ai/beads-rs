@@ -11,12 +11,12 @@ pub mod error;
 #[cfg(feature = "model-testing")]
 pub mod model;
 pub mod paths;
-pub mod repo;
+mod repo;
 pub(crate) mod store_admin;
-pub mod telemetry;
+mod telemetry;
 #[cfg(feature = "test-harness")]
 pub mod test_harness;
-pub mod upgrade;
+mod upgrade;
 
 pub use beads_daemon::compat;
 pub use error::{Effect, Error, OpError, Transience};
