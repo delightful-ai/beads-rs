@@ -16,7 +16,7 @@ pub mod wire;
 
 pub use error::{SyncError, WireError};
 pub use observe::{NoopSyncObserver, SyncObserver};
-pub use paths::init_data_dir_override;
+pub use paths::{DataDirOverride, init_data_dir_override, override_data_dir_for_tests};
 pub use sync::{
     DivergenceInfo, LoadedStore, LoadedStoreMigration, MigrateStoreToV1Outcome, SyncDiff,
     SyncOutcome, SyncProcess, init_beads_ref, migrate_store_ref_to_v1, read_state_at_oid,

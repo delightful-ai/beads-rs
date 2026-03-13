@@ -61,12 +61,17 @@ pub(crate) fn log_dir() -> PathBuf {
 #[doc(hidden)]
 pub struct DataDirOverride {
     prev: Option<PathBuf>,
+    _git_override: beads_git::DataDirOverride,
 }
 
 impl DataDirOverride {
     pub fn new(path: Option<PathBuf>) -> Self {
+        let git_override = beads_git::override_data_dir_for_tests(path.clone());
         let prev = TEST_DATA_DIR_OVERRIDE.with(|cell| cell.replace(path));
-        Self { prev }
+        Self {
+            prev,
+            _git_override: git_override,
+        }
     }
 }
 
