@@ -98,48 +98,7 @@ pub(crate) fn daemon_layout_from_paths() -> beads_daemon::layout::DaemonLayout {
 pub(crate) fn daemon_runtime_config_from_config(
     config: &config::Config,
 ) -> beads_daemon::config::DaemonRuntimeConfig {
-    beads_daemon::config::DaemonRuntimeConfig {
-        limits: config.limits.clone(),
-        namespace_defaults: config.namespace_defaults.namespaces.clone(),
-        checkpoint_groups: config
-            .checkpoint_groups
-            .iter()
-            .map(|(name, group)| {
-                (
-                    name.clone(),
-                    beads_daemon::config::CheckpointGroupConfig {
-                        namespaces: group.namespaces.clone(),
-                        git_ref: group.git_ref.clone(),
-                        checkpoint_writers: group.checkpoint_writers.clone(),
-                        primary_writer: group.primary_writer,
-                        debounce_ms: group.debounce_ms,
-                        max_interval_ms: group.max_interval_ms,
-                        max_events: group.max_events,
-                        durable_copy_via_git: group.durable_copy_via_git,
-                    },
-                )
-            })
-            .collect(),
-        replication: beads_daemon::config::ReplicationConfig {
-            listen_addr: config.replication.listen_addr.clone(),
-            max_connections: config.replication.max_connections,
-            peers: config
-                .replication
-                .peers
-                .iter()
-                .map(|peer| beads_daemon::config::ReplicationPeerConfig {
-                    replica_id: peer.replica_id,
-                    addr: peer.addr.clone(),
-                    role: peer.role,
-                    allowed_namespaces: peer.allowed_namespaces.clone(),
-                })
-                .collect(),
-            backoff_base_ms: config.replication.backoff_base_ms,
-            backoff_max_ms: config.replication.backoff_max_ms,
-        },
-        git_sync_policy: beads_daemon::config::GitSyncPolicy::from_env(),
-        checkpoint_policy: beads_daemon::config::CheckpointPolicy::from_env(),
-    }
+    beads_daemon::config::daemon_runtime_from_config(config)
 }
 
 fn daemon_actor_from_config(config: &config::Config) -> Result<beads_core::ActorId> {
