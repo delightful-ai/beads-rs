@@ -11,13 +11,16 @@
 //! - Retry on non-fast-forward: fetch again, re-merge
 //! - Meaningful commit messages: "beads(store): +2 created, ~1 updated"
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use git2::{ErrorCode, ObjectType, Oid, Repository, Signature};
+use tempfile::TempDir;
 
 use super::error::SyncError;
 use super::observe::{NoopSyncObserver, SyncObserver};
@@ -29,6 +32,8 @@ const BACKUP_REF_PREFIX: &str = "refs/beads/backup/";
 const BACKUP_REFS_GLOB: &str = "refs/beads/backup/*";
 const MAX_BACKUP_REFS: usize = 64;
 const BACKUP_REF_LOCK_STALE_AFTER: Duration = Duration::from_secs(30);
+const ENV_TESTING: &str = "BD_TESTING";
+const ENV_TEST_MIGRATE_BEFORE_PUSH_WINNER: &str = "BD_TEST_MIGRATE_BEFORE_PUSH_WINNER";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BackupLockPidState {
@@ -587,70 +592,16 @@ impl SyncProcess<Merged> {
                     ..
                 },
         } = self;
-
-        // Serialize state to blobs
-        let state_bytes = wire::serialize_state(&state)?;
-        let tombs_bytes = wire::serialize_tombstones(&state)?;
-        let deps_bytes = wire::serialize_deps(&state)?;
-        let notes_bytes = wire::serialize_notes(&state)?;
-        let mut meta_last_stamp = state.max_write_stamp();
-        if let Some(parent_stamp) = parent_meta_stamp {
-            meta_last_stamp = match meta_last_stamp {
-                Some(state_stamp) => Some(std::cmp::max(state_stamp, parent_stamp)),
-                None => Some(parent_stamp),
-            };
-        }
-        let checksums = wire::StoreChecksums::from_bytes(
-            &state_bytes,
-            &tombs_bytes,
-            &deps_bytes,
-            Some(&notes_bytes),
-        );
-        let meta_bytes = wire::serialize_meta(
-            root_slug.as_ref().map(BeadSlug::as_str),
-            meta_last_stamp.as_ref(),
-            &checksums,
-        )?;
-
-        // Write blobs to ODB
-        let state_oid = repo.blob(&state_bytes)?;
-        let tombs_oid = repo.blob(&tombs_bytes)?;
-        let deps_oid = repo.blob(&deps_bytes)?;
-        let notes_oid = repo.blob(&notes_bytes)?;
-        let meta_oid = repo.blob(&meta_bytes)?;
-
-        // Build tree
-        let mut builder = repo.treebuilder(None)?;
-        builder.insert("state.jsonl", state_oid, 0o100644)?;
-        builder.insert("tombstones.jsonl", tombs_oid, 0o100644)?;
-        builder.insert("deps.jsonl", deps_oid, 0o100644)?;
-        builder.insert("notes.jsonl", notes_oid, 0o100644)?;
-        builder.insert("meta.json", meta_oid, 0o100644)?;
-        let tree_oid = builder.write()?;
-        let tree = repo.find_tree(tree_oid)?;
-
-        // Create signature
-        let sig = Signature::now("beads", "beads@localhost")?;
-
-        // Commit message
         let message = diff.to_commit_message();
-
-        // Create commit with single parent (linear history)
-        let parents: Vec<_> = if parent_oid.is_zero() {
-            // Initial commit - no parents
-            vec![]
-        } else {
-            let parent_commit = repo.find_commit(parent_oid)?;
-            vec![parent_commit]
-        };
-
-        let parent_refs: Vec<_> = parents.iter().collect();
-        let commit_oid = repo.commit(None, &sig, &sig, &message, &tree, &parent_refs)?;
-        update_ref(
+        let persisted_meta_stamp =
+            max_write_stamp(state.max_write_stamp(), parent_meta_stamp.clone());
+        let commit_oid = commit_store_snapshot(
             repo,
-            "refs/heads/beads/store",
-            commit_oid,
-            "beads sync: update local ref",
+            parent_oid,
+            &state,
+            root_slug.as_ref(),
+            persisted_meta_stamp.as_ref(),
+            &message,
         )?;
 
         Ok(SyncProcess {
@@ -676,15 +627,6 @@ impl SyncProcess<Committed> {
             commit_oid: _,
             state,
         } = phase;
-
-        let is_retryable = |message: &str| {
-            let msg = message.to_lowercase();
-            msg.contains("non-fast-forward")
-                || msg.contains("fetch first")
-                || msg.contains("cannot lock ref")
-                || msg.contains("failed to update ref")
-                || msg.contains("failed to lock file")
-        };
         let push_started = Instant::now();
         observer.on_push_start();
 
@@ -736,7 +678,7 @@ impl SyncProcess<Committed> {
 
             if let Err(e) = remote.push(&[refspec], Some(&mut push_options)) {
                 let msg = e.to_string();
-                if is_retryable(&msg) {
+                if is_retryable_push_error_message(&msg) {
                     return Err(SyncError::NonFastForward);
                 }
                 return Err(SyncError::from(e));
@@ -744,7 +686,7 @@ impl SyncProcess<Committed> {
         }
 
         if let Some(err) = push_error.into_inner() {
-            if is_retryable(&err) {
+            if is_retryable_push_error_message(&err) {
                 return Err(SyncError::NonFastForward);
             }
             return Err(crate::error::PushRejected { message: err }.into());
@@ -778,7 +720,7 @@ pub struct LoadedStore {
     pub meta: wire::SupportedStoreMeta,
 }
 
-/// Data loaded from a beads store commit for migration-aware reads.
+/// Data loaded from a beads store commit via migration-aware parsing.
 pub struct LoadedStoreMigration {
     pub state: CanonicalState,
     pub meta: wire::SupportedStoreMeta,
@@ -787,32 +729,88 @@ pub struct LoadedStoreMigration {
     pub notes_present: bool,
 }
 
+pub struct RemoteStorePreview {
+    _tempdir: TempDir,
+    repo: Repository,
+    oid: Oid,
+}
+
+impl RemoteStorePreview {
+    pub fn repo(&self) -> &Repository {
+        &self.repo
+    }
+
+    pub fn oid(&self) -> Oid {
+        self.oid
+    }
+}
+
 /// Read state from a commit oid.
 pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, SyncError> {
     let commit = repo.find_commit(oid)?;
     let tree = commit.tree()?;
 
-    let state_bytes = read_required_tree_blob(repo, &tree, "state.jsonl")?;
-    let tombs_bytes = read_required_tree_blob(repo, &tree, "tombstones.jsonl")?;
-    let deps_bytes = read_required_tree_blob(repo, &tree, "deps.jsonl")?;
-    let notes_bytes = read_optional_tree_blob(repo, &tree, "notes.jsonl")?.unwrap_or_default();
+    // Read state.jsonl
+    let state_entry = tree
+        .get_name("state.jsonl")
+        .ok_or(SyncError::MissingFile("state.jsonl".into()))?;
+    let state_blob = repo
+        .find_object(state_entry.id(), Some(ObjectType::Blob))?
+        .peel_to_blob()?;
 
-    let meta = if let Some(meta_bytes) = read_optional_tree_blob(repo, &tree, "meta.json")? {
-        wire::parse_supported_meta(&meta_bytes)?
+    // Read tombstones.jsonl
+    let tombs_entry = tree
+        .get_name("tombstones.jsonl")
+        .ok_or(SyncError::MissingFile("tombstones.jsonl".into()))?;
+    let tombs_blob = repo
+        .find_object(tombs_entry.id(), Some(ObjectType::Blob))?
+        .peel_to_blob()?;
+
+    // Read deps.jsonl
+    let deps_entry = tree
+        .get_name("deps.jsonl")
+        .ok_or(SyncError::MissingFile("deps.jsonl".into()))?;
+    let deps_blob = repo
+        .find_object(deps_entry.id(), Some(ObjectType::Blob))?
+        .peel_to_blob()?;
+
+    // Read notes.jsonl (optional in legacy format)
+    let notes_bytes = if let Some(notes_entry) = tree.get_name("notes.jsonl") {
+        let notes_blob = repo
+            .find_object(notes_entry.id(), Some(ObjectType::Blob))?
+            .peel_to_blob()?;
+        notes_blob.content().to_vec()
+    } else {
+        Vec::new()
+    };
+
+    // Read meta.json for root_slug + last_write_stamp + checksums
+    let meta = if let Some(meta_entry) = tree.get_name("meta.json") {
+        let meta_blob = repo
+            .find_object(meta_entry.id(), Some(ObjectType::Blob))?
+            .peel_to_blob()?;
+        wire::parse_supported_meta(meta_blob.content())?
     } else {
         wire::SupportedStoreMeta::legacy()
     };
-    if let Some(expected) = meta.checksums() {
+    let checksums = meta.checksums();
+
+    if let Some(expected) = checksums {
         wire::verify_store_checksums(
             expected,
-            &state_bytes,
-            &tombs_bytes,
-            &deps_bytes,
+            state_blob.content(),
+            tombs_blob.content(),
+            deps_blob.content(),
             &notes_bytes,
         )?;
     }
 
-    let state = wire::parse_legacy_state(&state_bytes, &tombs_bytes, &deps_bytes, &notes_bytes)?;
+    let state = wire::parse_legacy_state(
+        state_blob.content(),
+        tombs_blob.content(),
+        deps_blob.content(),
+        &notes_bytes,
+    )?;
 
     Ok(LoadedStore { state, meta })
 }
@@ -1094,15 +1092,40 @@ pub fn sync_with_retry_with_observer(
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MigratePushDisposition {
+    Pushed,
+    SkippedNoPush,
+    SkippedNoRemote,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MigrateStoreToV1Outcome {
+    pub from_effective_version: u32,
     pub deps_format_before: wire::DepsFormat,
     pub converted_deps: bool,
     pub added_notes_file: bool,
     pub wrote_checksums: bool,
     pub commit_oid: Option<Oid>,
-    pub pushed: bool,
+    pub push: MigratePushDisposition,
     pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MigrationSourceSummary {
+    from_effective_version: u32,
+    deps_format_before: wire::DepsFormat,
+    converted_deps: bool,
+    added_notes_file: bool,
+    wrote_checksums: bool,
+    warnings: Vec<String>,
+}
+
+struct ResolvedMigrationInputs {
+    merged_state: CanonicalState,
+    root_slug: BeadSlug,
+    parent_meta_stamp: Option<WriteStamp>,
+    summary: MigrationSourceSummary,
 }
 
 /// Rewrite `refs/heads/beads/store` to canonical v1 shape.
@@ -1111,16 +1134,69 @@ pub struct MigrateStoreToV1Outcome {
 /// remain unchanged.
 pub fn migrate_store_ref_to_v1(
     repo: &Repository,
-    _repo_path: &Path,
+    repo_path: &Path,
     dry_run: bool,
     force: bool,
     no_push: bool,
     max_retries: usize,
 ) -> Result<MigrateStoreToV1Outcome, SyncError> {
+    if dry_run {
+        return preview_migrate_store_ref_to_v1(repo, force);
+    }
+    migrate_store_ref_to_v1_with_before_push(
+        repo,
+        repo_path,
+        dry_run,
+        force,
+        no_push,
+        max_retries,
+        |retries, _| apply_test_migrate_before_push_hook(repo, retries),
+    )
+}
+
+#[doc(hidden)]
+pub fn migrate_store_ref_to_v1_with_before_push_for_testing<F>(
+    repo: &Repository,
+    repo_path: &Path,
+    dry_run: bool,
+    force: bool,
+    no_push: bool,
+    max_retries: usize,
+    before_push: F,
+) -> Result<MigrateStoreToV1Outcome, SyncError>
+where
+    F: FnMut(usize, Oid) -> Result<(), SyncError>,
+{
+    migrate_store_ref_to_v1_with_before_push(
+        repo,
+        repo_path,
+        dry_run,
+        force,
+        no_push,
+        max_retries,
+        before_push,
+    )
+}
+
+fn migrate_store_ref_to_v1_with_before_push<F>(
+    repo: &Repository,
+    _repo_path: &Path,
+    dry_run: bool,
+    force: bool,
+    no_push: bool,
+    max_retries: usize,
+    mut before_push: F,
+) -> Result<MigrateStoreToV1Outcome, SyncError>
+where
+    F: FnMut(usize, Oid) -> Result<(), SyncError>,
+{
+    let initial_local_oid_opt = refname_to_id_optional(repo, "refs/heads/beads/store")?;
+    let mut source_summary: Option<MigrationSourceSummary> = None;
     let mut retries = 0usize;
 
     loop {
-        if !dry_run && !no_push {
+        let local_oid_before_fetch = refname_to_id_optional(repo, "refs/heads/beads/store")?;
+        if !no_push || local_oid_before_fetch.is_none() {
             fetch_store_ref(repo)?;
         }
 
@@ -1131,18 +1207,15 @@ pub fn migrate_store_ref_to_v1(
             return Err(SyncError::NoLocalRef("refs/heads/beads/store".into()));
         }
 
-        let mut backup_local_oid = None;
         if let (Some(local_oid), Some(remote_oid)) = (local_oid_opt, remote_oid_opt)
             && local_oid != remote_oid
+            && should_refuse_migration_divergence(
+                force,
+                has_common_ancestor(repo, local_oid, remote_oid)?,
+            )
         {
-            let remote_is_descendant = repo.graph_descendant_of(remote_oid, local_oid)?;
-            let local_is_descendant = repo.graph_descendant_of(local_oid, remote_oid)?;
-            if !remote_is_descendant && !local_is_descendant && !force {
-                return Err(SyncError::NoCommonAncestor);
-            }
-            if !remote_is_descendant {
-                backup_local_oid = Some(local_oid);
-            }
+            restore_local_store_ref(repo, initial_local_oid_opt, local_oid_opt)?;
+            return Err(SyncError::NoCommonAncestor);
         }
 
         let local_loaded = match local_oid_opt {
@@ -1157,156 +1230,477 @@ pub fn migrate_store_ref_to_v1(
         let parent_oid = remote_oid_opt
             .or(local_oid_opt)
             .expect("store ref oid should exist");
-        let mut merged_state = CanonicalState::new();
-        if let Some(local) = local_loaded.as_ref() {
-            merged_state = merged_state.join(&local.state);
-        }
-        if let Some(remote) = remote_loaded.as_ref() {
-            merged_state = merged_state.join(&remote.state);
+        let resolution = resolve_migration_inputs(local_loaded.as_ref(), remote_loaded.as_ref());
+        if !force && !resolution.summary.warnings.is_empty() {
+            return Err(SyncError::MigrationWarnings(
+                resolution.summary.warnings.clone(),
+            ));
         }
 
-        let local_has_legacy_deps = matches!(
-            local_loaded.as_ref().map(|loaded| loaded.deps_format),
-            Some(wire::DepsFormat::LegacyEdges)
-        );
-        let remote_has_legacy_deps = matches!(
-            remote_loaded.as_ref().map(|loaded| loaded.deps_format),
-            Some(wire::DepsFormat::LegacyEdges)
-        );
-        let deps_format_before = if local_has_legacy_deps || remote_has_legacy_deps {
-            wire::DepsFormat::LegacyEdges
-        } else {
-            wire::DepsFormat::OrSetV1
-        };
-        let converted_deps = local_has_legacy_deps || remote_has_legacy_deps;
-        let notes_present_before = local_loaded
-            .as_ref()
-            .map(|loaded| loaded.notes_present)
-            .unwrap_or(true)
-            && remote_loaded
-                .as_ref()
-                .map(|loaded| loaded.notes_present)
-                .unwrap_or(true);
-        let checksums_present_before = local_loaded
-            .as_ref()
-            .map(has_full_store_checksums)
-            .unwrap_or(true)
-            && remote_loaded
-                .as_ref()
-                .map(has_full_store_checksums)
-                .unwrap_or(true);
-
-        let needs_rewrite =
-            force || converted_deps || !notes_present_before || !checksums_present_before;
-        let mut warnings = Vec::new();
-        if let Some(local) = local_loaded.as_ref() {
-            warnings.extend(local.warnings.clone());
-        }
-        if let Some(remote) = remote_loaded.as_ref() {
-            warnings.extend(remote.warnings.clone());
-        }
-        warnings.sort();
-        warnings.dedup();
-        if !dry_run && !force && !warnings.is_empty() {
-            return Err(SyncError::MigrationWarnings(warnings));
+        let snapshot = serialize_store_snapshot(
+            &resolution.merged_state,
+            Some(&resolution.root_slug),
+            resolution.parent_meta_stamp.as_ref(),
+        )?;
+        let parent_matches_snapshot = store_tree_matches_snapshot(repo, parent_oid, &snapshot)?;
+        let needs_rewrite = !parent_matches_snapshot;
+        if needs_rewrite && source_summary.is_none() {
+            source_summary = Some(resolution.summary.clone());
         }
 
         if !needs_rewrite {
-            return Ok(MigrateStoreToV1Outcome {
-                deps_format_before,
-                converted_deps: false,
-                added_notes_file: false,
-                wrote_checksums: false,
-                commit_oid: None,
-                pushed: false,
-                warnings,
-            });
+            let has_origin_remote = repo.find_remote("origin").is_ok();
+            let should_push_existing_local = !no_push
+                && remote_oid_opt.is_none()
+                && has_origin_remote
+                && local_oid_opt.is_some();
+
+            if should_push_existing_local {
+                let local_oid = local_oid_opt.expect("local store ref should exist for no-op push");
+                before_push(retries, local_oid)?;
+                match push_store_ref(repo) {
+                    Ok(pushed) => {
+                        let noop_summary = canonical_noop_summary(&resolution.summary);
+                        let summary = source_summary.as_ref().unwrap_or(&noop_summary);
+                        return Ok(migration_outcome(
+                            summary,
+                            None,
+                            if pushed {
+                                MigratePushDisposition::Pushed
+                            } else {
+                                MigratePushDisposition::SkippedNoRemote
+                            },
+                        ));
+                    }
+                    Err(SyncError::NonFastForward) => {
+                        retries += 1;
+                        if retries > max_retries {
+                            return Err(SyncError::TooManyRetries(retries));
+                        }
+                        continue;
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+
+            if !dry_run {
+                maybe_align_local_store_ref_to_remote(repo, local_oid_opt, remote_oid_opt)?;
+            }
+            let noop_summary = canonical_noop_summary(&resolution.summary);
+            let summary = source_summary.as_ref().unwrap_or(&noop_summary);
+            let push = if no_push || remote_oid_opt.is_some() {
+                MigratePushDisposition::SkippedNoPush
+            } else {
+                MigratePushDisposition::SkippedNoRemote
+            };
+            return Ok(migration_outcome(summary, None, push));
         }
 
-        if dry_run {
-            return Ok(MigrateStoreToV1Outcome {
-                deps_format_before,
-                converted_deps,
-                added_notes_file: !notes_present_before,
-                wrote_checksums: true,
-                commit_oid: None,
-                pushed: false,
-                warnings,
-            });
-        }
-
-        if let Some(local_oid) = backup_local_oid.or(local_oid_opt) {
+        if let Some(local_oid) = local_oid_opt {
             ensure_backup_ref_with_observer(repo, local_oid, &NoopSyncObserver)?;
         }
 
-        let root_slug = remote_loaded
-            .as_ref()
-            .and_then(|loaded| loaded.meta.root_slug())
-            .or_else(|| {
-                local_loaded
-                    .as_ref()
-                    .and_then(|loaded| loaded.meta.root_slug())
-            })
-            .cloned()
-            .unwrap_or_else(|| derive_root_slug(repo));
-
-        let parent_meta_stamp = max_write_stamp(
-            remote_loaded
-                .as_ref()
-                .and_then(|loaded| loaded.meta.last_write_stamp())
-                .cloned(),
-            local_loaded
-                .as_ref()
-                .and_then(|loaded| loaded.meta.last_write_stamp())
-                .cloned(),
-        );
-
+        let message = "migrate: deps to OR-Set v1";
         let commit_oid = commit_store_snapshot(
             repo,
             parent_oid,
-            &merged_state,
-            Some(&root_slug),
-            parent_meta_stamp.as_ref(),
-            "migrate: deps to OR-Set v1",
+            &resolution.merged_state,
+            Some(&resolution.root_slug),
+            resolution.parent_meta_stamp.as_ref(),
+            message,
         )?;
+        let summary = source_summary.as_ref().unwrap_or(&resolution.summary);
 
         if no_push {
-            return Ok(MigrateStoreToV1Outcome {
-                deps_format_before,
-                converted_deps,
-                added_notes_file: !notes_present_before,
-                wrote_checksums: true,
-                commit_oid: Some(commit_oid),
-                pushed: false,
-                warnings,
-            });
+            return Ok(migration_outcome(
+                summary,
+                Some(commit_oid),
+                MigratePushDisposition::SkippedNoPush,
+            ));
         }
 
+        before_push(retries, commit_oid)?;
         match push_store_ref(repo) {
             Ok(pushed) => {
-                return Ok(MigrateStoreToV1Outcome {
-                    deps_format_before,
-                    converted_deps,
-                    added_notes_file: !notes_present_before,
-                    wrote_checksums: true,
-                    commit_oid: Some(commit_oid),
-                    pushed,
-                    warnings,
-                });
+                return Ok(migration_outcome(
+                    summary,
+                    Some(commit_oid),
+                    if pushed {
+                        MigratePushDisposition::Pushed
+                    } else {
+                        MigratePushDisposition::SkippedNoRemote
+                    },
+                ));
             }
             Err(SyncError::NonFastForward) => {
-                restore_store_ref(
-                    repo,
-                    local_oid_opt,
-                    "beads migrate: restore local ref after retryable push failure",
-                )?;
                 retries += 1;
                 if retries > max_retries {
+                    let current_local_oid_opt =
+                        refname_to_id_optional(repo, "refs/heads/beads/store")?;
+                    restore_local_store_ref(repo, initial_local_oid_opt, current_local_oid_opt)?;
                     return Err(SyncError::TooManyRetries(retries));
                 }
             }
             Err(err) => return Err(err),
         }
+    }
+}
+
+fn apply_test_migrate_before_push_hook(repo: &Repository, retries: usize) -> Result<(), SyncError> {
+    if std::env::var_os(ENV_TESTING).as_deref() != Some(OsStr::new("1")) {
+        return Ok(());
+    }
+    let Some(spec) = std::env::var_os(ENV_TEST_MIGRATE_BEFORE_PUSH_WINNER) else {
+        return Ok(());
+    };
+    let (only_once, oid_text) = parse_test_before_push_winner_spec(spec)?;
+    if only_once && retries > 0 {
+        return Ok(());
+    }
+
+    let winner_oid = Oid::from_str(&oid_text).map_err(|err| {
+        SyncError::Io(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("{ENV_TEST_MIGRATE_BEFORE_PUSH_WINNER} winner oid is invalid: {err}"),
+        ))
+    })?;
+    let remote = repo.find_remote("origin").map_err(SyncError::Git)?;
+    let remote_url = remote.url().ok_or_else(|| {
+        SyncError::Io(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            "origin remote has no configured URL for migration test hook",
+        ))
+    })?;
+    let remote_repo =
+        Repository::open(remote_url).map_err(|err| SyncError::OpenRepo(remote_url.into(), err))?;
+    remote_repo
+        .reference(
+            "refs/heads/beads/store",
+            winner_oid,
+            true,
+            "beads migrate test hook: simulate push race",
+        )
+        .map_err(SyncError::from)?;
+    Ok(())
+}
+
+fn parse_test_before_push_winner_spec(spec: OsString) -> Result<(bool, String), SyncError> {
+    let spec = spec.into_string().map_err(|_| {
+        SyncError::Io(std::io::Error::new(
+            ErrorKind::InvalidInput,
+            format!("{ENV_TEST_MIGRATE_BEFORE_PUSH_WINNER} must be valid UTF-8"),
+        ))
+    })?;
+    if let Some((mode, oid)) = spec.split_once(':') {
+        match mode {
+            "once" => return Ok((true, oid.to_string())),
+            "always" => return Ok((false, oid.to_string())),
+            _ => {
+                return Err(SyncError::Io(std::io::Error::new(
+                    ErrorKind::InvalidInput,
+                    format!(
+                        "{ENV_TEST_MIGRATE_BEFORE_PUSH_WINNER} mode must be `once` or `always`"
+                    ),
+                )));
+            }
+        }
+    }
+    Ok((true, spec))
+}
+
+fn preview_migrate_store_ref_to_v1(
+    repo: &Repository,
+    force: bool,
+) -> Result<MigrateStoreToV1Outcome, SyncError> {
+    let local_oid_opt = refname_to_id_optional(repo, "refs/heads/beads/store")?;
+    let live_remote_preview = open_remote_store_preview(repo)?;
+    let remote_oid_opt = live_remote_preview.as_ref().map(RemoteStorePreview::oid);
+
+    if local_oid_opt.is_none() && remote_oid_opt.is_none() {
+        return Err(SyncError::NoLocalRef("refs/heads/beads/store".into()));
+    }
+
+    if let (Some(local_oid), Some(remote_oid)) = (local_oid_opt, remote_oid_opt)
+        && local_oid != remote_oid
+    {
+        let has_common_ancestor = match live_remote_preview.as_ref() {
+            Some(preview) if remote_oid_opt == Some(preview.oid()) => {
+                preview_has_common_ancestor(repo, local_oid, preview)?
+            }
+            _ => has_common_ancestor(repo, local_oid, remote_oid)?,
+        };
+        if should_refuse_migration_divergence(force, has_common_ancestor) {
+            return Err(SyncError::NoCommonAncestor);
+        }
+    }
+
+    let local_loaded = match local_oid_opt {
+        Some(oid) => Some(read_state_at_oid_for_migration(repo, oid)?),
+        None => None,
+    };
+    let remote_loaded = if let Some(preview) = live_remote_preview.as_ref() {
+        Some(read_state_at_oid_for_migration(
+            preview.repo(),
+            preview.oid(),
+        )?)
+    } else {
+        None
+    };
+    let resolution = resolve_migration_inputs(local_loaded.as_ref(), remote_loaded.as_ref());
+    let parent_oid = remote_oid_opt
+        .or(local_oid_opt)
+        .expect("store ref oid should exist");
+    let snapshot = serialize_store_snapshot(
+        &resolution.merged_state,
+        Some(&resolution.root_slug),
+        resolution.parent_meta_stamp.as_ref(),
+    )?;
+    let parent_matches_snapshot = match live_remote_preview.as_ref() {
+        Some(preview) if remote_oid_opt == Some(preview.oid()) => {
+            store_tree_matches_snapshot(preview.repo(), preview.oid(), &snapshot)?
+        }
+        _ => store_tree_matches_snapshot(repo, parent_oid, &snapshot)?,
+    };
+    let needs_rewrite = !parent_matches_snapshot;
+    let summary = if needs_rewrite {
+        resolution.summary.clone()
+    } else {
+        canonical_noop_summary(&resolution.summary)
+    };
+    Ok(migration_outcome(
+        &summary,
+        None,
+        MigratePushDisposition::SkippedNoPush,
+    ))
+}
+
+fn should_refuse_migration_divergence(force: bool, has_common_ancestor: bool) -> bool {
+    !force && !has_common_ancestor
+}
+
+fn resolve_migration_inputs(
+    local_loaded: Option<&LoadedStoreMigration>,
+    remote_loaded: Option<&LoadedStoreMigration>,
+) -> ResolvedMigrationInputs {
+    let mut merged_state = CanonicalState::new();
+    if let Some(local) = local_loaded {
+        merged_state = merged_state.join(&local.state);
+    }
+    if let Some(remote) = remote_loaded {
+        merged_state = merged_state.join(&remote.state);
+    }
+
+    let local_has_legacy_deps = matches!(
+        local_loaded.map(|loaded| loaded.deps_format),
+        Some(wire::DepsFormat::LegacyEdges)
+    );
+    let remote_has_legacy_deps = matches!(
+        remote_loaded.map(|loaded| loaded.deps_format),
+        Some(wire::DepsFormat::LegacyEdges)
+    );
+    let deps_format_before = if local_has_legacy_deps || remote_has_legacy_deps {
+        wire::DepsFormat::LegacyEdges
+    } else {
+        wire::DepsFormat::OrSetV1
+    };
+    let converted_deps = local_has_legacy_deps || remote_has_legacy_deps;
+    let notes_present_before = local_loaded
+        .map(|loaded| loaded.notes_present)
+        .unwrap_or(true)
+        && remote_loaded
+            .map(|loaded| loaded.notes_present)
+            .unwrap_or(true);
+    let checksums_present_before = local_loaded.map(has_full_store_checksums).unwrap_or(true)
+        && remote_loaded.map(has_full_store_checksums).unwrap_or(true);
+    let from_effective_version = effective_format_version_before(
+        local_loaded,
+        remote_loaded,
+        deps_format_before,
+        notes_present_before,
+        checksums_present_before,
+    );
+    let root_slug = remote_loaded
+        .and_then(|loaded| loaded.meta.root_slug())
+        .or_else(|| local_loaded.and_then(|loaded| loaded.meta.root_slug()))
+        .cloned()
+        .or_else(|| infer_root_slug_from_state(&merged_state))
+        .unwrap_or_else(default_root_slug);
+    let parent_meta_stamp = max_write_stamp(
+        remote_loaded
+            .and_then(|loaded| loaded.meta.last_write_stamp())
+            .cloned(),
+        local_loaded
+            .and_then(|loaded| loaded.meta.last_write_stamp())
+            .cloned(),
+    );
+    let mut warnings = Vec::new();
+    if let Some(local) = local_loaded {
+        warnings.extend(local.warnings.clone());
+    }
+    if let Some(remote) = remote_loaded {
+        warnings.extend(remote.warnings.clone());
+    }
+    warnings.sort();
+    warnings.dedup();
+
+    ResolvedMigrationInputs {
+        merged_state,
+        root_slug,
+        parent_meta_stamp,
+        summary: MigrationSourceSummary {
+            from_effective_version,
+            deps_format_before,
+            converted_deps,
+            added_notes_file: !notes_present_before,
+            wrote_checksums: true,
+            warnings,
+        },
+    }
+}
+
+fn migration_outcome(
+    summary: &MigrationSourceSummary,
+    commit_oid: Option<Oid>,
+    push: MigratePushDisposition,
+) -> MigrateStoreToV1Outcome {
+    MigrateStoreToV1Outcome {
+        from_effective_version: summary.from_effective_version,
+        deps_format_before: summary.deps_format_before,
+        converted_deps: summary.converted_deps,
+        added_notes_file: summary.added_notes_file,
+        wrote_checksums: summary.wrote_checksums,
+        commit_oid,
+        push,
+        warnings: summary.warnings.clone(),
+    }
+}
+
+fn canonical_noop_summary(summary: &MigrationSourceSummary) -> MigrationSourceSummary {
+    MigrationSourceSummary {
+        converted_deps: false,
+        added_notes_file: false,
+        wrote_checksums: false,
+        ..summary.clone()
+    }
+}
+
+fn maybe_align_local_store_ref_to_remote(
+    repo: &Repository,
+    local_oid_opt: Option<Oid>,
+    remote_oid_opt: Option<Oid>,
+) -> Result<(), SyncError> {
+    let Some(remote_oid) = remote_oid_opt else {
+        return Ok(());
+    };
+    if local_oid_opt == Some(remote_oid) {
+        return Ok(());
+    }
+    if let Some(local_oid) = local_oid_opt {
+        ensure_backup_ref_with_observer(repo, local_oid, &NoopSyncObserver)?;
+    }
+    update_ref(
+        repo,
+        "refs/heads/beads/store",
+        remote_oid,
+        "beads migrate: align local store ref to remote winner",
+    )
+}
+
+fn effective_format_version_before(
+    local_loaded: Option<&LoadedStoreMigration>,
+    remote_loaded: Option<&LoadedStoreMigration>,
+    deps_format_before: wire::DepsFormat,
+    notes_present_before: bool,
+    checksums_present_before: bool,
+) -> u32 {
+    let latest = crate::core::FormatVersion::CURRENT.get();
+    let meta_is_v1 = local_loaded
+        .into_iter()
+        .chain(remote_loaded)
+        .all(|loaded| matches!(loaded.meta.meta(), wire::StoreMeta::V1 { .. }));
+    if meta_is_v1
+        && matches!(deps_format_before, wire::DepsFormat::OrSetV1)
+        && notes_present_before
+        && checksums_present_before
+    {
+        latest
+    } else {
+        0
+    }
+}
+
+fn infer_root_slug_from_state(state: &CanonicalState) -> Option<BeadSlug> {
+    let mut counts: BTreeMap<BeadSlug, usize> = BTreeMap::new();
+    for (id, _) in state.iter_live() {
+        *counts.entry(id.slug_value()).or_default() += 1;
+    }
+    for (key, _) in state.iter_tombstones() {
+        *counts.entry(key.id.slug_value()).or_default() += 1;
+    }
+    counts
+        .into_iter()
+        .max_by(|(slug_a, count_a), (slug_b, count_b)| {
+            count_a.cmp(count_b).then_with(|| slug_b.cmp(slug_a))
+        })
+        .map(|(slug, _)| slug)
+}
+
+fn default_root_slug() -> BeadSlug {
+    BeadSlug::parse("bd").expect("default slug must be valid")
+}
+
+fn has_common_ancestor(
+    repo: &Repository,
+    local_oid: Oid,
+    remote_oid: Oid,
+) -> Result<bool, SyncError> {
+    match repo.merge_base(local_oid, remote_oid) {
+        Ok(_) => Ok(true),
+        Err(err) if err.code() == ErrorCode::NotFound => Ok(false),
+        Err(err) => Err(SyncError::MergeBase(err)),
+    }
+}
+
+fn preview_has_common_ancestor(
+    local_repo: &Repository,
+    local_oid: Oid,
+    remote_preview: &RemoteStorePreview,
+) -> Result<bool, SyncError> {
+    let local_repo_url = local_repo.path().to_string_lossy().into_owned();
+    let mut local_remote = remote_preview.repo().remote_anonymous(&local_repo_url)?;
+    fetch_store_ref_with_refspec(
+        local_repo,
+        &mut local_remote,
+        "refs/heads/beads/store:refs/heads/local-preview",
+    )?;
+    drop(local_remote);
+    let preview_local_oid = remote_preview
+        .repo()
+        .refname_to_id("refs/heads/local-preview")?;
+    debug_assert_eq!(preview_local_oid, local_oid);
+    has_common_ancestor(
+        remote_preview.repo(),
+        preview_local_oid,
+        remote_preview.oid(),
+    )
+}
+
+fn restore_local_store_ref(
+    repo: &Repository,
+    initial_local_oid_opt: Option<Oid>,
+    current_local_oid_opt: Option<Oid>,
+) -> Result<(), SyncError> {
+    if initial_local_oid_opt == current_local_oid_opt {
+        return Ok(());
+    }
+    match initial_local_oid_opt {
+        Some(initial_oid) => update_ref(
+            repo,
+            "refs/heads/beads/store",
+            initial_oid,
+            "beads migrate: restore local store ref after failed retry",
+        ),
+        None => delete_ref(repo, "refs/heads/beads/store"),
     }
 }
 
@@ -1317,6 +1711,75 @@ fn has_full_store_checksums(loaded: &LoadedStoreMigration) -> bool {
         .is_some_and(|checksums| checksums.notes.is_some())
 }
 
+struct StoreSnapshotBytes {
+    state: Vec<u8>,
+    tombstones: Vec<u8>,
+    deps: Vec<u8>,
+    notes: Vec<u8>,
+    meta: Vec<u8>,
+}
+
+fn serialize_store_snapshot(
+    state: &CanonicalState,
+    root_slug: Option<&BeadSlug>,
+    parent_meta_stamp: Option<&WriteStamp>,
+) -> Result<StoreSnapshotBytes, SyncError> {
+    let state_bytes = wire::serialize_state(state)?;
+    let tombstones_bytes = wire::serialize_tombstones(state)?;
+    let deps_bytes = wire::serialize_deps(state)?;
+    let notes_bytes = wire::serialize_notes(state)?;
+    let checksums = wire::StoreChecksums::from_bytes(
+        &state_bytes,
+        &tombstones_bytes,
+        &deps_bytes,
+        Some(&notes_bytes),
+    );
+    let meta_bytes = wire::serialize_meta(
+        root_slug.map(BeadSlug::as_str),
+        parent_meta_stamp,
+        &checksums,
+    )?;
+    Ok(StoreSnapshotBytes {
+        state: state_bytes,
+        tombstones: tombstones_bytes,
+        deps: deps_bytes,
+        notes: notes_bytes,
+        meta: meta_bytes,
+    })
+}
+
+fn store_tree_matches_snapshot(
+    repo: &Repository,
+    parent_oid: Oid,
+    snapshot: &StoreSnapshotBytes,
+) -> Result<bool, SyncError> {
+    let commit = repo.find_commit(parent_oid)?;
+    let tree = commit.tree()?;
+    Ok(
+        tree_blob_matches(repo, &tree, "state.jsonl", &snapshot.state)?
+            && tree_blob_matches(repo, &tree, "tombstones.jsonl", &snapshot.tombstones)?
+            && tree_blob_matches(repo, &tree, "deps.jsonl", &snapshot.deps)?
+            && tree_blob_matches(repo, &tree, "notes.jsonl", &snapshot.notes)?
+            && tree_blob_matches(repo, &tree, "meta.json", &snapshot.meta)?,
+    )
+}
+
+fn tree_blob_matches(
+    repo: &Repository,
+    tree: &git2::Tree<'_>,
+    name: &'static str,
+    expected: &[u8],
+) -> Result<bool, SyncError> {
+    let Some(entry) = tree.get_name(name) else {
+        return Ok(false);
+    };
+    let blob = repo
+        .find_object(entry.id(), Some(ObjectType::Blob))?
+        .peel_to_blob()
+        .map_err(|_| SyncError::NotABlob(name))?;
+    Ok(blob.content() == expected)
+}
+
 fn commit_store_snapshot(
     repo: &Repository,
     parent_oid: Oid,
@@ -1325,28 +1788,13 @@ fn commit_store_snapshot(
     parent_meta_stamp: Option<&WriteStamp>,
     message: &str,
 ) -> Result<Oid, SyncError> {
-    let state_bytes = wire::serialize_state(state)?;
-    let tombs_bytes = wire::serialize_tombstones(state)?;
-    let deps_bytes = wire::serialize_deps(state)?;
-    let notes_bytes = wire::serialize_notes(state)?;
-    let meta_last_stamp = max_write_stamp(state.max_write_stamp(), parent_meta_stamp.cloned());
-    let checksums = wire::StoreChecksums::from_bytes(
-        &state_bytes,
-        &tombs_bytes,
-        &deps_bytes,
-        Some(&notes_bytes),
-    );
-    let meta_bytes = wire::serialize_meta(
-        root_slug.map(BeadSlug::as_str),
-        meta_last_stamp.as_ref(),
-        &checksums,
-    )?;
+    let snapshot = serialize_store_snapshot(state, root_slug, parent_meta_stamp)?;
 
-    let state_oid = repo.blob(&state_bytes)?;
-    let tombs_oid = repo.blob(&tombs_bytes)?;
-    let deps_oid = repo.blob(&deps_bytes)?;
-    let notes_oid = repo.blob(&notes_bytes)?;
-    let meta_oid = repo.blob(&meta_bytes)?;
+    let state_oid = repo.blob(&snapshot.state)?;
+    let tombs_oid = repo.blob(&snapshot.tombstones)?;
+    let deps_oid = repo.blob(&snapshot.deps)?;
+    let notes_oid = repo.blob(&snapshot.notes)?;
+    let meta_oid = repo.blob(&snapshot.meta)?;
 
     let mut builder = repo.treebuilder(None)?;
     builder.insert("state.jsonl", state_oid, 0o100644)?;
@@ -1374,12 +1822,69 @@ fn commit_store_snapshot(
     Ok(commit_oid)
 }
 
-pub fn fetch_store_ref(repo: &Repository) -> Result<(), SyncError> {
+pub fn refresh_store_tracking_ref(repo: &Repository) -> Result<(), SyncError> {
+    fetch_store_ref(repo)
+}
+
+pub fn open_remote_store_preview(
+    repo: &Repository,
+) -> Result<Option<RemoteStorePreview>, SyncError> {
+    let Some(url) = origin_remote_url(repo) else {
+        return Ok(None);
+    };
+
+    let tempdir = TempDir::new().map_err(SyncError::Io)?;
+    let preview_repo = Repository::init_bare(tempdir.path())?;
+    let mut remote = preview_repo.remote_anonymous(&url)?;
+    fetch_store_ref_with_refspec(
+        repo,
+        &mut remote,
+        "refs/heads/beads/store:refs/heads/beads/store",
+    )?;
+    drop(remote);
+    let oid = match preview_repo.refname_to_id("refs/heads/beads/store") {
+        Ok(oid) => oid,
+        Err(err) if err.code() == ErrorCode::NotFound => return Ok(None),
+        Err(err) => return Err(err.into()),
+    };
+    Ok(Some(RemoteStorePreview {
+        _tempdir: tempdir,
+        repo: preview_repo,
+        oid,
+    }))
+}
+
+fn fetch_store_ref(repo: &Repository) -> Result<(), SyncError> {
     let mut remote = match repo.find_remote("origin") {
         Ok(remote) => remote,
         Err(_) => return Ok(()),
     };
+    fetch_store_ref_with_refspec(
+        repo,
+        &mut remote,
+        "refs/heads/beads/store:refs/remotes/origin/beads/store",
+    )
+}
 
+fn fetch_store_ref_with_refspec(
+    repo: &Repository,
+    remote: &mut git2::Remote<'_>,
+    refspec: &str,
+) -> Result<(), SyncError> {
+    let mut options = git2::FetchOptions::new();
+    options.remote_callbacks(remote_callbacks(repo));
+    remote
+        .fetch(&[refspec], Some(&mut options), None)
+        .map_err(SyncError::Fetch)
+}
+
+fn origin_remote_url(repo: &Repository) -> Option<String> {
+    repo.find_remote("origin")
+        .ok()
+        .and_then(|remote| remote.url().map(ToOwned::to_owned))
+}
+
+fn remote_callbacks(repo: &Repository) -> git2::RemoteCallbacks<'static> {
     let cfg = repo.config().ok();
     let mut callbacks = git2::RemoteCallbacks::new();
     callbacks.credentials(move |url, username_from_url, allowed| {
@@ -1396,15 +1901,7 @@ pub fn fetch_store_ref(repo: &Repository) -> Result<(), SyncError> {
         }
         git2::Cred::default()
     });
-    let mut options = git2::FetchOptions::new();
-    options.remote_callbacks(callbacks);
-    remote
-        .fetch(
-            &["refs/heads/beads/store:refs/remotes/origin/beads/store"],
-            Some(&mut options),
-            None,
-        )
-        .map_err(SyncError::Fetch)
+    callbacks
 }
 
 fn push_store_ref(repo: &Repository) -> Result<bool, SyncError> {
@@ -1414,57 +1911,47 @@ fn push_store_ref(repo: &Repository) -> Result<bool, SyncError> {
         Ok(remote) => remote,
         Err(_) => return Ok(false),
     };
+    let refspec = "refs/heads/beads/store:refs/heads/beads/store";
     let push_error: RefCell<Option<String>> = RefCell::new(None);
 
     {
-        let cfg = repo.config().ok();
-        let mut callbacks = git2::RemoteCallbacks::new();
-        callbacks.credentials(move |url, username_from_url, allowed| {
-            if allowed.is_ssh_key()
-                && let Some(user) = username_from_url
-            {
-                return git2::Cred::ssh_key_from_agent(user);
-            }
-            if allowed.is_user_pass_plaintext()
-                && let Some(ref cfg) = cfg
-                && let Ok(cred) = git2::Cred::credential_helper(cfg, url, username_from_url)
-            {
-                return Ok(cred);
-            }
-            git2::Cred::default()
-        });
-        callbacks.push_update_reference(|_reference, status| {
-            if let Some(status) = status {
-                *push_error.borrow_mut() = Some(status.to_string());
+        let mut callbacks = remote_callbacks(repo);
+        callbacks.push_update_reference(|_ref_name, status| {
+            if let Some(msg) = status {
+                *push_error.borrow_mut() = Some(msg.to_string());
             }
             Ok(())
         });
+        let mut push_options = git2::PushOptions::new();
+        push_options.remote_callbacks(callbacks);
 
-        let mut options = git2::PushOptions::new();
-        options.remote_callbacks(callbacks);
-        let refspec = "refs/heads/beads/store:refs/heads/beads/store";
-        match remote.push(&[refspec], Some(&mut options)) {
-            Ok(()) => {}
-            Err(err)
-                if err.code() == ErrorCode::NotFastForward || err.code() == ErrorCode::Modified =>
-            {
+        if let Err(err) = remote.push(&[refspec], Some(&mut push_options)) {
+            if is_retryable_push_error_message(&err.to_string()) {
                 return Err(SyncError::NonFastForward);
             }
-            Err(err) => return Err(SyncError::Push(err)),
+            return Err(SyncError::from(err));
         }
     }
 
     if let Some(message) = push_error.into_inner() {
-        let lowered = message.to_ascii_lowercase();
-        if lowered.contains("non-fast-forward") || lowered.contains("fetch first") {
+        if is_retryable_push_error_message(&message) {
             return Err(SyncError::NonFastForward);
         }
-        return Err(SyncError::PushRejected(super::error::PushRejected {
-            message,
-        }));
+        return Err(crate::error::PushRejected { message }.into());
     }
 
     Ok(true)
+}
+
+fn is_retryable_push_error_message(message: &str) -> bool {
+    let msg = message.to_lowercase();
+    msg.contains("non-fast-forward")
+        || msg.contains("fetch first")
+        || msg.contains("contains commits that are not present locally")
+        || msg.contains("remote contains work that you do not have locally")
+        || msg.contains("cannot lock ref")
+        || msg.contains("failed to update ref")
+        || msg.contains("failed to lock file")
 }
 
 /// Derive a root slug from repository info.
@@ -1552,25 +2039,11 @@ fn sanitize_slug(name: &str) -> String {
     slug
 }
 
-pub fn refname_to_id_optional(repo: &Repository, name: &str) -> Result<Option<Oid>, SyncError> {
+fn refname_to_id_optional(repo: &Repository, name: &str) -> Result<Option<Oid>, SyncError> {
     match repo.refname_to_id(name) {
         Ok(oid) => Ok(Some(oid)),
         Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
         Err(e) => Err(SyncError::Git(e)),
-    }
-}
-
-fn restore_store_ref(repo: &Repository, oid: Option<Oid>, message: &str) -> Result<(), SyncError> {
-    match oid {
-        Some(oid) => update_ref(repo, "refs/heads/beads/store", oid, message),
-        None => match repo.find_reference("refs/heads/beads/store") {
-            Ok(mut reference) => {
-                reference.delete()?;
-                Ok(())
-            }
-            Err(err) if err.code() == ErrorCode::NotFound => Ok(()),
-            Err(err) => Err(SyncError::Git(err)),
-        },
     }
 }
 
@@ -1588,22 +2061,31 @@ fn update_ref(repo: &Repository, name: &str, oid: Oid, message: &str) -> Result<
     }
 }
 
+fn delete_ref(repo: &Repository, name: &str) -> Result<(), SyncError> {
+    match repo.find_reference(name) {
+        Ok(mut reference) => {
+            reference.delete()?;
+            Ok(())
+        }
+        Err(e) if e.code() == ErrorCode::NotFound => Ok(()),
+        Err(e) => Err(SyncError::Git(e)),
+    }
+}
+
 fn ensure_backup_ref_with_observer(
     repo: &Repository,
     oid: Oid,
     observer: &dyn SyncObserver,
 ) -> Result<(), SyncError> {
     let name = format!("{BACKUP_REF_PREFIX}{oid}");
-    let created = match repo.refname_to_id(&name) {
+    let _created = match repo.refname_to_id(&name) {
         Ok(_) => false,
         Err(err) if err.code() == ErrorCode::NotFound => {
             create_backup_reference_with_observer(repo, &name, oid, observer)?
         }
         Err(err) => return Err(SyncError::Git(err)),
     };
-    if created {
-        prune_backup_refs_with_observer(repo, MAX_BACKUP_REFS, oid, observer)?;
-    }
+    prune_backup_refs_with_observer(repo, MAX_BACKUP_REFS, oid, observer)?;
     Ok(())
 }
 
@@ -2298,6 +2780,77 @@ mod tests {
         commit_oid
     }
 
+    fn write_store_commit_with_custom_deps(
+        repo: &Repository,
+        parent: Option<Oid>,
+        message: &str,
+        deps_bytes: &[u8],
+        include_notes: bool,
+        include_meta: bool,
+    ) -> Oid {
+        let state_bytes = Vec::<u8>::new();
+        let tombs_bytes = Vec::<u8>::new();
+        let notes_bytes = if include_notes {
+            Vec::<u8>::new()
+        } else {
+            Vec::new()
+        };
+
+        let state_oid = repo.blob(&state_bytes).unwrap();
+        let tombs_oid = repo.blob(&tombs_bytes).unwrap();
+        let deps_oid = repo.blob(deps_bytes).unwrap();
+        let notes_oid = if include_notes {
+            Some(repo.blob(&notes_bytes).unwrap())
+        } else {
+            None
+        };
+        let meta_oid = if include_meta {
+            let checksums = wire::StoreChecksums::from_bytes(
+                &state_bytes,
+                &tombs_bytes,
+                deps_bytes,
+                Some(&notes_bytes),
+            );
+            let meta_bytes = wire::serialize_meta(Some("test"), None, &checksums).unwrap();
+            Some(repo.blob(&meta_bytes).unwrap())
+        } else {
+            None
+        };
+
+        let mut builder = repo.treebuilder(None).unwrap();
+        builder.insert("state.jsonl", state_oid, 0o100644).unwrap();
+        builder
+            .insert("tombstones.jsonl", tombs_oid, 0o100644)
+            .unwrap();
+        builder.insert("deps.jsonl", deps_oid, 0o100644).unwrap();
+        if let Some(notes_oid) = notes_oid {
+            builder.insert("notes.jsonl", notes_oid, 0o100644).unwrap();
+        }
+        if let Some(meta_oid) = meta_oid {
+            builder.insert("meta.json", meta_oid, 0o100644).unwrap();
+        }
+        let tree_oid = builder.write().unwrap();
+        let tree = repo.find_tree(tree_oid).unwrap();
+
+        let sig = Signature::now("test", "test@example.com").unwrap();
+        let parents = parent
+            .and_then(|oid| repo.find_commit(oid).ok())
+            .map(|p| vec![p])
+            .unwrap_or_default();
+        let parent_refs: Vec<_> = parents.iter().collect();
+        let commit_oid = repo
+            .commit(None, &sig, &sig, message, &tree, &parent_refs)
+            .unwrap_or_else(|e| panic!("commit failed: {e}"));
+        update_ref(
+            repo,
+            "refs/heads/beads/store",
+            commit_oid,
+            "beads test: update ref",
+        )
+        .unwrap_or_else(|e| panic!("update ref failed: {e}"));
+        commit_oid
+    }
+
     fn write_store_commit_without_meta(
         repo: &Repository,
         parent: Option<Oid>,
@@ -2453,6 +3006,46 @@ mod tests {
     }
 
     #[test]
+    fn sync_commit_persists_latest_write_stamp_in_meta() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+        let parent_meta_stamp = WriteStamp::new(1234, 7);
+        let parent_oid =
+            write_store_commit_with_meta(&repo, None, "parent", Some(parent_meta_stamp.clone()));
+
+        let stamp = make_stamp(2345, "alice");
+        let mut local_state = CanonicalState::new();
+        local_state.insert_live(make_bead("bd-meta-max-stamp", &stamp));
+
+        let fetched = SyncProcess {
+            repo_path: PathBuf::new(),
+            config: SyncConfig::default(),
+            observer: Arc::new(NoopSyncObserver),
+            phase: Fetched {
+                local_oid: parent_oid,
+                remote_oid: parent_oid,
+                remote_state: CanonicalState::new(),
+                root_slug: Some(BeadSlug::parse("test").unwrap()),
+                parent_meta_stamp: Some(parent_meta_stamp),
+                fetch_error: None,
+                divergence: None,
+                force_push: None,
+            },
+        };
+
+        let commit_oid = fetched
+            .merge(&local_state)
+            .expect("merge")
+            .commit(&repo)
+            .expect("commit")
+            .phase
+            .commit_oid;
+        let loaded = read_state_at_oid(&repo, commit_oid).expect("read committed state");
+
+        assert_eq!(loaded.meta.last_write_stamp(), Some(&stamp.at));
+    }
+
+    #[test]
     fn read_state_at_oid_errors_on_invalid_meta() {
         let tmp = TempDir::new().unwrap();
         let repo = Repository::init(tmp.path()).unwrap();
@@ -2506,6 +3099,641 @@ mod tests {
 
         let loaded = read_state_at_oid(&repo, oid).unwrap();
         assert!(loaded.meta.is_legacy());
+    }
+
+    #[test]
+    fn read_state_at_oid_for_migration_accepts_legacy_deps() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+        let oid = write_store_commit_with_custom_deps(
+            &repo,
+            None,
+            "legacy-deps",
+            br#"{"from":"bd-a","to":"bd-b","kind":"blocks"}
+"#,
+            true,
+            true,
+        );
+
+        let strict_err = read_state_at_oid(&repo, oid)
+            .err()
+            .expect("strict load should reject legacy deps");
+        assert!(matches!(strict_err, SyncError::Wire(_)));
+
+        let loaded = read_state_at_oid_for_migration(&repo, oid).expect("migration load");
+        assert_eq!(loaded.deps_format, wire::DepsFormat::LegacyEdges);
+        assert!(loaded.warnings.is_empty());
+        let dep_key = DepKey::new(
+            BeadId::parse("bd-a").unwrap(),
+            BeadId::parse("bd-b").unwrap(),
+            DepKind::Blocks,
+        )
+        .unwrap();
+        assert!(loaded.state.dep_store().contains(&dep_key));
+    }
+
+    #[test]
+    fn migrate_store_ref_to_v1_rewrites_legacy_deps_to_strict_snapshot() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+        write_store_commit_with_custom_deps(
+            &repo,
+            None,
+            "legacy-deps",
+            br#"{"from":"bd-a","to":"bd-b","kind":"blocks"}
+"#,
+            false,
+            false,
+        );
+
+        let outcome = migrate_store_ref_to_v1(&repo, tmp.path(), false, false, true, 0).unwrap();
+        assert!(outcome.converted_deps);
+        assert!(outcome.added_notes_file);
+        assert!(outcome.wrote_checksums);
+        let commit_oid = outcome.commit_oid.expect("migration commit oid");
+
+        let loaded = read_state_at_oid(&repo, commit_oid).expect("strict load after migration");
+        assert!(matches!(
+            loaded.meta.meta(),
+            wire::StoreMeta::V1 {
+                checksums: Some(_),
+                ..
+            }
+        ));
+
+        let commit = repo.find_commit(commit_oid).unwrap();
+        let tree = commit.tree().unwrap();
+        assert!(tree.get_name("notes.jsonl").is_some());
+        let deps_entry = tree.get_name("deps.jsonl").expect("deps");
+        let deps_blob = repo
+            .find_object(deps_entry.id(), Some(ObjectType::Blob))
+            .unwrap()
+            .peel_to_blob()
+            .unwrap();
+        let parsed = wire::parse_deps_wire(deps_blob.content()).expect("strict deps decode");
+        assert_eq!(parsed.entries.len(), 1);
+    }
+
+    #[test]
+    fn migrate_store_ref_to_v1_aborts_on_legacy_parse_warnings_without_force() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+        let original_oid = write_store_commit_with_custom_deps(
+            &repo,
+            None,
+            "legacy-deps-with-warning",
+            br#"{"from":"bd-a","to":"bd-b","kind":"blocks"}
+{"from":"","to":"bd-c","kind":"blocks"}
+"#,
+            false,
+            false,
+        );
+
+        let err = migrate_store_ref_to_v1(&repo, tmp.path(), false, false, true, 0)
+            .expect_err("migration should fail without --force when warnings are present");
+        match err {
+            SyncError::MigrationWarnings(warnings) => {
+                assert!(!warnings.is_empty(), "expected warning details in error");
+                assert!(
+                    warnings
+                        .iter()
+                        .any(|warning| warning.starts_with("LEGACY_DEPS_SHAPE(")),
+                    "expected malformed-line warning, got: {warnings:?}"
+                );
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+
+        let head_after = repo.refname_to_id("refs/heads/beads/store").unwrap();
+        assert_eq!(
+            head_after, original_oid,
+            "migration must not create a commit when warning gate fails"
+        );
+    }
+
+    #[test]
+    fn migrate_store_ref_to_v1_dry_run_peeks_remote_without_mutating_tracking_ref() {
+        let tmp = TempDir::new().unwrap();
+        let remote_dir = tmp.path().join("remote");
+        let local_dir = tmp.path().join("local");
+
+        let remote_repo = Repository::init_bare(&remote_dir).unwrap();
+        let local_repo = Repository::init(&local_dir).unwrap();
+        local_repo
+            .remote("origin", remote_dir.to_str().unwrap())
+            .unwrap();
+
+        let remote_v1 = write_store_commit(&remote_repo, None, "remote-v1");
+        {
+            let mut remote = local_repo.find_remote("origin").unwrap();
+            let mut options = git2::FetchOptions::new();
+            let refspec = "refs/heads/beads/store:refs/remotes/origin/beads/store";
+            remote.fetch(&[refspec], Some(&mut options), None).unwrap();
+        }
+        local_repo
+            .reference(
+                "refs/heads/beads/store",
+                remote_v1,
+                true,
+                "init local store",
+            )
+            .unwrap();
+
+        let remote_v2 = write_store_commit_with_custom_deps(
+            &remote_repo,
+            Some(remote_v1),
+            "remote-v2-legacy",
+            br#"{"from":"bd-a","to":"bd-b","kind":"blocks"}
+"#,
+            true,
+            true,
+        );
+        assert_ne!(remote_v1, remote_v2);
+
+        let outcome =
+            migrate_store_ref_to_v1(&local_repo, &local_dir, true, false, true, 0).unwrap();
+        assert!(outcome.commit_oid.is_none(), "dry-run must not commit");
+        assert_eq!(outcome.deps_format_before, wire::DepsFormat::LegacyEdges);
+        assert_eq!(outcome.from_effective_version, 0);
+
+        let remote_tracking_after = local_repo
+            .refname_to_id("refs/remotes/origin/beads/store")
+            .unwrap();
+        assert_eq!(
+            remote_tracking_after, remote_v1,
+            "dry-run must classify live remote state without mutating tracking refs"
+        );
+    }
+
+    #[test]
+    fn migrate_store_ref_to_v1_noop_realigns_same_tree_local_and_creates_backup_ref() {
+        let tmp = TempDir::new().unwrap();
+        let remote_dir = tmp.path().join("remote");
+        let local_dir = tmp.path().join("local");
+
+        let remote_repo = Repository::init_bare(&remote_dir).unwrap();
+        let local_repo = Repository::init(&local_dir).unwrap();
+        local_repo
+            .remote("origin", remote_dir.to_str().unwrap())
+            .unwrap();
+
+        let remote_oid = write_store_commit(&remote_repo, None, "remote");
+        {
+            let mut remote = local_repo.find_remote("origin").unwrap();
+            let mut options = git2::FetchOptions::new();
+            let refspec = "refs/heads/beads/store:refs/remotes/origin/beads/store";
+            remote.fetch(&[refspec], Some(&mut options), None).unwrap();
+        }
+        local_repo
+            .reference(
+                "refs/heads/beads/store",
+                remote_oid,
+                true,
+                "init local store",
+            )
+            .unwrap();
+        let local_ahead_oid = write_store_commit(&local_repo, Some(remote_oid), "local-ahead");
+
+        let outcome =
+            migrate_store_ref_to_v1(&local_repo, &local_dir, false, false, true, 0).unwrap();
+        assert!(
+            outcome.commit_oid.is_none(),
+            "canonical store should remain no-op"
+        );
+
+        let backup_ref = format!("refs/beads/backup/{local_ahead_oid}");
+        assert_eq!(
+            local_repo.refname_to_id(&backup_ref).unwrap(),
+            local_ahead_oid,
+            "realigning away from an existing local ref should preserve a backup even when the tree already matches"
+        );
+    }
+
+    #[test]
+    fn migrate_store_ref_to_v1_rewrite_creates_backup_ref_for_existing_local_store() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+
+        let original_oid = write_store_commit_with_custom_deps(
+            &repo,
+            None,
+            "local-legacy",
+            br#"{"from":"bd-a","to":"bd-b","kind":"blocks"}
+"#,
+            false,
+            false,
+        );
+
+        let outcome = migrate_store_ref_to_v1(&repo, tmp.path(), false, false, true, 0).unwrap();
+        assert!(
+            outcome.commit_oid.is_some(),
+            "legacy local store should be rewritten"
+        );
+
+        let backup_ref = format!("refs/beads/backup/{original_oid}");
+        let backup_oid = repo
+            .refname_to_id(&backup_ref)
+            .expect("backup ref should be created before rewrite");
+        assert_eq!(backup_oid, original_oid);
+        let head_after = repo.refname_to_id("refs/heads/beads/store").unwrap();
+        assert_ne!(
+            head_after, original_oid,
+            "local ref should move to migrated commit"
+        );
+    }
+
+    #[test]
+    fn migrate_store_ref_to_v1_force_keeps_canonical_store_noop() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+        let original_oid = write_store_commit(&repo, None, "canonical");
+
+        let outcome = migrate_store_ref_to_v1(&repo, tmp.path(), false, true, true, 0).unwrap();
+        assert!(
+            outcome.commit_oid.is_none(),
+            "force should not create a marker commit when bytes already match"
+        );
+        let head_after = repo.refname_to_id("refs/heads/beads/store").unwrap();
+        assert_eq!(head_after, original_oid);
+    }
+
+    #[test]
+    fn migrate_store_ref_to_v1_no_origin_noop_reports_skipped_no_remote() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+        let original_oid = write_store_commit(&repo, None, "canonical");
+
+        let outcome = migrate_store_ref_to_v1(&repo, tmp.path(), false, false, false, 0).unwrap();
+        assert!(
+            outcome.commit_oid.is_none(),
+            "canonical store should remain no-op"
+        );
+        assert_eq!(outcome.push, MigratePushDisposition::SkippedNoRemote);
+        assert_eq!(
+            repo.refname_to_id("refs/heads/beads/store").unwrap(),
+            original_oid
+        );
+    }
+
+    #[test]
+    fn migrate_store_ref_to_v1_no_push_rewrites_stale_local_without_fetching_remote_winner() {
+        let tmp = TempDir::new().unwrap();
+        let remote_dir = tmp.path().join("remote");
+        let local_dir = tmp.path().join("local");
+
+        let remote_repo = Repository::init_bare(&remote_dir).unwrap();
+        let local_repo = Repository::init(&local_dir).unwrap();
+        local_repo
+            .remote("origin", remote_dir.to_str().unwrap())
+            .unwrap();
+
+        let base_oid = write_store_commit_with_custom_deps(
+            &remote_repo,
+            None,
+            "legacy-base",
+            br#"{"from":"bd-a","to":"bd-b","kind":"blocks"}
+"#,
+            false,
+            false,
+        );
+        {
+            let mut remote = local_repo.find_remote("origin").unwrap();
+            let mut options = git2::FetchOptions::new();
+            let refspec = "refs/heads/beads/store:refs/remotes/origin/beads/store";
+            remote.fetch(&[refspec], Some(&mut options), None).unwrap();
+        }
+        local_repo
+            .reference(
+                "refs/heads/beads/store",
+                base_oid,
+                true,
+                "init local legacy store",
+            )
+            .unwrap();
+
+        let winner_oid = migrate_store_ref_to_v1(&remote_repo, &remote_dir, false, false, true, 0)
+            .unwrap()
+            .commit_oid
+            .expect("winner migration commit");
+
+        let outcome =
+            migrate_store_ref_to_v1(&local_repo, &local_dir, false, false, true, 0).unwrap();
+        let local_commit_oid = outcome
+            .commit_oid
+            .expect("no-push stale clone should still rewrite the local store");
+        assert_eq!(outcome.push, MigratePushDisposition::SkippedNoPush);
+        assert_eq!(
+            local_repo.refname_to_id("refs/heads/beads/store").unwrap(),
+            local_commit_oid,
+            "local store ref should advance to the local-only rewrite commit"
+        );
+        assert_eq!(
+            local_commit_oid, winner_oid,
+            "local-only rewrite should deterministically converge to the same canonical commit"
+        );
+        assert_eq!(
+            local_repo
+                .refname_to_id("refs/remotes/origin/beads/store")
+                .unwrap(),
+            base_oid,
+            "no-push migration should leave the stale tracking ref untouched"
+        );
+        assert_eq!(
+            local_repo
+                .find_commit(local_commit_oid)
+                .unwrap()
+                .tree()
+                .unwrap()
+                .id(),
+            remote_repo
+                .find_commit(winner_oid)
+                .unwrap()
+                .tree()
+                .unwrap()
+                .id(),
+            "local-only rewrite should still converge to the same canonical snapshot tree"
+        );
+        let backup_ref = format!("refs/beads/backup/{base_oid}");
+        assert_eq!(
+            local_repo.refname_to_id(&backup_ref).unwrap(),
+            base_oid,
+            "realigning away from a legacy local ref should preserve a backup"
+        );
+    }
+
+    #[test]
+    fn migrate_store_ref_to_v1_refuses_unrelated_divergence_without_force() {
+        let tmp = TempDir::new().unwrap();
+        let remote_dir = tmp.path().join("remote");
+        let local_dir = tmp.path().join("local");
+
+        let remote_repo = Repository::init_bare(&remote_dir).unwrap();
+        let local_repo = Repository::init(&local_dir).unwrap();
+        local_repo
+            .remote("origin", remote_dir.to_str().unwrap())
+            .unwrap();
+
+        let remote_oid = write_store_commit(&remote_repo, None, "remote-v1");
+        {
+            let mut remote = local_repo.find_remote("origin").unwrap();
+            let mut options = git2::FetchOptions::new();
+            let refspec = "refs/heads/beads/store:refs/remotes/origin/beads/store";
+            remote.fetch(&[refspec], Some(&mut options), None).unwrap();
+        }
+
+        let local_legacy_oid = write_store_commit_with_custom_deps(
+            &local_repo,
+            None,
+            "local-legacy",
+            br#"{"from":"bd-a","to":"bd-b","kind":"blocks"}
+"#,
+            false,
+            false,
+        );
+        assert_ne!(local_legacy_oid, remote_oid);
+
+        let err =
+            migrate_store_ref_to_v1(&local_repo, &local_dir, false, false, true, 0).unwrap_err();
+        assert!(matches!(err, SyncError::NoCommonAncestor));
+        let head_after = local_repo.refname_to_id("refs/heads/beads/store").unwrap();
+        assert_eq!(
+            head_after, local_legacy_oid,
+            "migration must not rewrite without --force"
+        );
+    }
+
+    #[test]
+    fn migrate_store_ref_to_v1_retry_still_refuses_unrelated_divergence_without_force() {
+        let tmp = TempDir::new().unwrap();
+        let remote_dir = tmp.path().join("remote");
+        let local_dir = tmp.path().join("local");
+
+        let remote_repo = Repository::init_bare(&remote_dir).unwrap();
+        let local_repo = Repository::init(&local_dir).unwrap();
+        local_repo
+            .remote("origin", remote_dir.to_str().unwrap())
+            .unwrap();
+
+        let base_oid = write_store_commit_with_custom_deps(
+            &remote_repo,
+            None,
+            "legacy-base",
+            br#"{"from":"bd-a","to":"bd-b","kind":"blocks"}
+"#,
+            false,
+            false,
+        );
+        {
+            let mut remote = local_repo.find_remote("origin").unwrap();
+            let mut options = git2::FetchOptions::new();
+            let refspec = "refs/heads/beads/store:refs/remotes/origin/beads/store";
+            remote.fetch(&[refspec], Some(&mut options), None).unwrap();
+        }
+        local_repo
+            .reference(
+                "refs/heads/beads/store",
+                base_oid,
+                true,
+                "init local legacy store",
+            )
+            .unwrap();
+
+        let unrelated_oid = write_store_commit(&remote_repo, None, "remote-unrelated");
+        update_ref(
+            &remote_repo,
+            "refs/heads/beads/store",
+            base_oid,
+            "reset remote to shared base",
+        )
+        .unwrap();
+
+        let err = migrate_store_ref_to_v1_with_before_push(
+            &local_repo,
+            &local_dir,
+            false,
+            false,
+            false,
+            1,
+            |retries, _commit_oid| {
+                if retries == 0 {
+                    update_ref(
+                        &remote_repo,
+                        "refs/heads/beads/store",
+                        unrelated_oid,
+                        "simulate unrelated remote winner before first push",
+                    )?;
+                }
+                Ok(())
+            },
+        )
+        .expect_err("retry should still refuse unrelated remote divergence without --force");
+
+        assert!(matches!(err, SyncError::NoCommonAncestor));
+        assert_eq!(
+            local_repo.refname_to_id("refs/heads/beads/store").unwrap(),
+            base_oid,
+            "local store ref must remain unchanged after unrelated retry refusal"
+        );
+    }
+
+    #[test]
+    fn migrate_store_ref_to_v1_force_divergence_rewrites_local_missing_invariants() {
+        let tmp = TempDir::new().unwrap();
+        let remote_dir = tmp.path().join("remote");
+        let local_dir = tmp.path().join("local");
+
+        let remote_repo = Repository::init_bare(&remote_dir).unwrap();
+        let local_repo = Repository::init(&local_dir).unwrap();
+        local_repo
+            .remote("origin", remote_dir.to_str().unwrap())
+            .unwrap();
+
+        let remote_oid = write_store_commit(&remote_repo, None, "remote-v1");
+
+        {
+            let mut remote = local_repo.find_remote("origin").unwrap();
+            let mut options = git2::FetchOptions::new();
+            let refspec = "refs/heads/beads/store:refs/remotes/origin/beads/store";
+            remote.fetch(&[refspec], Some(&mut options), None).unwrap();
+        }
+
+        let local_legacy_oid = write_store_commit_with_custom_deps(
+            &local_repo,
+            None,
+            "local-legacy",
+            br#"{"from":"bd-a","to":"bd-b","kind":"blocks"}
+"#,
+            false,
+            false,
+        );
+        assert_ne!(local_legacy_oid, remote_oid);
+
+        let outcome =
+            migrate_store_ref_to_v1(&local_repo, &local_dir, false, true, true, 0).unwrap();
+        assert!(
+            outcome.commit_oid.is_some(),
+            "migration should rewrite even when remote side is already canonical"
+        );
+        assert!(outcome.added_notes_file);
+        assert!(outcome.wrote_checksums);
+
+        let local_head = local_repo.refname_to_id("refs/heads/beads/store").unwrap();
+        let loaded = read_state_at_oid(&local_repo, local_head).expect("strict load");
+        assert!(matches!(
+            loaded.meta.meta(),
+            wire::StoreMeta::V1 {
+                checksums: Some(_),
+                ..
+            }
+        ));
+        let commit = local_repo.find_commit(local_head).unwrap();
+        let tree = commit.tree().unwrap();
+        assert!(tree.get_name("notes.jsonl").is_some());
+        assert!(tree.get_name("meta.json").is_some());
+    }
+
+    #[test]
+    fn migrate_store_ref_to_v1_retries_true_push_race_and_realigns_local_ref() {
+        let tmp = TempDir::new().unwrap();
+        let remote_dir = tmp.path().join("remote");
+        let local_dir = tmp.path().join("local");
+
+        let remote_repo = Repository::init_bare(&remote_dir).unwrap();
+        let local_repo = Repository::init(&local_dir).unwrap();
+        local_repo
+            .remote("origin", remote_dir.to_str().unwrap())
+            .unwrap();
+
+        let base_oid = write_store_commit_with_custom_deps(
+            &remote_repo,
+            None,
+            "legacy-base",
+            br#"{"from":"bd-a","to":"bd-b","kind":"blocks"}
+"#,
+            false,
+            false,
+        );
+        let winner_oid = migrate_store_ref_to_v1(&remote_repo, &remote_dir, false, false, true, 0)
+            .unwrap()
+            .commit_oid
+            .expect("winner migration commit");
+        update_ref(
+            &remote_repo,
+            "refs/heads/beads/store",
+            base_oid,
+            "reset remote to legacy base",
+        )
+        .unwrap();
+        std::thread::sleep(Duration::from_secs(1));
+
+        {
+            let mut remote = local_repo.find_remote("origin").unwrap();
+            let mut options = git2::FetchOptions::new();
+            let refspec = "refs/heads/beads/store:refs/remotes/origin/beads/store";
+            remote.fetch(&[refspec], Some(&mut options), None).unwrap();
+        }
+        local_repo
+            .reference(
+                "refs/heads/beads/store",
+                base_oid,
+                true,
+                "init local legacy store",
+            )
+            .unwrap();
+
+        let outcome = migrate_store_ref_to_v1_with_before_push(
+            &local_repo,
+            &local_dir,
+            false,
+            false,
+            false,
+            1,
+            |retries, _commit_oid| {
+                if retries == 0 {
+                    update_ref(
+                        &remote_repo,
+                        "refs/heads/beads/store",
+                        winner_oid,
+                        "simulate remote winner before first push",
+                    )?;
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+
+        assert!(
+            outcome.commit_oid.is_none(),
+            "retry should converge to the remote winner without minting another commit: {outcome:?}"
+        );
+        assert_eq!(outcome.push, MigratePushDisposition::SkippedNoPush);
+        assert_eq!(outcome.from_effective_version, 0);
+        assert_eq!(outcome.deps_format_before, wire::DepsFormat::LegacyEdges);
+        assert!(outcome.converted_deps);
+        assert!(outcome.added_notes_file);
+        assert!(outcome.wrote_checksums);
+        assert!(
+            outcome.warnings.is_empty(),
+            "base legacy fixture should not invent warnings: {outcome:?}"
+        );
+        assert_eq!(
+            local_repo.refname_to_id("refs/heads/beads/store").unwrap(),
+            winner_oid,
+            "local store ref should realign to the fetched remote winner"
+        );
+        assert_eq!(
+            local_repo
+                .refname_to_id("refs/remotes/origin/beads/store")
+                .unwrap(),
+            winner_oid,
+            "retry fetch should refresh remote tracking to the winner"
+        );
+        let backup_ref = format!("refs/beads/backup/{base_oid}");
+        assert_eq!(
+            local_repo.refname_to_id(&backup_ref).unwrap(),
+            base_oid,
+            "original local ref should still be backed up after the lost race"
+        );
     }
 
     #[test]
@@ -2952,76 +4180,6 @@ mod tests {
             Err(SyncError::TooManyRetries(retries)) => assert_eq!(retries, 1),
             other => panic!("expected TooManyRetries, got {other:?}"),
         }
-    }
-
-    #[test]
-    fn restore_store_ref_recovers_migration_retry_state_after_remote_moves() {
-        let tmp = TempDir::new().unwrap();
-        let remote_dir = tmp.path().join("remote");
-        let local_dir = tmp.path().join("local");
-
-        let remote_repo = Repository::init_bare(&remote_dir).unwrap();
-        let local_repo = Repository::init(&local_dir).unwrap();
-        local_repo
-            .remote("origin", remote_dir.to_str().unwrap())
-            .unwrap();
-
-        let base_oid = write_store_commit_without_meta(&local_repo, None, "base");
-        {
-            let mut remote = local_repo.find_remote("origin").unwrap();
-            let mut push_options = git2::PushOptions::new();
-            remote
-                .push(
-                    &["refs/heads/beads/store:refs/heads/beads/store"],
-                    Some(&mut push_options),
-                )
-                .unwrap();
-        }
-        fetch_store_ref(&local_repo).unwrap();
-
-        let loaded = read_state_at_oid_for_migration(&local_repo, base_oid).unwrap();
-        let root_slug = BeadSlug::parse("test").unwrap();
-        let tentative_oid = commit_store_snapshot(
-            &local_repo,
-            base_oid,
-            &loaded.state,
-            Some(&root_slug),
-            loaded.meta.last_write_stamp(),
-            "migrate: deps to OR-Set v1",
-        )
-        .unwrap();
-        assert_eq!(
-            refname_to_id_optional(&local_repo, "refs/heads/beads/store").unwrap(),
-            Some(tentative_oid)
-        );
-
-        let remote_advanced =
-            write_store_commit_without_meta(&remote_repo, Some(base_oid), "remote");
-        fetch_store_ref(&local_repo).unwrap();
-        assert_eq!(
-            refname_to_id_optional(&local_repo, "refs/remotes/origin/beads/store").unwrap(),
-            Some(remote_advanced)
-        );
-
-        restore_store_ref(
-            &local_repo,
-            Some(base_oid),
-            "beads test: restore local retry state",
-        )
-        .unwrap();
-        assert_eq!(
-            refname_to_id_optional(&local_repo, "refs/heads/beads/store").unwrap(),
-            Some(base_oid)
-        );
-
-        let outcome =
-            migrate_store_ref_to_v1(&local_repo, &local_dir, false, false, false, 0).unwrap();
-        assert!(outcome.commit_oid.is_some());
-        assert!(outcome.pushed);
-
-        let local_after = refname_to_id_optional(&local_repo, "refs/heads/beads/store").unwrap();
-        let remote_after = refname_to_id_optional(&remote_repo, "refs/heads/beads/store").unwrap();
-        assert_eq!(local_after, remote_after);
     }
 
     #[cfg(feature = "slow-tests")]

@@ -206,6 +206,20 @@ impl CheckpointCache {
         }))
     }
 
+    pub fn invalidate_current(&self) -> Result<(), CheckpointCacheError> {
+        let group_dir = self.group_dir();
+        if !group_dir.exists() {
+            return Ok(());
+        }
+        let current_path = group_dir.join(CURRENT_FILE);
+        if !current_path.exists() {
+            return Ok(());
+        }
+        fs::remove_file(&current_path).map_err(|source| io_err(&current_path, source))?;
+        fsync_dir(&group_dir)?;
+        Ok(())
+    }
+
     fn group_dir(&self) -> PathBuf {
         paths::checkpoint_cache_dir(self.store_id).join(&self.checkpoint_group)
     }
@@ -543,6 +557,22 @@ mod tests {
         assert_eq!(loaded.meta, export.meta);
         assert_eq!(loaded.manifest, export.manifest);
         assert_eq!(loaded.files, export.files);
+    }
+
+    #[test]
+    fn invalidate_current_removes_current_pointer() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([8u8; 16]));
+        let export = build_export(store_id, 1_700_000_000_000);
+        let cache = CheckpointCache::new(store_id, export.meta.checkpoint_group.clone());
+        cache.publish(&export).expect("publish");
+
+        cache.invalidate_current().expect("invalidate current");
+
+        assert!(cache.load_current().expect("load current").is_none());
+        assert!(cache.load_current_export().expect("load export").is_none());
     }
 
     #[test]

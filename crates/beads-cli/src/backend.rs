@@ -66,6 +66,16 @@ pub enum DepsFormat {
     Invalid,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum PushDisposition {
+    #[serde(rename = "pushed")]
+    Pushed,
+    #[serde(rename = "skipped_no_push")]
+    SkippedNoPush,
+    #[serde(rename = "skipped_no_remote")]
+    SkippedNoRemote,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct MigrateDetectOutcome {
     pub meta_format_version: Option<u32>,
@@ -97,7 +107,7 @@ pub struct MigrateToOutcome {
     pub added_notes_file: bool,
     pub wrote_checksums: bool,
     pub commit_oid: Option<String>,
-    pub pushed: bool,
+    pub push: PushDisposition,
     pub warnings: Vec<String>,
 }
 

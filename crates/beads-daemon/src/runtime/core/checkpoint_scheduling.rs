@@ -136,6 +136,14 @@ impl Daemon {
         groups
     }
 
+    pub(crate) fn force_checkpoint_group(&mut self, store_id: StoreId, group: &str) -> bool {
+        let scheduled = self
+            .checkpoint_scheduler
+            .force_checkpoint_group(store_id, group);
+        self.emit_checkpoint_queue_depth();
+        scheduled
+    }
+
     /// Reload checkpoint groups from config and re-register with scheduler.
     pub(crate) fn reload_checkpoint_groups(&mut self, repo_path: &Path) -> Result<usize, OpError> {
         let config = crate::config::load_for_repo(Some(repo_path)).map_err(|e| {

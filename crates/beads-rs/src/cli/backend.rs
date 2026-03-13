@@ -1,8 +1,8 @@
 use beads_cli::backend::{
     CliHostBackend, DepsFormat, MigrateApplyImportOutcome, MigrateApplyImportRequest,
     MigrateDetectOutcome, MigrateDetectRequest, MigrateRefreshRequest, MigrateToOutcome,
-    MigrateToRequest, StoreFsckRequest, StoreUnlockRequest, UpgradeMethod as CliUpgradeMethod,
-    UpgradeOutcome as CliUpgradeOutcome, UpgradeRequest,
+    MigrateToRequest, PushDisposition, StoreFsckRequest, StoreUnlockRequest,
+    UpgradeMethod as CliUpgradeMethod, UpgradeOutcome as CliUpgradeOutcome, UpgradeRequest,
 };
 use beads_core::FormatVersion;
 use beads_surface::ipc::{EmptyPayload, Request, send_request};
@@ -10,14 +10,16 @@ use beads_surface::store_admin::{
     StoreAdminCall, StoreAdminCallError, call_store_fsck_no_autostart,
     call_store_unlock_no_autostart, daemon_pid_no_autostart,
 };
-use git2::{ObjectType, Oid, Repository};
+use git2::{ErrorCode, ObjectType, Oid, Repository};
 
 use crate::config::load_or_init;
 use crate::upgrade::{UpgradeMethod as HostUpgradeMethod, run_upgrade};
 use crate::{Error, OpError, Result};
-use beads_git::{
-    SyncError, SyncProcess, fetch_store_ref, migrate_store_ref_to_v1, refname_to_id_optional, wire,
-};
+use beads_git::{SyncError, SyncProcess, sync, wire};
+
+const DEFAULT_MIGRATE_MAX_RETRIES: usize = 3;
+const ENV_TESTING: &str = "BD_TESTING";
+const ENV_TEST_MIGRATE_MAX_RETRIES: &str = "BD_TEST_MIGRATE_MAX_RETRIES";
 
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct BeadsRsCliBackend;
@@ -86,15 +88,14 @@ impl CliHostBackend for BeadsRsCliBackend {
 
         let repo = Repository::discover(&request.repo)
             .map_err(|err| beads_git::SyncError::OpenRepo(request.repo.clone(), err))?;
-        let before = detect_store_migration_state(&repo)?;
 
-        let migrated = match migrate_store_ref_to_v1(
+        let migrated = match sync::migrate_store_ref_to_v1(
             &repo,
             &request.repo,
             request.dry_run,
             request.force,
             request.no_push,
-            3,
+            migrate_max_retries(),
         ) {
             Ok(outcome) => outcome,
             Err(SyncError::NoLocalRef(ref_name)) => {
@@ -123,14 +124,18 @@ impl CliHostBackend for BeadsRsCliBackend {
 
         Ok(MigrateToOutcome {
             dry_run: request.dry_run,
-            from_effective_version: before.effective_format_version,
+            from_effective_version: migrated.from_effective_version,
             to_version: request.to,
-            deps_format_before: before.deps_format,
+            deps_format_before: map_deps_format(migrated.deps_format_before),
             converted_deps: migrated.converted_deps,
             added_notes_file: migrated.added_notes_file,
             wrote_checksums: migrated.wrote_checksums,
             commit_oid: migrated.commit_oid.map(|oid| oid.to_string()),
-            pushed: migrated.pushed,
+            push: match migrated.push {
+                sync::MigratePushDisposition::Pushed => PushDisposition::Pushed,
+                sync::MigratePushDisposition::SkippedNoPush => PushDisposition::SkippedNoPush,
+                sync::MigratePushDisposition::SkippedNoRemote => PushDisposition::SkippedNoRemote,
+            },
             warnings: migrated.warnings,
         })
     }
@@ -139,7 +144,7 @@ impl CliHostBackend for BeadsRsCliBackend {
         &self,
         request: MigrateApplyImportRequest,
     ) -> Result<MigrateApplyImportOutcome> {
-        let repo = Repository::discover(&request.repo)
+        let repo = git2::Repository::discover(&request.repo)
             .map_err(|err| beads_git::SyncError::OpenRepo(request.repo.clone(), err))?;
 
         if repo.refname_to_id("refs/heads/beads/store").is_ok() && !request.force {
@@ -174,11 +179,28 @@ impl CliHostBackend for BeadsRsCliBackend {
     }
 }
 
+fn migrate_max_retries() -> usize {
+    if std::env::var_os(ENV_TESTING).as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return DEFAULT_MIGRATE_MAX_RETRIES;
+    }
+    std::env::var(ENV_TEST_MIGRATE_MAX_RETRIES)
+        .ok()
+        .and_then(|raw| raw.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_MIGRATE_MAX_RETRIES)
+}
+
 fn map_upgrade_method(method: HostUpgradeMethod) -> CliUpgradeMethod {
     match method {
         HostUpgradeMethod::Prebuilt => CliUpgradeMethod::Prebuilt,
         HostUpgradeMethod::Cargo => CliUpgradeMethod::Cargo,
         HostUpgradeMethod::None => CliUpgradeMethod::None,
+    }
+}
+
+fn map_deps_format(format: beads_git::wire::DepsFormat) -> DepsFormat {
+    match format {
+        beads_git::wire::DepsFormat::OrSetV1 => DepsFormat::OrSetV1,
+        beads_git::wire::DepsFormat::LegacyEdges => DepsFormat::LegacyEdges,
     }
 }
 
@@ -191,39 +213,53 @@ fn map_store_admin_call_error(err: StoreAdminCallError) -> Error {
     }
 }
 
-#[derive(Clone, Debug)]
-struct StoreRefProbe {
-    meta_format_version: Option<u32>,
-    deps_format: DepsFormat,
-    notes_present: bool,
-    checksums_present: bool,
-    reasons: Vec<String>,
-}
-
 fn detect_store_migration_state(repo: &Repository) -> Result<MigrateDetectOutcome> {
     let latest = FormatVersion::CURRENT.get();
-    let local_oid = refname_to_id_optional(repo, "refs/heads/beads/store")?;
-
-    let mut reasons = Vec::new();
-    if let Err(err) = fetch_store_ref(repo) {
-        reasons.push(format!(
-            "remote beads/store fetch failed before detect: {err}"
-        ));
-    }
-    let remote_oid = refname_to_id_optional(repo, "refs/remotes/origin/beads/store")?;
-    let local_probe = match local_oid {
-        Some(oid) => Some(probe_store_ref(repo, oid, "local")?),
-        None => {
-            reasons.push("refs/heads/beads/store is missing".into());
+    let local_oid = resolve_ref_oid(repo, "refs/heads/beads/store")?;
+    let live_remote_preview = match sync::open_remote_store_preview(repo) {
+        Ok(preview) => preview,
+        Err(beads_git::SyncError::Fetch(err)) if local_oid.is_some() => {
+            tracing::warn!(
+                error = ?err,
+                "remote store preview failed during detect; continuing with local store only"
+            );
             None
         }
+        Err(err) => return Err(Error::from(err)),
     };
-    let remote_probe = match remote_oid {
-        Some(oid) => Some(probe_store_ref(repo, oid, "remote")?),
-        None => None,
-    };
+    let remote_oid = live_remote_preview
+        .as_ref()
+        .map(sync::RemoteStorePreview::oid);
 
-    if local_probe.is_none() && remote_probe.is_none() {
+    let mut probes = Vec::new();
+    match (local_oid, remote_oid) {
+        (None, None) => {}
+        (Some(local_oid), Some(remote_oid)) if local_oid == remote_oid => {
+            probes.push(probe_store_tree_in_repo(repo, local_oid, None)?);
+        }
+        (Some(local_oid), Some(remote_oid)) => {
+            probes.push(probe_store_tree_in_repo(repo, local_oid, Some("local"))?);
+            let remote_repo = live_remote_preview
+                .as_ref()
+                .map(sync::RemoteStorePreview::repo)
+                .unwrap_or(repo);
+            probes.push(probe_store_tree_in_repo(
+                remote_repo,
+                remote_oid,
+                Some("remote"),
+            )?);
+        }
+        (Some(local_oid), None) => probes.push(probe_store_tree_in_repo(repo, local_oid, None)?),
+        (None, Some(remote_oid)) => {
+            let remote_repo = live_remote_preview
+                .as_ref()
+                .map(sync::RemoteStorePreview::repo)
+                .unwrap_or(repo);
+            probes.push(probe_store_tree_in_repo(remote_repo, remote_oid, None)?);
+        }
+    }
+
+    if probes.is_empty() {
         return Ok(MigrateDetectOutcome {
             meta_format_version: None,
             effective_format_version: 0,
@@ -232,28 +268,20 @@ fn detect_store_migration_state(repo: &Repository) -> Result<MigrateDetectOutcom
             notes_present: false,
             checksums_present: false,
             needs_migration: true,
-            reasons,
+            reasons: vec!["refs/heads/beads/store is missing".into()],
         });
     }
-
-    let probes = [local_probe.as_ref(), remote_probe.as_ref()];
-    let existing: Vec<&StoreRefProbe> = probes.into_iter().flatten().collect();
-    for probe in &existing {
-        reasons.extend(probe.reasons.clone());
-    }
-
-    let meta_format_version = existing
+    let meta_format_version = aggregate_meta_format_version(&probes, latest);
+    let deps_format = probes
         .iter()
-        .map(|probe| probe.meta_format_version)
-        .min()
-        .flatten();
-    let notes_present = existing.iter().all(|probe| probe.notes_present);
-    let checksums_present = existing.iter().all(|probe| probe.checksums_present);
-    let deps_format = aggregate_deps_format(existing.iter().map(|probe| probe.deps_format));
-    let effective_format_version = if !existing.is_empty()
-        && existing
-            .iter()
-            .all(|probe| probe.meta_format_version == Some(latest))
+        .map(|probe| probe.deps_format)
+        .max_by_key(|format| deps_format_rank(*format))
+        .unwrap_or(DepsFormat::Missing);
+    let notes_present = probes.iter().all(|probe| probe.notes_present);
+    let checksums_present = probes.iter().all(|probe| probe.checksums_present);
+    let mut reasons: Vec<String> = probes.into_iter().flat_map(|probe| probe.reasons).collect();
+
+    let effective_format_version = if meta_format_version == Some(latest)
         && matches!(deps_format, DepsFormat::OrSetV1)
         && notes_present
         && checksums_present
@@ -278,24 +306,35 @@ fn detect_store_migration_state(repo: &Repository) -> Result<MigrateDetectOutcom
     })
 }
 
-fn probe_store_ref(repo: &Repository, oid: Oid, label: &str) -> Result<StoreRefProbe> {
+#[derive(Debug, Clone)]
+struct StoreMigrationProbe {
+    meta_format_version: Option<u32>,
+    deps_format: DepsFormat,
+    notes_present: bool,
+    checksums_present: bool,
+    reasons: Vec<String>,
+}
+
+fn probe_store_tree_in_repo(
+    repo: &Repository,
+    oid: Oid,
+    reason_prefix: Option<&str>,
+) -> Result<StoreMigrationProbe> {
     let commit = repo.find_commit(oid).map_err(beads_git::SyncError::from)?;
     let tree = commit.tree().map_err(beads_git::SyncError::from)?;
+
     let notes_present = tree.get_name("notes.jsonl").is_some();
     let mut reasons = Vec::new();
 
     let (meta_format_version, checksums_present) = match read_meta_probe(repo, &tree)? {
         Some((version, checksums_present)) => (Some(version), checksums_present),
-        None => {
-            reasons.push(format!("{label} meta.json missing"));
-            (None, false)
-        }
+        None => (None, false),
     };
     if !notes_present {
-        reasons.push(format!("{label} notes.jsonl missing"));
+        reasons.push("notes.jsonl missing".into());
     }
     if !checksums_present {
-        reasons.push(format!("{label} meta checksums missing"));
+        reasons.push("meta checksums missing".into());
     }
 
     let deps_format = match read_blob_from_tree(repo, &tree, "deps.jsonl")? {
@@ -303,31 +342,37 @@ fn probe_store_ref(repo: &Repository, oid: Oid, label: &str) -> Result<StoreRefP
             Ok(_) => DepsFormat::OrSetV1,
             Err(strict_err) => match wire::parse_legacy_deps_edges(&deps_bytes) {
                 Ok((_wire, warnings)) => {
-                    reasons.extend(
-                        warnings
-                            .into_iter()
-                            .map(|warning| format!("{label} {warning}")),
-                    );
-                    reasons.push(format!(
-                        "{label} deps.jsonl is legacy line-per-edge (missing cc)"
-                    ));
+                    reasons.extend(warnings);
                     DepsFormat::LegacyEdges
                 }
                 Err(legacy_err) => {
                     reasons.push(format!(
-                        "{label} deps.jsonl parse failed (strict: {strict_err}; legacy: {legacy_err})"
+                        "deps.jsonl parse failed (strict: {strict_err}; legacy: {legacy_err})"
                     ));
                     DepsFormat::Invalid
                 }
             },
         },
-        None => {
-            reasons.push(format!("{label} deps.jsonl missing"));
-            DepsFormat::Missing
-        }
+        None => DepsFormat::Missing,
     };
 
-    Ok(StoreRefProbe {
+    match deps_format {
+        DepsFormat::OrSetV1 => {}
+        DepsFormat::LegacyEdges => {
+            reasons.push("deps.jsonl is legacy line-per-edge (missing cc)".into())
+        }
+        DepsFormat::Missing => reasons.push("deps.jsonl missing".into()),
+        DepsFormat::Invalid => {}
+    }
+
+    if let Some(prefix) = reason_prefix {
+        reasons = reasons
+            .into_iter()
+            .map(|reason| format!("{prefix}: {reason}"))
+            .collect();
+    }
+
+    Ok(StoreMigrationProbe {
         meta_format_version,
         deps_format,
         notes_present,
@@ -336,25 +381,39 @@ fn probe_store_ref(repo: &Repository, oid: Oid, label: &str) -> Result<StoreRefP
     })
 }
 
-fn aggregate_deps_format(formats: impl Iterator<Item = DepsFormat>) -> DepsFormat {
-    let mut saw_any = false;
-    let mut aggregate = DepsFormat::OrSetV1;
-    for format in formats {
-        saw_any = true;
-        aggregate = match (aggregate, format) {
-            (_, DepsFormat::Invalid) => DepsFormat::Invalid,
-            (DepsFormat::Invalid, _) => DepsFormat::Invalid,
-            (_, DepsFormat::LegacyEdges) => DepsFormat::LegacyEdges,
-            (DepsFormat::LegacyEdges, _) => DepsFormat::LegacyEdges,
-            (_, DepsFormat::Missing) => DepsFormat::Missing,
-            (DepsFormat::Missing, DepsFormat::OrSetV1) => DepsFormat::Missing,
-            (_, DepsFormat::OrSetV1) => aggregate,
-        };
+fn resolve_ref_oid(repo: &Repository, refname: &str) -> Result<Option<Oid>> {
+    match repo.refname_to_id(refname) {
+        Ok(oid) => Ok(Some(oid)),
+        Err(err) if err.code() == ErrorCode::NotFound => Ok(None),
+        Err(err) => Err(beads_git::SyncError::Git(err).into()),
     }
-    if saw_any {
-        aggregate
-    } else {
-        DepsFormat::Missing
+}
+
+fn aggregate_meta_format_version(probes: &[StoreMigrationProbe], latest: u32) -> Option<u32> {
+    if probes.is_empty() {
+        return None;
+    }
+    if probes
+        .iter()
+        .all(|probe| probe.meta_format_version == Some(latest))
+    {
+        return Some(latest);
+    }
+    if probes
+        .iter()
+        .any(|probe| probe.meta_format_version == Some(0))
+    {
+        return Some(0);
+    }
+    probes.iter().find_map(|probe| probe.meta_format_version)
+}
+
+fn deps_format_rank(format: DepsFormat) -> u8 {
+    match format {
+        DepsFormat::OrSetV1 => 0,
+        DepsFormat::Missing => 1,
+        DepsFormat::LegacyEdges => 2,
+        DepsFormat::Invalid => 3,
     }
 }
 

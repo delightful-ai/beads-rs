@@ -420,9 +420,10 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
+    use std::sync::{Mutex, MutexGuard};
     use std::time::{Duration, Instant};
 
-    use git2::{Oid, Repository};
+    use git2::{Oid, Repository, Signature};
     use uuid::Uuid;
 
     use crate::core::{
@@ -433,13 +434,14 @@ mod tests {
         ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity,
         StoreMeta, StoreMetaVersions, StoreState, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, VerifiedEvent,
         WallClock, Watermarks, WireBeadPatch, WireDepAddV1, WireDotV1, WireNoteV1, WireStamp,
-        Workflow, WriteStamp, encode_event_body_canonical, hash_event_body,
+        Workflow, WriteStamp, encode_event_body_canonical, hash_event_body, sha256_bytes,
     };
     use crate::git::checkpoint::{
-        CHECKPOINT_FORMAT_VERSION, CheckpointExportInput, CheckpointFileKind,
-        CheckpointPublishOutcome, CheckpointShardPath, CheckpointSnapshotInput,
-        CheckpointStoreMeta, build_snapshot, export_checkpoint, policy_hash, publish_checkpoint,
-        shard_for_bead, store_state_from_legacy,
+        CHECKPOINT_FORMAT_VERSION, CheckpointExport, CheckpointExportInput, CheckpointFileKind,
+        CheckpointManifest, CheckpointMeta, CheckpointPublishOutcome, CheckpointShardPath,
+        CheckpointShardPayload, CheckpointSnapshotInput, CheckpointStoreMeta, IncludedWatermarks,
+        ManifestFile, build_snapshot, export_checkpoint, policy_hash, publish_checkpoint,
+        shard_for_bead, shard_name, store_state_from_legacy,
     };
     use crate::runtime::OpResult;
     use crate::runtime::git_worker::LoadResult;
@@ -457,28 +459,43 @@ mod tests {
         RemoteUrl::new("example.com/test/repo")
     }
 
+    static TEST_STORE_DIR_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
     struct TempStoreDir {
         _temp: TempDir,
         data_dir: PathBuf,
+        _lock: MutexGuard<'static, ()>,
         _override: crate::paths::DataDirOverride,
     }
 
     impl TempStoreDir {
         fn new() -> Self {
+            let lock = TEST_STORE_DIR_LOCK
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .unwrap_or_else(|err| err.into_inner());
             let temp = TempDir::new().unwrap();
             let data_dir = temp.path().join("data");
             std::fs::create_dir_all(&data_dir).unwrap();
             let override_guard = crate::paths::override_data_dir_for_tests(Some(data_dir.clone()));
+            beads_git::init_data_dir_override(Some(data_dir.clone()));
 
             Self {
                 _temp: temp,
                 data_dir,
+                _lock: lock,
                 _override: override_guard,
             }
         }
 
         fn data_dir(&self) -> &Path {
             &self.data_dir
+        }
+    }
+
+    impl Drop for TempStoreDir {
+        fn drop(&mut self) {
+            beads_git::init_data_dir_override(None);
         }
     }
 
@@ -1735,6 +1752,222 @@ mod tests {
         (daemon, remote, repo_dir, store_id, bead_id)
     }
 
+    fn write_checkpoint_git_entry(
+        repo: &Repository,
+        store_id: StoreId,
+        checkpoint_group: &str,
+        origin: ReplicaId,
+        included_seq: u64,
+        deps_bytes: &[u8],
+    ) {
+        let shard_path =
+            CheckpointShardPath::new(NamespaceId::core(), CheckpointFileKind::Deps, shard_name(0));
+        let manifest = CheckpointManifest {
+            checkpoint_group: checkpoint_group.to_string(),
+            store_id,
+            store_epoch: StoreEpoch::ZERO,
+            namespaces: vec![NamespaceId::core()].into(),
+            files: BTreeMap::from([(
+                shard_path.clone(),
+                ManifestFile {
+                    sha256: ContentHash::from_bytes(sha256_bytes(deps_bytes).0),
+                    bytes: deps_bytes.len() as u64,
+                },
+            )]),
+        };
+        let mut included = IncludedWatermarks::new();
+        included
+            .entry(NamespaceId::core())
+            .or_default()
+            .insert(origin, included_seq);
+        let mut meta = CheckpointMeta {
+            checkpoint_format_version: CHECKPOINT_FORMAT_VERSION,
+            store_id,
+            store_epoch: StoreEpoch::ZERO,
+            checkpoint_group: checkpoint_group.to_string(),
+            namespaces: vec![NamespaceId::core()].into(),
+            created_at_ms: 1_700_000_000_000,
+            created_by_replica_id: origin,
+            policy_hash: ContentHash::from_bytes([3u8; 32]),
+            roster_hash: None,
+            included,
+            included_heads: None,
+            content_hash: CheckpointContentSha256::from_checkpoint_preimage_bytes(&[0u8; 32]),
+            manifest_hash: manifest.manifest_hash().expect("manifest hash"),
+        };
+        meta.content_hash = meta.compute_content_hash().expect("content hash");
+        let export = CheckpointExport {
+            manifest,
+            meta,
+            files: BTreeMap::from([(
+                shard_path.clone(),
+                CheckpointShardPayload {
+                    path: shard_path,
+                    bytes: deps_bytes.to_vec().into(),
+                },
+            )]),
+        };
+
+        let git_ref = format!("refs/beads/{store_id}/{checkpoint_group}");
+        let mut checkpoint_groups = BTreeMap::new();
+        checkpoint_groups.insert(checkpoint_group.to_string(), git_ref.clone());
+        let store_meta = CheckpointStoreMeta::new(
+            store_id,
+            StoreEpoch::ZERO,
+            CHECKPOINT_FORMAT_VERSION,
+            checkpoint_groups,
+        );
+        let meta_oid = repo
+            .blob(&export.meta.canon_bytes().expect("checkpoint meta bytes"))
+            .expect("checkpoint meta blob");
+        let manifest_oid = repo
+            .blob(
+                &export
+                    .manifest
+                    .canon_bytes()
+                    .expect("checkpoint manifest bytes"),
+            )
+            .expect("checkpoint manifest blob");
+        let deps_oid = repo.blob(deps_bytes).expect("checkpoint deps blob");
+
+        let mut deps_builder = repo.treebuilder(None).expect("deps treebuilder");
+        deps_builder
+            .insert("00.jsonl", deps_oid, 0o100644)
+            .expect("insert deps shard");
+        let deps_tree_oid = deps_builder.write().expect("write deps tree");
+
+        let mut core_builder = repo.treebuilder(None).expect("core treebuilder");
+        core_builder
+            .insert("deps", deps_tree_oid, 0o040000)
+            .expect("insert deps dir");
+        let core_tree_oid = core_builder.write().expect("write core tree");
+
+        let mut namespaces_builder = repo.treebuilder(None).expect("namespaces treebuilder");
+        namespaces_builder
+            .insert("core", core_tree_oid, 0o040000)
+            .expect("insert core dir");
+        let namespaces_tree_oid = namespaces_builder.write().expect("write namespaces tree");
+
+        let mut root_builder = repo.treebuilder(None).expect("checkpoint root treebuilder");
+        root_builder
+            .insert("meta.json", meta_oid, 0o100644)
+            .expect("insert checkpoint meta");
+        root_builder
+            .insert("manifest.json", manifest_oid, 0o100644)
+            .expect("insert checkpoint manifest");
+        root_builder
+            .insert("namespaces", namespaces_tree_oid, 0o040000)
+            .expect("insert namespaces dir");
+        let root_tree_oid = root_builder.write().expect("write checkpoint root tree");
+        let root_tree = repo
+            .find_tree(root_tree_oid)
+            .expect("find checkpoint root tree");
+
+        let sig = Signature::now("beads", "beads@localhost").expect("checkpoint signature");
+        let checkpoint_commit = repo
+            .commit(
+                Some(&git_ref),
+                &sig,
+                &sig,
+                "test checkpoint ref",
+                &root_tree,
+                &[],
+            )
+            .expect("write checkpoint ref commit");
+
+        let store_meta_oid = repo
+            .blob(&store_meta.canon_bytes().expect("store meta bytes"))
+            .expect("store meta blob");
+        let mut store_meta_builder = repo.treebuilder(None).expect("store meta treebuilder");
+        store_meta_builder
+            .insert("store_meta.json", store_meta_oid, 0o100644)
+            .expect("insert store meta file");
+        let store_meta_tree_oid = store_meta_builder.write().expect("write store meta tree");
+        let store_meta_tree = repo
+            .find_tree(store_meta_tree_oid)
+            .expect("find store meta tree");
+        repo.commit(
+            Some("refs/beads/meta"),
+            &sig,
+            &sig,
+            "test checkpoint store meta",
+            &store_meta_tree,
+            &[],
+        )
+        .expect("write checkpoint store meta ref");
+        assert_eq!(
+            repo.refname_to_id(&git_ref).expect("checkpoint ref"),
+            checkpoint_commit
+        );
+    }
+
+    fn build_valid_checkpoint_export(
+        store_id: StoreId,
+        checkpoint_group: &str,
+        origin: ReplicaId,
+        included_seq: u64,
+        policy_hash: ContentHash,
+        bead_id: &str,
+    ) -> CheckpointExport {
+        let bead = make_bead(bead_id, 1_700_000_000_000, "checkpoint@test");
+        let mut legacy_state = CanonicalState::new();
+        legacy_state.insert_live(bead);
+        let store_state = store_state_from_legacy(legacy_state);
+
+        let mut watermarks = Watermarks::<Durable>::new();
+        let head = [7u8; 32];
+        watermarks
+            .observe_at_least(
+                &NamespaceId::core(),
+                &origin,
+                Seq0::new(included_seq),
+                HeadStatus::Known(head),
+            )
+            .expect("watermark");
+
+        let snapshot = build_snapshot(CheckpointSnapshotInput {
+            checkpoint_group: checkpoint_group.to_string(),
+            namespaces: vec![NamespaceId::core()].into(),
+            store_id,
+            store_epoch: StoreEpoch::ZERO,
+            created_at_ms: 1_700_000_000_000,
+            created_by_replica_id: origin,
+            policy_hash,
+            roster_hash: None,
+            dirty_shards: None,
+            state: &store_state,
+            watermarks_durable: &watermarks,
+        })
+        .expect("checkpoint snapshot");
+
+        export_checkpoint(CheckpointExportInput {
+            snapshot: &snapshot,
+            previous: None,
+        })
+        .expect("checkpoint export")
+    }
+
+    fn write_valid_checkpoint_cache_entry(
+        store_id: StoreId,
+        checkpoint_group: &str,
+        origin: ReplicaId,
+        included_seq: u64,
+        policy_hash: ContentHash,
+        bead_id: &str,
+    ) {
+        let export = build_valid_checkpoint_export(
+            store_id,
+            checkpoint_group,
+            origin,
+            included_seq,
+            policy_hash,
+            bead_id,
+        );
+        CheckpointCache::new(store_id, checkpoint_group)
+            .publish(&export)
+            .expect("publish valid checkpoint cache entry");
+    }
+
     #[test]
     fn load_from_checkpoint_ref_skips_policy_hash_mismatch_checkpoint() {
         let _tmp = test_store_dir();
@@ -1885,6 +2118,77 @@ mod tests {
             .expect("next seq");
         txn.rollback().expect("rollback");
         assert_eq!(next_seq.get(), 4);
+    }
+
+    #[test]
+    fn incompatible_checkpoint_git_still_schedules_rebuild_when_cache_import_succeeds() {
+        let _tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+
+        let repo_dir = TempDir::new().unwrap();
+        let repo = Repository::init(repo_dir.path()).unwrap();
+
+        let store_id = store_id_from_remote(&remote);
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), repo_dir.path())
+            .expect("store init");
+        let origin = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store session")
+            .runtime()
+            .meta
+            .replica_id;
+        let policy_hash = store_policy_hash(&daemon, store_id);
+        write_valid_checkpoint_cache_entry(
+            store_id,
+            "core",
+            origin,
+            3,
+            policy_hash,
+            "bd-cache-valid",
+        );
+        write_checkpoint_git_entry(
+            &repo,
+            store_id,
+            "core",
+            origin,
+            3,
+            br#"{"from":"bd-a","to":"bd-b","kind":"blocks"}
+"#,
+        );
+
+        daemon
+            .apply_loaded_repo_state(store_id, &remote, repo_dir.path(), empty_load_result())
+            .expect("load repo");
+
+        let store = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store session")
+            .runtime();
+        let core = store.state.core();
+        let bead_id = BeadId::parse("bd-cache-valid").expect("checkpoint bead id");
+        assert!(
+            core.get_live(&bead_id).is_some(),
+            "valid cache checkpoint state should still merge even when git import is incompatible"
+        );
+        let durable = store
+            .watermarks_durable
+            .get(&NamespaceId::core(), &origin)
+            .copied()
+            .expect("durable watermark from cache import");
+        assert_eq!(durable.seq().get(), 3);
+
+        let snapshots = daemon.checkpoint_group_snapshots(store_id);
+        let core = snapshots
+            .iter()
+            .find(|snapshot| snapshot.group == "core")
+            .expect("core snapshot");
+        assert!(
+            core.dirty,
+            "incompatible git checkpoint should still schedule a rebuild even when cache import succeeded"
+        );
     }
 
     #[test]
