@@ -44,6 +44,30 @@ fn upgrade_support_is_not_exported_from_cli_or_public_beads_rs_surface() {
     );
 }
 
+#[test]
+fn remaining_daemon_facing_tests_are_documented_as_assembly_owned() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("canonical repo root");
+    let daemon_mod = repo_root.join("crates/beads-rs/tests/integration/daemon/mod.rs");
+    let fixtures_mod = repo_root.join("crates/beads-rs/tests/integration/fixtures/mod.rs");
+
+    let daemon_contents = fs::read_to_string(&daemon_mod)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", daemon_mod.display()));
+    let fixtures_contents = fs::read_to_string(&fixtures_mod)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", fixtures_mod.display()));
+
+    assert!(
+        daemon_contents.contains("Assembly-owned daemon/product integration coverage."),
+        "daemon integration module should explain why these tests stay in beads-rs"
+    );
+    assert!(
+        fixtures_contents.contains("Assembly-owned integration fixtures."),
+        "fixtures module should explain why these helpers stay in beads-rs"
+    );
+}
+
 fn collect_forbidden_daemon_imports(root: &Path, daemon_root: &Path, matches: &mut Vec<String>) {
     let runtime_path = ["beads_daemon", "::runtime::"].concat();
     let git_path = ["beads_daemon", "::git::"].concat();
