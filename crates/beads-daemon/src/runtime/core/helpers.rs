@@ -250,7 +250,8 @@ pub struct ReplayApplyOutcome {
 }
 
 /// ```compile_fail
-/// use beads_daemon::runtime::core::PendingReplayApply;
+/// use beads_daemon::
+///     runtime::core::PendingReplayApply;
 ///
 /// fn bypass_ack(pending: PendingReplayApply) {
 ///     let _ = pending.state;

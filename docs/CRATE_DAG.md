@@ -73,6 +73,21 @@ just dylint
 
 `just dylint` runs the boundary lint and must fail if CLI daemon imports are reintroduced.
 
+## Daemon Public Boundary Invariant
+
+- Non-daemon crates must not import `beads_daemon::runtime::*`.
+- No crate may import `beads_daemon::git::*`.
+- `beads-daemon` may keep private `runtime` and `git` shims for internal organization, but those are not public APIs.
+
+Invariant commands:
+
+```bash
+rg -n "beads_daemon::runtime::" crates --glob '!**/target/**'
+rg -n "beads_daemon::git::" crates --glob '!**/target/**'
+```
+
+Expected result: no matches.
+
 ## CLI Ownership Invariant
 
 - `beads-cli` owns the CLI parse/dispatch surface and command mapping.

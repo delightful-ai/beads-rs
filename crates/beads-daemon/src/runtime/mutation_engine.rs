@@ -102,7 +102,8 @@ pub struct EventDraft {
 }
 
 /// ```compile_fail
-/// use beads_daemon::runtime::mutation_engine::PlannedMutation;
+/// use beads_daemon::
+///     runtime::mutation_engine::PlannedMutation;
 ///
 /// fn bypass_ack(planned: PlannedMutation) {
 ///     let _ = planned.draft;
