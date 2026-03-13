@@ -1,5 +1,3 @@
-//! Repository discovery helpers used by daemon runtime/config loading.
-
 use std::path::{Path, PathBuf};
 
 use git2::Repository;

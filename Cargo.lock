@@ -144,6 +144,7 @@ version = "0.2.0-alpha"
 dependencies = [
  "beads-core",
  "dirs",
+ "git2",
  "serde",
  "tempfile",
  "toml",

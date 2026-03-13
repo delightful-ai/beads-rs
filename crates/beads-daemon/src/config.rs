@@ -101,7 +101,7 @@ pub fn daemon_runtime_from_config(config: &Config) -> DaemonRuntimeConfig {
 #[must_use]
 pub fn discover_repo_root() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    crate::repo::discover_root_optional(cwd)
+    beads_bootstrap::repo::discover_root_optional(cwd)
 }
 
 pub fn load() -> Result<Config, String> {

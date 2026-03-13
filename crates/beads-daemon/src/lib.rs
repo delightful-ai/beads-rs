@@ -17,7 +17,6 @@ pub mod layout;
 pub mod metrics;
 pub mod paths;
 pub mod remote;
-pub mod repo;
 mod runtime;
 pub mod scheduler;
 pub mod telemetry;

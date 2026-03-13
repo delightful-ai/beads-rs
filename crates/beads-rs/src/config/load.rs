@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
 
 use crate::OpError;
-use crate::repo;
 use crate::{Error, Result};
 
 use beads_bootstrap::config as moved;
+use beads_bootstrap::repo as bootstrap_repo;
 
 use super::{Config, ConfigLayer, apply_env_overrides};
 
@@ -18,7 +18,7 @@ pub fn repo_config_path(repo_root: &Path) -> PathBuf {
 
 pub fn discover_repo_root() -> Option<PathBuf> {
     let cwd = std::env::current_dir().ok()?;
-    repo::discover_root_optional(cwd)
+    bootstrap_repo::discover_root_optional(cwd)
 }
 
 pub fn load_user_config() -> Result<Option<ConfigLayer>> {
