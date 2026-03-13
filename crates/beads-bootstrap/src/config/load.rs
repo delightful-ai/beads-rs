@@ -1,13 +1,16 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use serde::de::DeserializeOwned;
+
+use super::env as config_env;
 use super::merge::{apply_env_overrides, merge_layers};
 use super::{Config, ConfigLayer};
 
 type Result<T> = std::result::Result<T, String>;
 
 pub fn config_path() -> PathBuf {
-    crate::paths::resolve_config_dir(std::env::var("BD_CONFIG_DIR").ok().as_deref())
+    crate::paths::resolve_config_dir(std::env::var(config_env::CONFIG_DIR_VAR).ok().as_deref())
         .join("config.toml")
 }
 
@@ -21,10 +24,7 @@ pub fn load_user_config() -> Result<Option<ConfigLayer>> {
         tracing::debug!(path = %path.display(), "user config file not found, using defaults");
         return Ok(None);
     }
-    let contents = fs::read_to_string(&path)
-        .map_err(|e| config_error(format!("failed to read {}: {e}", path.display())))?;
-    let layer: ConfigLayer = toml::from_str(&contents)
-        .map_err(|e| config_error(format!("failed to parse {}: {e}", path.display())))?;
+    let layer: ConfigLayer = read_toml(&path)?;
     tracing::debug!(
         path = %path.display(),
         has_checkpoint_groups = layer.checkpoint_groups.is_some(),
@@ -39,16 +39,43 @@ pub fn load_repo_config(repo_root: &Path) -> Result<Option<ConfigLayer>> {
         tracing::debug!(path = %path.display(), "repo config file not found");
         return Ok(None);
     }
-    let contents = fs::read_to_string(&path)
-        .map_err(|e| config_error(format!("failed to read {}: {e}", path.display())))?;
-    let layer: ConfigLayer = toml::from_str(&contents)
-        .map_err(|e| config_error(format!("failed to parse {}: {e}", path.display())))?;
+    let layer: ConfigLayer = read_toml(&path)?;
     tracing::debug!(
         path = %path.display(),
         has_checkpoint_groups = layer.checkpoint_groups.is_some(),
         "loaded repo config"
     );
     Ok(Some(layer))
+}
+
+pub fn load_user_config_full() -> Result<Option<Config>> {
+    let path = config_path();
+    if !path.exists() {
+        tracing::debug!(path = %path.display(), "user config file not found, using defaults");
+        return Ok(None);
+    }
+    let config: Config = read_toml(&path)?;
+    tracing::debug!(
+        path = %path.display(),
+        checkpoint_groups = ?config.checkpoint_groups.keys().collect::<Vec<_>>(),
+        "loaded user full config"
+    );
+    Ok(Some(config))
+}
+
+pub fn load_repo_config_full(repo_root: &Path) -> Result<Option<Config>> {
+    let path = repo_config_path(repo_root);
+    if !path.exists() {
+        tracing::debug!(path = %path.display(), "repo config file not found");
+        return Ok(None);
+    }
+    let config: Config = read_toml(&path)?;
+    tracing::debug!(
+        path = %path.display(),
+        checkpoint_groups = ?config.checkpoint_groups.keys().collect::<Vec<_>>(),
+        "loaded repo full config"
+    );
+    Ok(Some(config))
 }
 
 pub fn load_for_repo(repo_root: Option<&Path>) -> Result<Config> {
@@ -101,6 +128,16 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
 
 fn config_error(reason: String) -> String {
     reason
+}
+
+fn read_toml<T>(path: &Path) -> Result<T>
+where
+    T: DeserializeOwned,
+{
+    let contents = fs::read_to_string(path)
+        .map_err(|e| config_error(format!("failed to read {}: {e}", path.display())))?;
+    toml::from_str(&contents)
+        .map_err(|e| config_error(format!("failed to parse {}: {e}", path.display())))
 }
 
 #[cfg(test)]

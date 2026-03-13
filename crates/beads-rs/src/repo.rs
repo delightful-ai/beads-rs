@@ -11,8 +11,7 @@ use beads_git::SyncError;
 /// Open the git repository containing the current directory.
 pub fn discover() -> Result<(Repository, PathBuf), Error> {
     let start = PathBuf::from(".");
-    let root =
-        bootstrap_repo::discover_root(&start).map_err(|e| SyncError::OpenRepo(start.clone(), e))?;
-    let repo = Repository::open(&root).map_err(|e| SyncError::OpenRepo(root.clone(), e))?;
+    let (repo, root) =
+        bootstrap_repo::discover(&start).map_err(|e| SyncError::OpenRepo(start.clone(), e))?;
     Ok((repo, root))
 }

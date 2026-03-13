@@ -6,7 +6,8 @@ pub use beads_bootstrap::config::{
     FileLoggingConfigOverride, LimitsOverride, LogFormat, LogRotation, LoggingConfig,
     LoggingConfigOverride, PathsConfig, PathsConfigOverride, ReplicationConfig,
     ReplicationConfigOverride, ReplicationPeerConfig, apply_env_overrides, config_path,
-    load_repo_config, load_user_config, merge_layers, repo_config_path, write_config,
+    load_repo_config, load_repo_config_full, load_user_config, load_user_config_full, merge_layers,
+    repo_config_path, write_config,
 };
 use beads_core::{Limits, NamespaceId, NamespacePolicy};
 
@@ -107,13 +108,13 @@ pub fn load_for_repo(repo_root: Option<&Path>) -> Result<Config, String> {
     // Keep daemon runtime reload semantics stable: repo config takes precedence,
     // user config is used only when repo config is absent.
     if let Some(root) = repo_root
-        && let Some(repo_layer) = load_repo_config(root)?
+        && let Some(repo_config) = load_repo_config_full(root)?
     {
-        return Ok(finalize_loaded_config(merge_layers(None, Some(repo_layer))));
+        return Ok(finalize_loaded_config(repo_config));
     }
 
-    if let Some(user_layer) = load_user_config()? {
-        return Ok(finalize_loaded_config(merge_layers(Some(user_layer), None)));
+    if let Some(user_config) = load_user_config_full()? {
+        return Ok(finalize_loaded_config(user_config));
     }
 
     Ok(finalize_loaded_config(Config::default()))

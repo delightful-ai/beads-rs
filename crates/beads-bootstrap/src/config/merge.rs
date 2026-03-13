@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use beads_core::ActorId;
 
+use super::env as config_env;
 use super::{Config, ConfigLayer, LogFormat, LogRotation};
 
 const TEST_FAST_REPL_BACKOFF_BASE_MS: u64 = 25;
@@ -31,11 +32,11 @@ fn apply_env_overrides_from<F>(config: &mut Config, mut lookup: F)
 where
     F: FnMut(&str) -> Option<String>,
 {
-    if lookup("BD_NO_AUTO_UPGRADE").is_some() {
+    if lookup(config_env::NO_AUTO_UPGRADE_VAR).is_some() {
         config.auto_upgrade = false;
     }
 
-    if let Some(raw) = lookup("BD_ACTOR") {
+    if let Some(raw) = lookup(config_env::ACTOR_VAR) {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             match ActorId::new(trimmed) {
@@ -49,14 +50,14 @@ where
         }
     }
 
-    if let Some(raw) = lookup("BD_REPL_LISTEN_ADDR") {
+    if let Some(raw) = lookup(config_env::REPL_LISTEN_ADDR_VAR) {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             config.replication.listen_addr = trimmed.to_string();
         }
     }
 
-    if let Some(raw) = lookup("BD_REPL_MAX_CONNECTIONS") {
+    if let Some(raw) = lookup(config_env::REPL_MAX_CONNECTIONS_VAR) {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             match trimmed.parse::<usize>() {
@@ -70,61 +71,67 @@ where
         }
     }
 
-    if let Some(raw) = lookup("BD_LOG_STDOUT") {
+    if let Some(raw) = lookup(config_env::LOG_STDOUT_VAR) {
         if let Some(value) = parse_boolish(&raw) {
             config.logging.stdout = value;
         } else {
-            tracing::warn!("invalid BD_LOG_STDOUT, ignoring: {raw}");
+            tracing::warn!("invalid {}, ignoring: {raw}", config_env::LOG_STDOUT_VAR);
         }
     }
 
-    if let Some(raw) = lookup("BD_LOG_STDOUT_FORMAT") {
+    if let Some(raw) = lookup(config_env::LOG_STDOUT_FORMAT_VAR) {
         if let Some(format) = parse_log_format(&raw) {
             config.logging.stdout_format = format;
         } else {
-            tracing::warn!("invalid BD_LOG_STDOUT_FORMAT, ignoring: {raw}");
+            tracing::warn!(
+                "invalid {}, ignoring: {raw}",
+                config_env::LOG_STDOUT_FORMAT_VAR
+            );
         }
     }
 
-    if let Some(raw) = lookup("BD_LOG_FILTER") {
+    if let Some(raw) = lookup(config_env::LOG_FILTER_VAR) {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             config.logging.filter = Some(trimmed.to_string());
         }
     }
 
-    if let Some(raw) = lookup("BD_LOG_FILE") {
+    if let Some(raw) = lookup(config_env::LOG_FILE_VAR) {
         if let Some(value) = parse_boolish(&raw) {
             config.logging.file.enabled = value;
         } else {
-            tracing::warn!("invalid BD_LOG_FILE, ignoring: {raw}");
+            tracing::warn!("invalid {}, ignoring: {raw}", config_env::LOG_FILE_VAR);
         }
     }
 
-    if let Some(raw) = lookup("BD_LOG_DIR") {
+    if let Some(raw) = lookup(config_env::LOG_DIR_VAR) {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             config.logging.file.dir = Some(PathBuf::from(trimmed));
         }
     }
 
-    if let Some(raw) = lookup("BD_LOG_FILE_FORMAT") {
+    if let Some(raw) = lookup(config_env::LOG_FILE_FORMAT_VAR) {
         if let Some(format) = parse_log_format(&raw) {
             config.logging.file.format = format;
         } else {
-            tracing::warn!("invalid BD_LOG_FILE_FORMAT, ignoring: {raw}");
+            tracing::warn!(
+                "invalid {}, ignoring: {raw}",
+                config_env::LOG_FILE_FORMAT_VAR
+            );
         }
     }
 
-    if let Some(raw) = lookup("BD_LOG_ROTATION") {
+    if let Some(raw) = lookup(config_env::LOG_ROTATION_VAR) {
         if let Some(rotation) = parse_log_rotation(&raw) {
             config.logging.file.rotation = rotation;
         } else {
-            tracing::warn!("invalid BD_LOG_ROTATION, ignoring: {raw}");
+            tracing::warn!("invalid {}, ignoring: {raw}", config_env::LOG_ROTATION_VAR);
         }
     }
 
-    if let Some(raw) = lookup("BD_LOG_RETENTION_DAYS") {
+    if let Some(raw) = lookup(config_env::LOG_RETENTION_DAYS_VAR) {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             match trimmed.parse::<u64>() {
@@ -138,7 +145,7 @@ where
         }
     }
 
-    if let Some(raw) = lookup("BD_LOG_RETENTION_FILES") {
+    if let Some(raw) = lookup(config_env::LOG_RETENTION_FILES_VAR) {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             match trimmed.parse::<usize>() {
@@ -152,14 +159,14 @@ where
         }
     }
 
-    if let Some(raw) = lookup("BD_DATA_DIR") {
+    if let Some(raw) = lookup(config_env::DATA_DIR_VAR) {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             config.paths.data_dir = Some(PathBuf::from(trimmed));
         }
     }
 
-    if let Some(raw) = lookup("BD_RUNTIME_DIR") {
+    if let Some(raw) = lookup(config_env::RUNTIME_DIR_VAR) {
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             config.paths.runtime_dir = Some(PathBuf::from(trimmed));
@@ -183,7 +190,7 @@ fn test_fast_enabled<F>(lookup: &mut F) -> bool
 where
     F: FnMut(&str) -> Option<String>,
 {
-    let Some(raw) = lookup("BD_TEST_FAST") else {
+    let Some(raw) = lookup(config_env::TEST_FAST_VAR) else {
         return false;
     };
     matches!(parse_boolish(&raw), Some(true))
