@@ -15,7 +15,8 @@ This document is the canonical dependency policy for internal crate boundaries.
 - `beads-rs`
 
 `beads-bootstrap`, `beads-cli`, `beads-git`, `beads-daemon`, and `beads-daemon-core` are first-class workspace crates.
-`beads-rs` remains the orchestration/compat entrypoint and depends on the leaf crates it assembles.
+`beads-rs` is the tiny assembly crate/package entrypoint and depends on the leaf crates it assembles.
+It is not a compatibility umbrella or a reusable dependency surface for other internal crates.
 
 ## Allowed edges
 
@@ -96,6 +97,18 @@ Expected result: no matches.
 
 ## CLI Ownership Invariant
 
-- `beads-cli` owns the CLI parse/dispatch surface and command mapping.
-- `beads-rs` CLI code is limited to host orchestration hooks (repo/config/runtime resolution and daemon entrypoint wiring).
+- `beads-cli` owns the `bd` command language: flag/subcommand parsing, CLI-only validation,
+  request construction, and human/JSON rendering.
+- `beads-rs` CLI code is limited to host orchestration hooks (repo/config/runtime resolution,
+  telemetry/bootstrap wiring, daemon entrypoint wiring, and package-level upgrade/install flow).
 - Do not reintroduce parallel command trees under `crates/beads-rs/src/cli/commands/**`.
+
+## Test Ownership Invariant
+
+- `beads-rs` tests are limited to assembly/product integration and end-to-end coverage.
+- Pure daemon WAL/repl/session coverage lives under `crates/beads-daemon/tests/**`.
+- Pure git/checkpoint/state-serialization coverage lives under `crates/beads-git/**`.
+- Pure core semantics/validation coverage lives under `crates/beads-core/**`.
+- Assembly tests may use `beads_daemon::testkit::*` or `beads_daemon::test_utils::*`
+  only for product-level integration seams; they must not reach into `beads_daemon::runtime::*`
+  or `beads_daemon::git::*`.
