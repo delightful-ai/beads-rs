@@ -249,9 +249,8 @@ pub struct ReplayApplyOutcome {
     pub max_write_stamp: Option<WriteStamp>,
 }
 
-/// ```compile_fail
-/// use beads_daemon::
-///     runtime::core::PendingReplayApply;
+/// ```compile_fail,E0616
+/// use beads_daemon::__doctest::core::PendingReplayApply;
 ///
 /// fn bypass_ack(pending: PendingReplayApply) {
 ///     let _ = pending.state;

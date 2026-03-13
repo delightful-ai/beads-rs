@@ -41,6 +41,17 @@ pub use beads_surface as surface;
 pub use beads_surface::{Request, Response};
 pub use runtime::OpError;
 
+#[doc(hidden)]
+pub mod __doctest {
+    pub mod core {
+        pub use crate::runtime::core::PendingReplayApply;
+    }
+
+    pub mod mutation_engine {
+        pub use crate::runtime::mutation_engine::PlannedMutation;
+    }
+}
+
 /// Immutable identity and runtime metadata for a daemon instance.
 #[derive(Debug, Clone)]
 pub struct DaemonIdentity {

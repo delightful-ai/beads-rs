@@ -1,13 +1,12 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use beads_bootstrap::config::{
     CheckpointGroupConfig, Config, ConfigLayer, DefaultsConfig, FileLoggingConfig,
     FileLoggingConfigOverride, LimitsOverride, LogFormat, LogRotation, LoggingConfig,
     LoggingConfigOverride, PathsConfig, PathsConfigOverride, ReplicationConfig,
     ReplicationConfigOverride, ReplicationPeerConfig, apply_env_overrides, config_path,
-    load_for_repo, load_repo_config, load_user_config, merge_layers, repo_config_path,
-    write_config,
+    load_repo_config, load_user_config, merge_layers, repo_config_path, write_config,
 };
 use beads_core::{Limits, NamespaceId, NamespacePolicy};
 
@@ -104,6 +103,22 @@ pub fn discover_repo_root() -> Option<PathBuf> {
     beads_bootstrap::repo::discover_root_optional(cwd)
 }
 
+pub fn load_for_repo(repo_root: Option<&Path>) -> Result<Config, String> {
+    // Keep daemon runtime reload semantics stable: repo config takes precedence,
+    // user config is used only when repo config is absent.
+    if let Some(root) = repo_root
+        && let Some(repo_layer) = load_repo_config(root)?
+    {
+        return Ok(finalize_loaded_config(merge_layers(None, Some(repo_layer))));
+    }
+
+    if let Some(user_layer) = load_user_config()? {
+        return Ok(finalize_loaded_config(merge_layers(Some(user_layer), None)));
+    }
+
+    Ok(finalize_loaded_config(Config::default()))
+}
+
 pub fn load() -> Result<Config, String> {
     load_for_repo(discover_repo_root().as_deref())
 }
@@ -119,4 +134,13 @@ pub fn load_or_init() -> Config {
             cfg
         }
     }
+}
+
+fn finalize_loaded_config(mut config: Config) -> Config {
+    apply_env_overrides(&mut config);
+    tracing::debug!(
+        checkpoint_groups = ?config.checkpoint_groups.keys().collect::<Vec<_>>(),
+        "config loaded with checkpoint groups"
+    );
+    config
 }
