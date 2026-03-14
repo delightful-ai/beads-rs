@@ -9,6 +9,7 @@ use crate::fixtures::repl_rig::{
     DurabilityEligibility, FaultProfile, ReplRig, ReplRigOptions, TailnetTraceConfig,
 };
 use crate::fixtures::tailnet_proxy::TailnetTraceMode;
+use crate::fixtures::temp;
 use crate::fixtures::timing;
 use crate::fixtures::wait;
 use beads_api::QueryResult;
@@ -22,8 +23,6 @@ use beads_surface::ipc::{
     MutationMeta, ReadConsistency, ReadCtx, RepoCtx, Request, Response, ResponsePayload,
 };
 use beads_surface::ops::OpResult;
-use tempfile::TempDir;
-
 fn sample_ids<'a>(ids: &'a [String]) -> Vec<&'a String> {
     match ids.len() {
         0 => Vec::new(),
@@ -323,9 +322,7 @@ fn repl_checkpoint_bootstrap_under_churn() {
 
 #[test]
 fn repl_tailnet_proxy_smoke() {
-    let tmp_root = std::env::current_dir().expect("cwd").join("tmp");
-    std::fs::create_dir_all(&tmp_root).expect("trace tmp root");
-    let trace_root = TempDir::new_in(&tmp_root).expect("trace tmp dir");
+    let trace_root = temp::fixture_tempdir("tailnet-trace");
     let trace_dir = trace_root.path().to_path_buf();
 
     run_trace_harness(TailnetTraceMode::Record, &trace_dir);

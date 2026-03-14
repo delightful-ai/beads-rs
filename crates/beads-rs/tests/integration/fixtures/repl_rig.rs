@@ -28,12 +28,13 @@ use beads_surface::ipc::{
 };
 use beads_surface::ops::OpResult;
 
-use super::bd_runtime::scrub_assert_test_env;
+use super::bd_runtime::{daemon_socket_path, scrub_assert_test_env};
 use super::daemon_boundary::wal::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 use super::daemon_runtime::{crash_daemon, shutdown_daemon};
 use super::git::{init_bare_repo, init_repo_with_origin};
 use super::store_lock::unlock_store;
 use super::tailnet_proxy::{TailnetProfile, TailnetProxy, TailnetTrace, TailnetTraceMode};
+use super::temp;
 use super::timing;
 use super::wait;
 
@@ -135,9 +136,8 @@ impl ReplRig {
             format!("nodes={node_count}"),
         );
 
-        let tmp_root = ensure_tmp_root();
-        let root = TempDir::new_in(&tmp_root).expect("temp root");
-        let keep_tmp = std::env::var("BD_TEST_KEEP_TMP").is_ok();
+        let root = temp::fixture_tempdir("repl-rig");
+        let keep_tmp = temp::keep_tmp_enabled();
         let (root_path, root_guard): (PathBuf, Option<TempDir>) = if keep_tmp {
             let path = root.keep();
             (path, None)
@@ -1453,6 +1453,7 @@ fn build_node(root: &Path, idx: usize, remote_dir: &Path) -> NodeSeed {
     fs::create_dir_all(&runtime_dir).expect("create runtime dir");
     fs::create_dir_all(&data_dir).expect("create data dir");
     fs::create_dir_all(&config_dir).expect("create config dir");
+    temp::assert_unix_socket_path_fits(&daemon_socket_path(&runtime_dir));
     init_repo_with_origin(&repo_dir, remote_dir).expect("init git repo");
     NodeSeed {
         repo_dir,
@@ -1570,12 +1571,6 @@ fn handshake_rows(status: &AdminStatusOutput) -> BTreeMap<ReplicaId, u64> {
         .iter()
         .map(|row| (row.replica_id, row.last_handshake_ms))
         .collect()
-}
-
-fn ensure_tmp_root() -> PathBuf {
-    let root = std::env::current_dir().expect("cwd").join("tmp");
-    fs::create_dir_all(&root).expect("create tmp root");
-    root
 }
 
 fn wait_timeout_ms(timeout: Duration) -> u64 {

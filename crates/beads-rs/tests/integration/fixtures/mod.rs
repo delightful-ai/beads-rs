@@ -23,6 +23,7 @@ pub mod repl_rig;
 pub mod store_dir;
 pub mod store_lock;
 pub mod tailnet_proxy;
+pub mod temp;
 pub mod timing;
 pub mod wait;
 pub mod wal;

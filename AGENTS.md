@@ -51,6 +51,7 @@ Logging: `LOG=debug` or `LOG=beads_rs=trace`, or `-v/-vv` on `bd`.
 - Profile the suite with `./scripts/profile-tests.sh`. It captures per-test nextest timing plus env-gated fixture timing under `tmp/perf/tests-*`.
 - `./scripts/profile-tests.sh` defaults to `PROFILE_TEST_THREADS=2` so profiling artifacts stay reproducible under load. Override only when you are deliberately measuring a different concurrency level.
 - Reuse shared helpers under `crates/beads-rs/tests/integration/fixtures/`. If a test needs new repo/runtime/daemon setup behavior, add or extend a shared fixture instead of creating another one-off local `TestRepo`.
+- Reuse `fixtures::temp` for integration temp roots. Do not derive test temp dirs from `current_dir()/tmp`; keep Unix socket paths short and deterministic instead. Use `BD_TEST_TMP_ROOT` only when you need an explicit override, and `BD_TEST_KEEP_TMP=1` when you need to retain fixture dirs for debugging.
 - Shared fixture timing lives in `crates/beads-rs/tests/integration/fixtures/timing.rs` and is activated with `BD_TEST_TIMING_DIR`.
 - Avoid fixed sleeps in tests. Prefer shared condition-based wait helpers and explicit readiness barriers.
 - Reuse `fixtures::bd_runtime` and `fixtures::wait` for daemon socket/meta/store discovery and process-exit polling instead of open-coding JSON/socket probes in individual tests.

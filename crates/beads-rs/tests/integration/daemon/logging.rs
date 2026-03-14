@@ -11,13 +11,8 @@ use crate::fixtures::bd_runtime::{
     BdCommandProfile, config_dir_for_runtime, configure_std_bd_command, data_dir_for_runtime,
 };
 use crate::fixtures::daemon_runtime::shutdown_daemon;
+use crate::fixtures::temp;
 use crate::fixtures::wait;
-
-fn tmp_root() -> PathBuf {
-    let root = std::env::current_dir().expect("cwd").join("tmp");
-    fs::create_dir_all(&root).expect("create tmp root");
-    root
-}
 
 fn log_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
@@ -45,8 +40,7 @@ struct LogDaemon {
 
 impl LogDaemon {
     fn new() -> Self {
-        let root = tmp_root();
-        let runtime_dir = TempDir::new_in(&root).expect("runtime dir");
+        let runtime_dir = temp::fixture_tempdir("daemon-logging");
         let data_dir = data_dir_for_runtime(runtime_dir.path());
         let config_dir = config_dir_for_runtime(runtime_dir.path());
         let log_dir = data_dir.join("logs");
