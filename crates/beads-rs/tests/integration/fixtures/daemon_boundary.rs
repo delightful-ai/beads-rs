@@ -1,17 +1,10 @@
 #![allow(dead_code)]
 
-pub mod repl {
-    pub use beads_daemon::admission::{AdmissionController, AdmissionPermit};
-    pub use beads_daemon::testkit::repl::session::{
-        Inbound, InboundConnecting, Outbound, OutboundConnecting, SessionState,
-        handle_inbound_message, handle_outbound_message,
-    };
-    pub use beads_daemon::testkit::repl::{
-        ContiguousBatch, Events, IngestOutcome, ReplError, SessionAction, SessionConfig,
-        SessionPhase, SessionStore, ValidatedAck, Want, WatermarkSnapshot,
-    };
-    pub use beads_daemon::testkit::wal::{ReplicaDurabilityRole, WalIndexError};
-}
+//! Narrow bridge for product-level integration tests.
+//!
+//! `beads-rs` keeps only the small WAL-facing surface needed to inspect outputs
+//! from the shipped daemon process in crash-recovery and replication e2e tests.
+//! This is not a general-purpose daemon testkit re-export.
 
 pub mod wal {
     pub use beads_daemon::testkit::wal::frame::encode_frame;

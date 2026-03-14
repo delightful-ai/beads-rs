@@ -7,7 +7,7 @@ pub(crate) fn offline_store_fsck_output(
     store_id: StoreId,
     repair: bool,
 ) -> Result<AdminFsckOutput, OpError> {
-    beads_daemon::runtime::admin::offline_store_fsck_output(store_id, repair).map_err(map_daemon_op)
+    beads_daemon::admin::offline_store_fsck_output(store_id, repair).map_err(map_daemon_op)
 }
 
 pub(crate) fn offline_store_unlock_output(
@@ -15,16 +15,16 @@ pub(crate) fn offline_store_unlock_output(
     force: bool,
     daemon_pid: Option<u32>,
 ) -> Result<AdminStoreUnlockOutput, OpError> {
-    beads_daemon::runtime::admin::offline_store_unlock_output(store_id, force, daemon_pid)
+    beads_daemon::admin::offline_store_unlock_output(store_id, force, daemon_pid)
         .map_err(map_daemon_op)
 }
 
-fn map_daemon_op(err: beads_daemon::runtime::OpError) -> OpError {
+fn map_daemon_op(err: beads_daemon::OpError) -> OpError {
     match err {
-        beads_daemon::runtime::OpError::ValidationFailed { field, reason } => {
+        beads_daemon::OpError::ValidationFailed { field, reason } => {
             OpError::ValidationFailed { field, reason }
         }
-        beads_daemon::runtime::OpError::InvalidRequest { field, reason } => {
+        beads_daemon::OpError::InvalidRequest { field, reason } => {
             OpError::InvalidRequest { field, reason }
         }
         other => {

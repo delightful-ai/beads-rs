@@ -8,7 +8,7 @@ use beads_core::{
     BeadId, BeadType, DurabilityClass, HeadStatus, NamespaceId, Priority, ProtocolErrorCode, Seq0,
     StoreId,
 };
-use beads_rs::test_harness::{
+use beads_daemon::testkit::e2e::{
     Direction, NetworkProfile, NodeOptions, ReplicationRig, TestWorld, latency_budget_ms,
     measure_latency, replication_latency_budget_ms,
 };

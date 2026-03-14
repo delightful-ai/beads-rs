@@ -101,8 +101,8 @@ pub struct EventDraft {
     pub trace_id: TraceId,
 }
 
-/// ```compile_fail
-/// use beads_daemon::runtime::mutation_engine::PlannedMutation;
+/// ```compile_fail,E0616
+/// use beads_daemon::__doctest::mutation_engine::PlannedMutation;
 ///
 /// fn bypass_ack(planned: PlannedMutation) {
 ///     let _ = planned.draft;

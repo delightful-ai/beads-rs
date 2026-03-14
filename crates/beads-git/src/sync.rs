@@ -745,6 +745,18 @@ impl RemoteStorePreview {
     }
 }
 
+/// Load state and metadata from the current `refs/heads/beads/store` ref.
+pub fn load_store(repo: &Repository) -> Result<LoadedStore, SyncError> {
+    let oid = repo
+        .refname_to_id("refs/heads/beads/store")
+        .map_err(|_| SyncError::NoLocalRef("refs/heads/beads/store".into()))?;
+    read_state_at_oid(repo, oid)
+}
+
+/// Load only the canonical state from the current `refs/heads/beads/store` ref.
+pub fn load_state(repo: &Repository) -> Result<CanonicalState, SyncError> {
+    Ok(load_store(repo)?.state)
+}
 /// Read state from a commit oid.
 pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, SyncError> {
     let commit = repo.find_commit(oid)?;
@@ -3734,6 +3746,25 @@ mod tests {
             base_oid,
             "original local ref should still be backed up after the lost race"
         );
+    }
+
+    #[test]
+    fn load_store_reads_current_beads_store_ref() {
+        let tmp = TempDir::new().unwrap();
+        let repo = Repository::init(tmp.path()).unwrap();
+        let stamp = WriteStamp::new(4321, 9);
+        let oid = write_store_commit_with_meta(&repo, None, "store-ref", Some(stamp.clone()));
+
+        let loaded = load_store(&repo).unwrap();
+        let state = load_state(&repo).unwrap();
+
+        assert_eq!(repo.refname_to_id("refs/heads/beads/store").unwrap(), oid);
+        assert_eq!(
+            loaded.meta.last_write_stamp(),
+            Some(&stamp),
+            "expected load_store to read from refs/heads/beads/store"
+        );
+        assert_eq!(state.iter_live().count(), loaded.state.iter_live().count());
     }
 
     #[test]

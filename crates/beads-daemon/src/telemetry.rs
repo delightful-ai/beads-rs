@@ -11,8 +11,8 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Registry};
 
-use crate::config::{FileLoggingConfig, LogFormat, LogRotation, LoggingConfig};
 use crate::paths;
+use beads_bootstrap::config::{FileLoggingConfig, LogFormat, LogRotation, LoggingConfig};
 
 const LOG_FILE_PREFIX: &str = "beads.log";
 

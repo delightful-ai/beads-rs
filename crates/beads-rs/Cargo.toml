@@ -18,6 +18,7 @@ exclude = [".beads/"]
 [dependencies]
 beads-core = { path = "../beads-core" }
 beads-api = { path = "../beads-api" }
+beads-bootstrap = { path = "../beads-bootstrap" }
 beads-surface = { path = "../beads-surface" }
 beads-macros = { path = "../beads-macros" }
 beads-cli = { path = "../beads-cli" }
@@ -59,7 +60,7 @@ rusqlite = "0.31"
 default = ["cli"]
 cli = ["clap"]
 slow-tests = []
-test-harness = ["beads-core/test-harness", "beads-daemon-core/test-harness"]
+test-harness = ["beads-core/test-harness", "beads-daemon/test-harness", "beads-daemon-core/test-harness"]
 e2e-tests = ["test-harness"]
 model-testing = []
 

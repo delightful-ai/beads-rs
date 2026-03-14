@@ -19,7 +19,6 @@ sha2 = "0.10"
 thiserror = "1"
 time = { version = "0.3", features = ["formatting", "parsing"] }
 tracing = { workspace = true }
-ureq = { version = "2", default-features = true }
 uuid = { version = "1", features = ["v4", "v5"] }
 whoami = "1.4"
 

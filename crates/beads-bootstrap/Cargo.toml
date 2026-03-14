@@ -1,0 +1,23 @@
+[package]
+name = "beads-bootstrap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure bootstrap helpers for beads path and config discovery"
+
+[dependencies]
+beads-core = { path = "../beads-core" }
+dirs = "6.0.0"
+git2 = { version = "0.20", features = ["vendored-libgit2", "vendored-openssl"] }
+serde = { version = "1", features = ["derive"] }
+tempfile = "3"
+toml = "0.8"
+tracing = "0.1"
+
+[dev-dependencies]
+uuid = { workspace = true }
+
+[lints]
+workspace = true

@@ -19,10 +19,15 @@ pub fn new_test_git_channel() -> (TestGitTx, TestGitRx) {
 }
 
 pub mod core {
+    #[cfg(any(test, feature = "test-harness"))]
+    pub use crate::runtime::core::insert_store_for_tests;
     pub use crate::runtime::core::{
-        Daemon, HandleOutcome, PendingReplayApply, ReplayApplyOutcome, insert_store_for_tests,
-        replay_event_wal,
+        Daemon, HandleOutcome, PendingReplayApply, ReplayApplyOutcome, replay_event_wal,
     };
+}
+
+pub mod mutation_engine {
+    pub use crate::runtime::mutation_engine::PlannedMutation;
 }
 
 pub fn handle_request_for_tests(
@@ -42,6 +47,9 @@ impl TestGitTx {
 pub mod durability_coordinator {
     pub use crate::runtime::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 }
+
+#[cfg(any(test, feature = "test-harness"))]
+pub mod e2e;
 
 pub mod durability {
     pub use crate::runtime::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};

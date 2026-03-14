@@ -4,6 +4,7 @@
 
 pub use beads_macros::enum_str;
 
+pub mod admin;
 pub mod admission;
 pub mod broadcast;
 pub mod clock;
@@ -16,8 +17,7 @@ pub mod layout;
 pub mod metrics;
 pub mod paths;
 pub mod remote;
-pub mod repo;
-pub mod runtime;
+mod runtime;
 pub mod scheduler;
 pub mod telemetry;
 pub mod test_utils;
@@ -28,7 +28,7 @@ pub mod error {
     pub use beads_core::{Effect, Transience};
 }
 
-pub mod git {
+mod git {
     pub use beads_git::*;
 }
 
@@ -39,6 +39,18 @@ pub use beads_core::StoreId;
 pub use beads_core::WallClock;
 pub use beads_surface as surface;
 pub use beads_surface::{Request, Response};
+pub use runtime::OpError;
+
+#[doc(hidden)]
+pub mod __doctest {
+    pub mod core {
+        pub use crate::runtime::core::PendingReplayApply;
+    }
+
+    pub mod mutation_engine {
+        pub use crate::runtime::mutation_engine::PlannedMutation;
+    }
+}
 
 /// Immutable identity and runtime metadata for a daemon instance.
 #[derive(Debug, Clone)]
@@ -69,13 +81,13 @@ impl DaemonExchange {
 }
 
 pub use runtime::run_daemon;
-pub type Result<T> = std::result::Result<T, runtime::ipc::IpcError>;
+pub type Result<T> = std::result::Result<T, beads_surface::ipc::IpcError>;
 
 #[must_use]
 pub fn daemon_layout_from_paths() -> layout::DaemonLayout {
     layout::DaemonLayout::new(
         paths::data_dir(),
-        runtime::ipc::socket_path(),
+        beads_surface::ipc::socket_path(),
         paths::log_dir(),
     )
 }

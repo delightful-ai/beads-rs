@@ -1,5 +1,7 @@
 //! Auto-upgrade support.
 
+mod release;
+
 use std::fs;
 use std::io::Read;
 use std::os::unix::fs::PermissionsExt;
@@ -7,22 +9,20 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime};
 
-use beads_cli::upgrade::{
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+use beads_surface::ipc::{Request, send_request_no_autostart, socket_path, wait_for_daemon_ready};
+
+use crate::OpError;
+use crate::config::{Config, load_or_init};
+use crate::{Error, Result};
+use release::{
     ReleaseAsset, ReleaseInfo, UpgradeSupportError, detect_platform,
     fetch_asset_checksum as fetch_asset_checksum_support,
     fetch_latest_release as fetch_latest_release_support, find_asset, is_newer_version,
     normalize_version,
 };
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
-
-use beads_daemon::runtime::ipc::{
-    Request, send_request_no_autostart, socket_path, wait_for_daemon_ready,
-};
-
-use crate::OpError;
-use crate::config::{Config, load_or_init};
-use crate::{Error, Result};
 
 const AUTO_CHECK_INTERVAL: Duration = Duration::from_secs(6 * 60 * 60);
 
@@ -522,14 +522,6 @@ fn upgrade_error(reason: String) -> Error {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn version_compare() {
-        assert!(is_newer_version("0.2.0", "0.1.9"));
-        assert!(is_newer_version("1.0.0", "0.9.9"));
-        assert!(!is_newer_version("0.1.0", "0.1.0"));
-        assert!(!is_newer_version("0.1.0", "0.2.0"));
-    }
 
     #[test]
     fn install_binary_copies_and_sets_permissions() {

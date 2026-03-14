@@ -1,0 +1,102 @@
+//! WAL framing + tail truncation.
+
+use std::fs;
+use std::io::{Seek, SeekFrom};
+
+use beads_core::{Limits, NamespaceId, ReplicaId, decode_event_body};
+use beads_daemon::testkit::wal::{FrameReader, WalReplayError, rebuild_index};
+use uuid::Uuid;
+
+use crate::support::wal::{TempWalDir, record_for_seq, sample_record};
+use crate::support::wal_corrupt::{
+    corrupt_frame_body, corrupt_record_header_event_time, truncated_segment,
+};
+
+const MAX_RECORD_BYTES: usize = 1024 * 1024;
+
+#[test]
+fn wal_framing_roundtrips_records() {
+    let temp = TempWalDir::new();
+    let namespace = NamespaceId::core();
+    let record = sample_record(temp.meta(), &namespace, 1);
+    let fixture = temp
+        .write_segment(&namespace, 1_700_000_000_000, std::slice::from_ref(&record))
+        .expect("write segment");
+
+    let mut file = fs::File::open(&fixture.path).expect("open segment");
+    file.seek(SeekFrom::Start(fixture.header_len))
+        .expect("seek to first frame");
+    let mut reader = FrameReader::new(file, MAX_RECORD_BYTES);
+    let decoded = reader
+        .read_next()
+        .expect("read frame")
+        .expect("record present");
+    let (_, event_body) =
+        decode_event_body(decoded.payload_bytes(), &Limits::default()).expect("decode event body");
+    let verified = decoded
+        .verify_with_event_body(event_body)
+        .expect("verify record");
+    assert_eq!(verified, record);
+}
+
+#[test]
+fn wal_tail_truncation_repairs_partial_record() {
+    let temp = TempWalDir::new();
+    let namespace = NamespaceId::core();
+    let segment =
+        truncated_segment(&temp, &namespace, 1_700_000_000_000).expect("truncated segment");
+    let index = temp.open_index().expect("open wal index");
+    let limits = Limits::default();
+
+    let stats =
+        rebuild_index(temp.store_dir(), temp.meta(), &index, &limits).expect("rebuild index");
+    assert_eq!(stats.segments_truncated, 1);
+    assert_eq!(stats.tail_truncations.len(), 1);
+    let truncation = &stats.tail_truncations[0];
+    assert_eq!(truncation.namespace, namespace);
+    assert_eq!(truncation.segment_id, segment.header.segment_id);
+    assert_eq!(truncation.truncated_from_offset, segment.header_len);
+
+    let meta = fs::metadata(&segment.path).expect("segment metadata");
+    assert_eq!(meta.len(), segment.header_len);
+}
+
+#[test]
+fn wal_mid_file_corruption_fails_fast() {
+    let temp = TempWalDir::new();
+    let namespace = NamespaceId::core();
+    let record_a = sample_record(temp.meta(), &namespace, 1);
+    let record_b = sample_record(temp.meta(), &namespace, 2);
+    let segment = temp
+        .write_segment(&namespace, 1_700_000_000_000, &[record_a, record_b])
+        .expect("write segment");
+    corrupt_frame_body(&segment, 0).expect("corrupt frame body");
+    let original_len = fs::metadata(&segment.path).expect("segment metadata").len();
+    let index = temp.open_index().expect("open wal index");
+    let limits = Limits::default();
+
+    let err = rebuild_index(temp.store_dir(), temp.meta(), &index, &limits)
+        .expect_err("mid-file corruption should error");
+    assert!(matches!(err, WalReplayError::MidFileCorruption { .. }));
+
+    let meta = fs::metadata(&segment.path).expect("segment metadata");
+    assert_eq!(meta.len(), original_len);
+}
+
+#[test]
+fn wal_replay_rejects_header_mismatch() {
+    let temp = TempWalDir::new();
+    let namespace = NamespaceId::core();
+    let origin = ReplicaId::new(Uuid::from_bytes([42u8; 16]));
+    let record = record_for_seq(temp.meta(), &namespace, origin, 1, None);
+    let segment = temp
+        .write_segment(&namespace, 1_700_000_000_000, &[record])
+        .expect("write segment");
+    corrupt_record_header_event_time(&segment, 0).expect("corrupt header");
+    let index = temp.open_index().expect("open wal index");
+    let limits = Limits::default();
+
+    let err = rebuild_index(temp.store_dir(), temp.meta(), &index, &limits)
+        .expect_err("header mismatch should error");
+    assert!(matches!(err, WalReplayError::RecordHeaderMismatch { .. }));
+}

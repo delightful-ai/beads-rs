@@ -10,12 +10,13 @@ description = "Daemon runtime crate for beads-rs"
 [features]
 default = []
 slow-tests = []
-test-harness = []
+test-harness = ["beads-core/test-harness", "beads-daemon-core/test-harness"]
 model-testing = []
 
 [dependencies]
 beads-core = { path = "../beads-core" }
 beads-api = { path = "../beads-api" }
+beads-bootstrap = { path = "../beads-bootstrap" }
 beads-surface = { path = "../beads-surface" }
 beads-macros = { path = "../beads-macros" }
 beads-git = { path = "../beads-git" }
@@ -53,3 +54,4 @@ tracing.workspace = true
 [dev-dependencies]
 bytes.workspace = true
 uuid.workspace = true
+trybuild = "1"

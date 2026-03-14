@@ -6,10 +6,8 @@ pub mod commands;
 pub mod filters;
 pub mod migrate;
 pub mod parsers;
-pub mod paths;
 pub mod render;
 pub mod runtime;
-pub mod upgrade;
 pub mod validation;
 
 use beads_surface::ipc::{IpcClient, IpcError, Request, Response};
