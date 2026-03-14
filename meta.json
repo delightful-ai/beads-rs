@@ -2,11 +2,11 @@
   "format_version": 1,
   "root_slug": "beads-rs",
   "last_write_stamp": [
-    1773472595355,
+    1773472683104,
     0
   ],
-  "state_sha256": "0b834d63c00033143f4456e812045e22ad0b362bea4cd6b2926bd264504d0723",
+  "state_sha256": "9c9c35220d9965f75f1f30554950bce0fd6d5ef63fe97ae0c6db31bc6b3b734d",
   "tombstones_sha256": "3ffdd3ecbdc8de25134573ef272f019165e674844c0d7ea2afba9da0ca1929d5",
-  "deps_sha256": "f2e06ce5b4fcca0a94b745f8189e0109384546fc8d01f9d727eb6f6e0b090fd3",
-  "notes_sha256": "d746ab49b0a9bc255947a12918e76cc434ebf0729eed3606d845efee634c6f21"
+  "deps_sha256": "a1bd6914050f6119bab750ead5feea450e603fce9532c0034b03946dd4b54a0a",
+  "notes_sha256": "18e33ce968ca82825f164a1436f037c5181c1db8439651a8d4dd1d4e0250c461"
 }
