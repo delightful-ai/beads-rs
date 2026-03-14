@@ -48,7 +48,9 @@ pub mod durability_coordinator {
     pub use crate::runtime::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
 }
 
-#[cfg(any(test, feature = "test-harness"))]
+// The E2E harness depends on other helpers that are only available with the
+// explicit cross-crate test-harness feature.
+#[cfg(feature = "test-harness")]
 pub mod e2e;
 
 pub mod durability {
