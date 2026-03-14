@@ -1,2 +1,2 @@
 [alias]
-xtest = "nextest run --profile fast --workspace --all-features"
+xtest = "nextest run --profile fast --workspace -F beads-rs/e2e-tests"

@@ -2,6 +2,7 @@
 
 use std::num::NonZeroU32;
 use std::path::Path;
+use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::fixtures::receipt;
@@ -23,6 +24,15 @@ use beads_surface::ipc::{
     MutationMeta, ReadConsistency, ReadCtx, RepoCtx, Request, Response, ResponsePayload,
 };
 use beads_surface::ops::OpResult;
+
+static TAILNET_FAULT_INJECTION_GUARD: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+fn lock_tailnet_fault_injection_harness() -> std::sync::MutexGuard<'static, ()> {
+    TAILNET_FAULT_INJECTION_GUARD
+        .lock()
+        .expect("tailnet fault injection guard")
+}
+
 fn sample_ids<'a>(ids: &'a [String]) -> Vec<&'a String> {
     match ids.len() {
         0 => Vec::new(),
@@ -160,6 +170,12 @@ fn trace_path(trace_dir: &Path, from: usize, to: usize) -> std::path::PathBuf {
     trace_dir.join(format!("trace-{from}-{to}.jsonl"))
 }
 
+fn debug_step(step: &str) {
+    if std::env::var_os("BD_TEST_STEP_LOG").is_some() {
+        eprintln!("STEP {step}");
+    }
+}
+
 fn run_trace_harness(mode: TailnetTraceMode, trace_dir: &Path) {
     let mut options = ReplRigOptions::default();
     options.seed = 101;
@@ -229,8 +245,19 @@ fn repl_daemon_to_daemon_tailnet_roundtrip() {
 
 #[test]
 fn repl_daemon_pathological_tailnet_roundtrip() {
+    // These tests drive external daemons plus lossy tailnet proxies. Under plain
+    // libtest, running this path concurrently with crash/restart fault injection
+    // leaves the OS-level harness timing-sensitive. Serialize the fault-injection
+    // cases here so libtest matches the nextest isolation policy.
+    let _guard = lock_tailnet_fault_injection_harness();
+    debug_step("pathological-start");
+
     let mut options = ReplRigOptions::default();
     options.seed = 41;
+    // This test is about eventual recovery under pathological links, not waiting
+    // on production liveness budgets to notice a degraded session.
+    options.keepalive_ms = Some(250);
+    options.dead_ms = Some(1_500);
 
     let mut profile = FaultProfile::pathological();
     profile.base_latency_ms = Some(10);
@@ -255,16 +282,22 @@ fn repl_daemon_pathological_tailnet_roundtrip() {
     options.fault_profile_by_link = Some(by_link);
 
     let rig = ReplRig::new(2, options);
+    debug_step("pathological-rig-ready");
     rig.assert_replication_ready(Duration::from_secs(30));
+    debug_step("pathological-initial-ready");
 
     let ids = [
         rig.create_issue(0, "pathology-0"),
         rig.create_issue(1, "pathology-1"),
     ];
+    debug_step("pathological-issues-created");
 
     rig.assert_replication_ready(Duration::from_secs(60));
+    debug_step("pathological-post-write-ready");
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(300));
+    debug_step("pathological-converged");
     wait_for_sample(&rig, &ids, Duration::from_secs(30));
+    debug_step("pathological-done");
 }
 
 #[test]
@@ -359,40 +392,56 @@ fn repl_daemon_crash_restart_roundtrip() {
 
 #[test]
 fn repl_daemon_crash_restart_tailnet_roundtrip() {
+    let _guard = lock_tailnet_fault_injection_harness();
+    debug_step("start");
+
     let mut options = ReplRigOptions::default();
     options.seed = 51;
     options.fault_profile = Some(FaultProfile::tailnet());
+    // This test is about crash/restart recovery under a degraded tailnet link,
+    // not waiting on production-scale dead-link detection.
+    options.keepalive_ms = Some(250);
+    options.dead_ms = Some(1_500);
 
     let mut rig = ReplRig::new(2, options);
+    debug_step("rig-ready");
     rig.assert_replication_ready(Duration::from_secs(60));
+    debug_step("initial-replication-ready");
 
     let initial = [
         rig.create_issue(0, "tailnet-crash-pre-0"),
         rig.create_issue(1, "tailnet-crash-pre-1"),
     ];
-    for idx in 0..2 {
-        rig.reload_replication(idx);
-    }
+    debug_step("initial-issues-created");
 
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
+    debug_step("initial-converged");
     wait_for_sample(&rig, &initial, Duration::from_secs(20));
+    debug_step("initial-sample-visible");
 
     let recovery_ready = rig.replication_ready_snapshot();
+    debug_step("recovery-snapshot-captured");
     rig.crash_node(1);
+    debug_step("node-crashed");
 
     let post = [rig.create_issue(0, "tailnet-crash-post-0")];
+    debug_step("post-crash-issue-created");
 
     wait_for_sample_on(&rig, &post, &[0], Duration::from_secs(20));
+    debug_step("post-crash-local-sample-visible");
 
     rig.restart_node(1);
+    debug_step("node-restarted");
     rig.wait_for_admin_ready(1, Duration::from_secs(30));
-    rig.reload_replication(0);
-    rig.reload_replication(1);
-    rig.assert_replication_ready_since(&recovery_ready, Duration::from_secs(90));
+    debug_step("admin-ready-after-restart");
+    rig.assert_replication_ready_since(&recovery_ready, Duration::from_secs(30));
+    debug_step("replication-ready-since");
 
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(180));
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
+    debug_step("final-converged");
     let combined: Vec<String> = initial.iter().chain(post.iter()).cloned().collect();
     wait_for_sample(&rig, &combined, Duration::from_secs(20));
+    debug_step("done");
 }
 
 #[test]
@@ -522,8 +571,7 @@ fn repl_daemon_replicated_fsync_receipt() {
     options.seed = 31;
 
     let rig = ReplRig::new(3, options);
-    rig.assert_peers_seen(Duration::from_secs(30));
-    rig.assert_replication_ready(Duration::from_secs(60));
+    rig.assert_replication_durability_ready(Duration::from_secs(60));
 
     let (issue_id, receipt) =
         create_issue_with_durability(&rig, 0, "durability-ok", NonZeroU32::new(2).unwrap());

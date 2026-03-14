@@ -362,7 +362,7 @@ impl Daemon {
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     protocol_version: crate::runtime::ipc::IPC_PROTOCOL_VERSION,
                     pid: std::process::id(),
-                    started_at_ms: None,
+                    started_at_ms: self.started_at_ms(),
                 },
             )))
             .into(),

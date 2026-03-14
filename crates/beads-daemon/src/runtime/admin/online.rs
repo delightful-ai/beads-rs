@@ -7,6 +7,12 @@ use super::reporting::{
 use super::*;
 
 impl Daemon {
+    fn validated_replication_roster_present(&self, store_id: StoreId) -> Result<bool, OpError> {
+        crate::runtime::store::runtime::load_replica_roster(self.layout(), store_id)
+            .map(|roster| roster.is_some())
+            .map_err(|err| OpError::StoreRuntime(Box::new(err)))
+    }
+
     pub(crate) fn admin_status(
         &mut self,
         repo: &Path,
@@ -497,16 +503,21 @@ impl Daemon {
         // Fresh loads already bind replication runtime during repo load.
         // Only force rebind if the store was already loaded before this command.
         if was_loaded && let Err(err) = self.reload_replication_runtime(store_id) {
+            self.set_replication_config(previous_replication);
             return Response::err_from(err);
         }
 
-        let roster = match load_replica_roster(self.layout(), store_id) {
-            Ok(roster) => roster,
-            Err(err) => return Response::err_from(OpError::StoreRuntime(Box::new(err))),
+        let roster_present = match self.validated_replication_roster_present(store_id) {
+            Ok(roster_present) => roster_present,
+            Err(err) => {
+                self.set_replication_config(previous_replication);
+                return Response::err_from(err);
+            }
         };
+
         let output = AdminReloadReplicationOutput {
             store_id,
-            roster_present: roster.is_some(),
+            roster_present,
         };
         Response::ok(ResponsePayload::query(QueryResult::AdminReloadReplication(
             output,
@@ -543,16 +554,21 @@ impl Daemon {
         drop(proof);
 
         if was_loaded && let Err(err) = self.reload_replication_peers(store_id) {
+            self.set_replication_config(previous_replication);
             return Response::err_from(err);
         }
 
-        let roster = match load_replica_roster(self.layout(), store_id) {
-            Ok(roster) => roster,
-            Err(err) => return Response::err_from(OpError::StoreRuntime(Box::new(err))),
+        let roster_present = match self.validated_replication_roster_present(store_id) {
+            Ok(roster_present) => roster_present,
+            Err(err) => {
+                self.set_replication_config(previous_replication);
+                return Response::err_from(err);
+            }
         };
+
         let output = AdminReloadReplicationOutput {
             store_id,
-            roster_present: roster.is_some(),
+            roster_present,
         };
         Response::ok(ResponsePayload::query(QueryResult::AdminReloadReplication(
             output,

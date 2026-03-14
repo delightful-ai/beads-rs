@@ -36,17 +36,21 @@ lint: dylint
         -D clippy::match_wildcard_for_single_variants \
         -D clippy::wildcard_in_or_patterns
 
-# Run tests
+# Run the canonical fast test tier (default)
 test:
-    cargo test --all-features
+    cargo xtest
 
-# Run the fast test tier (default)
+# Run the canonical fast test tier explicitly
 test-fast:
-    cargo test --all-features
+    cargo xtest
 
-# Run slow tests (opt-in)
+# Run the slow nextest profile explicitly
 test-slow:
-    cargo test --all-features --features slow-tests
+    cargo nextest run --profile slow --workspace --all-features --features slow-tests
+
+# Run the raw libtest surface when runner-specific behavior matters.
+test-libtest:
+    cargo test --all-features
 
 # Generate all-features line coverage and print area rollup.
 coverage-areas:
@@ -191,7 +195,7 @@ clean:
 
 # Watch for changes and run tests
 watch:
-    cargo watch -x 'test'
+    cargo watch -x 'xtest'
 
 # Pre-commit hook - run before committing
 pre-commit: fmt lint test

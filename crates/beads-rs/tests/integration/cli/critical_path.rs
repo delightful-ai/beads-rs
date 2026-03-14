@@ -12,7 +12,6 @@ use std::time::Duration;
 use crate::fixtures::bd_runtime::BdRuntimeRepo;
 #[cfg(feature = "slow-tests")]
 use crate::fixtures::bd_runtime::{
-    bd_with_runtime_sync_enabled, data_dir_for_runtime,
     wait_for_daemon_pid as runtime_wait_for_daemon_pid,
     wait_for_store_id as runtime_wait_for_store_id,
 };
@@ -20,8 +19,6 @@ use crate::fixtures::git::repo_has_branch;
 #[cfg(feature = "slow-tests")]
 use crate::fixtures::wait;
 use predicates::prelude::*;
-#[cfg(feature = "slow-tests")]
-use tempfile::TempDir;
 
 #[cfg(feature = "slow-tests")]
 fn parse_response_payload(bytes: &[u8]) -> beads_surface::ipc::ResponsePayload {
@@ -81,6 +78,16 @@ impl TestRepo {
     #[cfg(feature = "slow-tests")]
     fn bd_sync_enabled(&self) -> assert_cmd::Command {
         self.0.bd_sync_enabled()
+    }
+
+    #[cfg(feature = "slow-tests")]
+    fn runtime_dir(&self) -> &Path {
+        self.0.runtime_dir()
+    }
+
+    #[cfg(feature = "slow-tests")]
+    fn data_dir(&self) -> &Path {
+        self.0.data_dir()
     }
 }
 
@@ -3560,10 +3567,9 @@ fn test_crash_recovery_replays_wal() {
     use git2::Repository;
 
     let repo = TestRepo::new();
-    let runtime_dir = TempDir::new().expect("failed to create runtime dir");
-    let data_dir = data_dir_for_runtime(runtime_dir.path());
 
-    let output = bd_with_runtime_sync_enabled(repo.path(), runtime_dir.path(), &data_dir)
+    let output = repo
+        .bd_sync_enabled()
         .args(["create", "Crash recovery", "--json"])
         .output()
         .expect("run bd create");
@@ -3579,9 +3585,10 @@ fn test_crash_recovery_replays_wal() {
         other => panic!("unexpected create payload: {other:?}"),
     };
 
-    let store_id = runtime_wait_for_store_id(&data_dir, Duration::from_secs(2))
+    let store_id = runtime_wait_for_store_id(repo.data_dir(), Duration::from_secs(2))
         .expect("store id should be discovered");
-    let wal_dir = data_dir
+    let wal_dir = repo
+        .data_dir()
         .join("stores")
         .join(store_id.to_string())
         .join("wal")
@@ -3589,7 +3596,7 @@ fn test_crash_recovery_replays_wal() {
     let wal_entries = wait_for_wal_segments(&wal_dir, Duration::from_secs(2));
     assert!(!wal_entries.is_empty(), "expected WAL entry before crash");
 
-    let pid = runtime_wait_for_daemon_pid(runtime_dir.path(), Duration::from_secs(2))
+    let pid = runtime_wait_for_daemon_pid(repo.runtime_dir(), Duration::from_secs(2))
         .expect("daemon should publish pid");
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
@@ -3597,13 +3604,15 @@ fn test_crash_recovery_replays_wal() {
     let _ = wait::wait_for_process_exit(pid, Duration::from_secs(1));
 
     let store_id_arg = store_id.to_string();
-    let unlock_out = bd_with_runtime_sync_enabled(repo.path(), runtime_dir.path(), &data_dir)
+    let unlock_out = repo
+        .bd_sync_enabled()
         .args(["store", "unlock", "--store-id", store_id_arg.as_str()])
         .output()
         .expect("run bd store unlock");
     assert!(unlock_out.status.success());
 
-    let list_out = bd_with_runtime_sync_enabled(repo.path(), runtime_dir.path(), &data_dir)
+    let list_out = repo
+        .bd_sync_enabled()
         .args(["list", "--json"])
         .output()
         .expect("run bd list");
@@ -3617,7 +3626,8 @@ fn test_crash_recovery_replays_wal() {
         "expected recovered issue to appear after restart"
     );
 
-    let sync_out = bd_with_runtime_sync_enabled(repo.path(), runtime_dir.path(), &data_dir)
+    let sync_out = repo
+        .bd_sync_enabled()
         .args(["sync", "--json"])
         .output()
         .expect("run bd sync");

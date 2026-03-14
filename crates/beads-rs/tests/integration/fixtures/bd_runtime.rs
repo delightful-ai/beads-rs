@@ -2,6 +2,7 @@ use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command as StdCommand, Stdio};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use assert_cmd::Command;
@@ -12,6 +13,7 @@ use tempfile::TempDir;
 
 use super::daemon_runtime::shutdown_daemon;
 use super::git::{init_bare_repo, init_repo, init_repo_with_origin};
+use super::temp;
 use super::timing;
 use super::wait;
 
@@ -208,11 +210,13 @@ pub fn wait_for_store_id(data_dir: &Path, timeout: Duration) -> Option<StoreId> 
     ready.then_some(store_id).flatten()
 }
 
-fn configure_bd_command<C: CommandEnv>(
+fn configure_bd_command_with_paths<C: CommandEnv>(
     cmd: &mut C,
     cwd: &Path,
     runtime_dir: &Path,
     data_dir: &Path,
+    config_dir: &Path,
+    store_id: Option<StoreId>,
     profile: BdCommandProfile,
 ) {
     scrub_inherited_test_env(cmd);
@@ -221,8 +225,13 @@ fn configure_bd_command<C: CommandEnv>(
     cmd.env_os("BD_RUNTIME_DIR", runtime_dir.as_os_str());
     cmd.env_os("BD_WAL_DIR", runtime_dir.as_os_str());
     cmd.env_os("BD_DATA_DIR", data_dir.as_os_str());
-    let config_dir = config_dir_for_runtime(runtime_dir);
     cmd.env_os("BD_CONFIG_DIR", config_dir.as_os_str());
+    if let Some(store_id) = store_id {
+        let store_id = store_id.to_string();
+        cmd.env_os("BD_STORE_ID", OsStr::new(store_id.as_str()));
+    } else {
+        cmd.env_remove_var("BD_STORE_ID");
+    }
     cmd.env_os("BD_NO_AUTO_UPGRADE", OsStr::new("1"));
     if profile.testing {
         cmd.env_os("BD_TESTING", OsStr::new("1"));
@@ -260,15 +269,15 @@ fn configure_bd_command<C: CommandEnv>(
     }
 }
 
-#[cfg(feature = "slow-tests")]
-pub(crate) fn configure_assert_bd_command(
-    cmd: &mut Command,
+fn configure_bd_command<C: CommandEnv>(
+    cmd: &mut C,
     cwd: &Path,
     runtime_dir: &Path,
     data_dir: &Path,
     profile: BdCommandProfile,
 ) {
-    configure_bd_command(cmd, cwd, runtime_dir, data_dir, profile);
+    let config_dir = config_dir_for_runtime(runtime_dir);
+    configure_bd_command_with_paths(cmd, cwd, runtime_dir, data_dir, &config_dir, None, profile);
 }
 
 pub(crate) fn configure_std_bd_command(
@@ -281,24 +290,72 @@ pub(crate) fn configure_std_bd_command(
     configure_bd_command(cmd, cwd, runtime_dir, data_dir, profile);
 }
 
-#[cfg(feature = "slow-tests")]
-pub fn bd_with_runtime(repo: &Path, runtime_dir: &Path, data_dir: &Path) -> Command {
-    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
-    configure_assert_bd_command(
-        &mut cmd,
-        repo,
+pub(crate) fn configure_std_bd_command_with_paths(
+    cmd: &mut StdCommand,
+    cwd: &Path,
+    runtime_dir: &Path,
+    data_dir: &Path,
+    config_dir: &Path,
+    store_id: Option<StoreId>,
+    profile: BdCommandProfile,
+) {
+    configure_bd_command_with_paths(
+        cmd,
+        cwd,
         runtime_dir,
         data_dir,
-        BdCommandProfile::cli(),
+        config_dir,
+        store_id,
+        profile,
     );
-    cmd
 }
 
-#[cfg(feature = "slow-tests")]
-pub fn bd_with_runtime_sync_enabled(repo: &Path, runtime_dir: &Path, data_dir: &Path) -> Command {
-    let mut cmd = bd_with_runtime(repo, runtime_dir, data_dir);
-    cmd.env("BD_TEST_DISABLE_GIT_SYNC", "0");
-    cmd
+pub(crate) fn spawn_daemon_with_paths(
+    cwd: &Path,
+    runtime_dir: &Path,
+    data_dir: &Path,
+    config_dir: &Path,
+    store_id: Option<StoreId>,
+    profile: BdCommandProfile,
+) -> Child {
+    let mut cmd = StdCommand::new(assert_cmd::cargo::cargo_bin!("bd"));
+    configure_std_bd_command_with_paths(
+        &mut cmd,
+        cwd,
+        runtime_dir,
+        data_dir,
+        config_dir,
+        store_id,
+        profile,
+    );
+    cmd.args(["daemon", "run"]);
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd.spawn().expect("spawn daemon")
+}
+
+pub(crate) fn wait_for_daemon_ready(client: &IpcClient, timeout: Duration) -> bool {
+    wait::poll_until(timeout, || ping_daemon(client))
+}
+
+pub(crate) fn initialize_repo_with_client(client: &IpcClient, repo_path: &Path) {
+    let request = Request::Init {
+        ctx: RepoCtx::new(repo_path.to_path_buf()),
+        payload: EmptyPayload {},
+    };
+    let response = {
+        let _phase = timing::scoped_phase("fixture.bd_runtime.init_request");
+        client
+            .send_request_no_autostart(&request)
+            .expect("init response")
+    };
+    match response {
+        Response::Ok {
+            ok: ResponsePayload::Initialized(_),
+        } => {}
+        other => panic!("unexpected init response: {other:?}"),
+    }
 }
 
 pub struct BdRuntimeRepo {
@@ -308,6 +365,7 @@ pub struct BdRuntimeRepo {
     pub runtime_dir: TempDir,
     pub data_dir: PathBuf,
     pub store_id: Option<beads_core::StoreId>,
+    daemon_child: Mutex<Option<Child>>,
 }
 
 impl BdRuntimeRepo {
@@ -317,14 +375,14 @@ impl BdRuntimeRepo {
 
     pub fn new_with_origin() -> Self {
         let _phase = timing::scoped_phase("fixture.bd_runtime.new_with_origin");
-        let remote_dir = TempDir::new().expect("failed to create remote dir");
+        let remote_dir = temp::fixture_tempdir("bd-remote");
         init_bare_repo(remote_dir.path()).expect("failed to init bare repo");
 
-        let work_dir = TempDir::new().expect("failed to create work dir");
+        let work_dir = temp::fixture_tempdir("bd-work");
         init_repo_with_origin(work_dir.path(), remote_dir.path())
             .expect("failed to init repo with origin");
 
-        let runtime_dir = TempDir::new().expect("failed to create runtime dir");
+        let runtime_dir = temp::fixture_tempdir("bd-runtime");
         let data_dir = data_dir_for_runtime(runtime_dir.path());
 
         Self {
@@ -333,16 +391,17 @@ impl BdRuntimeRepo {
             runtime_dir,
             data_dir,
             store_id: None,
+            daemon_child: Mutex::new(None),
         }
     }
 
     pub fn new_local_only() -> Self {
         let _phase = timing::scoped_phase("fixture.bd_runtime.new_local_only");
-        let remote_dir = TempDir::new().expect("failed to create placeholder remote dir");
-        let work_dir = TempDir::new().expect("failed to create work dir");
+        let remote_dir = temp::fixture_tempdir("bd-remote-placeholder");
+        let work_dir = temp::fixture_tempdir("bd-work");
         init_repo(work_dir.path()).expect("failed to init local-only repo");
 
-        let runtime_dir = TempDir::new().expect("failed to create runtime dir");
+        let runtime_dir = temp::fixture_tempdir("bd-runtime");
         let data_dir = data_dir_for_runtime(runtime_dir.path());
 
         Self {
@@ -351,6 +410,7 @@ impl BdRuntimeRepo {
             runtime_dir,
             data_dir,
             store_id: None,
+            daemon_child: Mutex::new(None),
         }
     }
 
@@ -415,23 +475,25 @@ impl BdRuntimeRepo {
 
     pub fn spawn_daemon(&self, profile: BdCommandProfile) -> Child {
         let _phase = timing::scoped_phase("fixture.bd_runtime.daemon_spawn");
-        let mut cmd = StdCommand::new(assert_cmd::cargo::cargo_bin!("bd"));
-        self.configure_command(&mut cmd, profile);
-        cmd.args(["daemon", "run"]);
-        cmd.stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        cmd.spawn().expect("spawn daemon")
+        let config_dir = config_dir_for_runtime(self.runtime_dir());
+        spawn_daemon_with_paths(
+            self.path(),
+            self.runtime_dir(),
+            self.data_dir(),
+            &config_dir,
+            self.store_id,
+            profile,
+        )
     }
 
     pub fn ensure_daemon_running(&self, profile: BdCommandProfile) -> IpcClient {
         let _phase = timing::scoped_phase("fixture.bd_runtime.ensure_daemon_running");
         let client = self.ipc_client_no_autostart();
         if !ping_daemon(&client) {
-            self.spawn_daemon(profile);
+            self.ensure_daemon_child_running(profile);
             let ok = {
                 let _phase = timing::scoped_phase("fixture.bd_runtime.daemon_ready_wait");
-                wait::poll_until(Duration::from_secs(5), || ping_daemon(&client))
+                wait_for_daemon_ready(&client, Duration::from_secs(5))
             };
             assert!(ok, "daemon failed to start for {}", self.path().display());
         }
@@ -439,22 +501,7 @@ impl BdRuntimeRepo {
     }
 
     pub fn initialize_repo(&self, client: &IpcClient) {
-        let request = Request::Init {
-            ctx: RepoCtx::new(self.path().to_path_buf()),
-            payload: EmptyPayload {},
-        };
-        let response = {
-            let _phase = timing::scoped_phase("fixture.bd_runtime.init_request");
-            client
-                .send_request_no_autostart(&request)
-                .expect("init response")
-        };
-        match response {
-            Response::Ok {
-                ok: ResponsePayload::Initialized(_),
-            } => {}
-            other => panic!("unexpected init response: {other:?}"),
-        }
+        initialize_repo_with_client(client, self.path());
     }
 
     pub fn start_daemon(&self, profile: BdCommandProfile) -> IpcClient {
@@ -464,16 +511,38 @@ impl BdRuntimeRepo {
     }
 
     fn configure_command<C: CommandEnv>(&self, cmd: &mut C, profile: BdCommandProfile) {
-        configure_bd_command(
+        let config_dir = config_dir_for_runtime(self.runtime_dir());
+        configure_bd_command_with_paths(
             cmd,
             self.path(),
             self.runtime_dir(),
             self.data_dir(),
+            &config_dir,
+            self.store_id,
             profile,
         );
-        if let Some(store_id) = self.store_id {
-            let store_id = store_id.to_string();
-            cmd.env_os("BD_STORE_ID", OsStr::new(&store_id));
+    }
+
+    fn ensure_daemon_child_running(&self, profile: BdCommandProfile) {
+        let mut guard = self.daemon_child.lock().expect("daemon child lock");
+        let needs_spawn = match guard.as_mut() {
+            Some(child) => child.try_wait().expect("poll daemon child").is_some(),
+            None => true,
+        };
+        if !needs_spawn {
+            return;
+        }
+
+        *guard = Some(self.spawn_daemon(profile));
+    }
+
+    fn sync_daemon_child_exit(&self, timeout: Duration) {
+        let mut guard = self.daemon_child.lock().expect("daemon child lock");
+        let Some(child) = guard.as_mut() else {
+            return;
+        };
+        if wait::wait_for_child_exit(child, timeout) {
+            let _ = guard.take();
         }
     }
 }
@@ -481,6 +550,7 @@ impl BdRuntimeRepo {
 impl Drop for BdRuntimeRepo {
     fn drop(&mut self) {
         shutdown_daemon(self.runtime_dir());
+        self.sync_daemon_child_exit(Duration::from_secs(2));
     }
 }
 
@@ -498,6 +568,7 @@ mod tests {
     use std::ffi::{OsStr, OsString};
     use std::path::Path;
     use std::process::Command as StdCommand;
+    use std::time::Duration;
 
     use super::{
         BdCommandProfile, BdRuntimeRepo, CheckpointMode, configure_std_bd_command,
@@ -621,5 +692,24 @@ mod tests {
                     .any(|(env_key, value)| { env_key == OsStr::new(key) && value.is_none() })
             );
         }
+    }
+
+    #[test]
+    fn sync_daemon_child_exit_reaps_owned_child() {
+        let repo = BdRuntimeRepo::new_local_only();
+        let child = StdCommand::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("spawn test child");
+        *repo.daemon_child.lock().expect("daemon child lock") = Some(child);
+
+        repo.sync_daemon_child_exit(Duration::from_secs(1));
+
+        assert!(
+            repo.daemon_child
+                .lock()
+                .expect("daemon child lock")
+                .is_none()
+        );
     }
 }

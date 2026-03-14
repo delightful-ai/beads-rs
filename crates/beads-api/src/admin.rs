@@ -31,7 +31,7 @@ pub struct DaemonInfo {
 pub struct AdminStatusOutput {
     pub store_id: StoreId,
     pub replica_id: ReplicaId,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub replication_listen_addr: Option<String>,
     pub namespaces: Vec<NamespaceId>,
     pub watermarks_applied: Watermarks<Applied>,
@@ -782,5 +782,38 @@ impl fmt::Display for UnlockAction {
             Self::RemovedForced => "removed_forced",
             Self::RemovedStale => "removed_stale",
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    #[test]
+    fn admin_status_output_deserializes_without_replication_listen_addr() {
+        let status = AdminStatusOutput {
+            store_id: StoreId::new(Uuid::nil()),
+            replica_id: ReplicaId::new(Uuid::nil()),
+            replication_listen_addr: Some("127.0.0.1:7000".to_string()),
+            namespaces: vec![NamespaceId::core()],
+            watermarks_applied: Watermarks::new(),
+            watermarks_durable: Watermarks::new(),
+            last_clock_anomaly: None,
+            wal: Vec::new(),
+            wal_warnings: Vec::new(),
+            replication: Vec::new(),
+            replica_liveness: Vec::new(),
+            checkpoints: Vec::new(),
+        };
+        let mut value = serde_json::to_value(status).expect("serialize status");
+        value
+            .as_object_mut()
+            .expect("status object")
+            .remove("replication_listen_addr");
+
+        let parsed: AdminStatusOutput =
+            serde_json::from_value(value).expect("deserialize old admin status payload");
+        assert_eq!(parsed.replication_listen_addr, None);
     }
 }

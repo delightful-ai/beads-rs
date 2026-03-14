@@ -4,15 +4,15 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use assert_cmd::Command;
 use rusqlite::Connection;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-use beads_api::{AdminStatusOutput, QueryResult};
+use beads_api::{AdminFingerprintMode, AdminFingerprintOutput, AdminStatusOutput, QueryResult};
 use beads_core::StoreId;
 use beads_core::error::CliErrorCode;
 use beads_core::{
@@ -22,13 +22,16 @@ use beads_core::{
 };
 use beads_rs::config::{Config, ReplicationPeerConfig};
 use beads_surface::ipc::{
-    AdminOp, CreatePayload, EmptyPayload, IdPayload, IpcClient, IpcConnection, IpcError,
-    MutationCtx, MutationMeta, ReadConsistency, ReadCtx, RepoCtx, Request, Response,
-    ResponsePayload,
+    AdminFingerprintPayload, AdminOp, CreatePayload, EmptyPayload, IdPayload, IpcClient,
+    IpcConnection, IpcError, MutationCtx, MutationMeta, ReadConsistency, ReadCtx, RepoCtx, Request,
+    Response, ResponsePayload,
 };
 use beads_surface::ops::OpResult;
 
-use super::bd_runtime::{daemon_socket_path, scrub_assert_test_env};
+use super::bd_runtime::{
+    BdCommandProfile, daemon_socket_path, initialize_repo_with_client, spawn_daemon_with_paths,
+    wait_for_daemon_ready,
+};
 use super::daemon_boundary::wal::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 use super::daemon_runtime::{crash_daemon, shutdown_daemon};
 use super::git::{init_bare_repo, init_repo_with_origin};
@@ -101,6 +104,18 @@ const STATUS_RETRY_MAX_BACKOFF: Duration = Duration::from_millis(100);
 const IPC_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(20);
 const IPC_RETRY_MAX_BACKOFF: Duration = Duration::from_millis(250);
 
+fn debug_step(step: &str) {
+    if std::env::var_os("BD_TEST_STEP_LOG").is_some() {
+        eprintln!("STEP {step}");
+    }
+}
+
+fn debug_detail(label: &str, detail: impl std::fmt::Display) {
+    if std::env::var_os("BD_TEST_STEP_LOG").is_some() {
+        eprintln!("STEP {label}: {detail}");
+    }
+}
+
 pub struct ReplRig {
     _root: Option<TempDir>,
     store_id: StoreId,
@@ -123,6 +138,14 @@ enum StatusWaitRetry {
 enum StatusWaitFailure {
     TimedOut {
         last_statuses: Vec<AdminStatusOutput>,
+        last_error: Option<ErrorPayload>,
+    },
+    Fatal(ErrorPayload),
+}
+
+enum FingerprintWaitFailure {
+    TimedOut {
+        last_fingerprints: Vec<AdminFingerprintOutput>,
         last_error: Option<ErrorPayload>,
     },
     Fatal(ErrorPayload),
@@ -182,7 +205,7 @@ impl ReplRig {
 
         let mut nodes = Vec::with_capacity(node_count);
         for seed in seeds {
-            let (store_id, replica_id) = {
+            let (store_id, replica_id, daemon_child) = {
                 let _phase = timing::scoped_phase_with_context(
                     "fixture.repl_rig.bootstrap_replica",
                     seed.repo_dir.display(),
@@ -201,6 +224,7 @@ impl ReplRig {
                 seed,
                 store_id_override,
                 replica_id,
+                daemon_child,
                 issue_min_seen.clone(),
             ));
         }
@@ -304,7 +328,7 @@ impl ReplRig {
     }
 
     pub fn crash_node(&self, idx: usize) {
-        crash_daemon(&self.nodes[idx].runtime_dir);
+        self.nodes[idx].crash_owned_daemon();
         self.nodes[idx].reset_ipc_connections();
     }
 
@@ -319,7 +343,7 @@ impl ReplRig {
     }
 
     pub fn shutdown_node(&self, idx: usize) {
-        shutdown_daemon(&self.nodes[idx].runtime_dir);
+        self.nodes[idx].shutdown_owned_daemon();
         self.nodes[idx].reset_ipc_connections();
     }
 
@@ -383,43 +407,22 @@ impl ReplRig {
     }
 
     pub fn assert_converged(&self, namespaces: &[NamespaceId], timeout: Duration) {
-        match self.wait_for_statuses(
+        match self.wait_for_fingerprints(
             "fixture.repl_rig.assert_converged",
             format!("namespaces={namespaces:?}"),
             timeout,
-            |statuses| self.converged_with_statuses(statuses, namespaces),
+            |fingerprints| self.converged_with_fingerprints(fingerprints, namespaces),
         ) {
             Ok(_) => {}
-            Err(StatusWaitFailure::Fatal(err)) => panic!("admin status error: {err:?}"),
-            Err(StatusWaitFailure::TimedOut {
-                last_statuses,
+            Err(FingerprintWaitFailure::Fatal(err)) => panic!("admin fingerprint error: {err:?}"),
+            Err(FingerprintWaitFailure::TimedOut {
+                last_fingerprints,
                 last_error,
             }) => match last_error {
                 Some(err) => panic!(
-                    "replication did not converge: last_error={err:?} last_statuses={last_statuses:?}"
+                    "replication did not converge: last_error={err:?} last_fingerprints={last_fingerprints:?}"
                 ),
-                None => panic!("replication did not converge: {last_statuses:?}"),
-            },
-        }
-    }
-
-    pub fn assert_peers_seen(&self, timeout: Duration) {
-        match self.wait_for_statuses(
-            "fixture.repl_rig.assert_peers_seen",
-            "replication-peers",
-            timeout,
-            |statuses| self.peers_seen_with_statuses(statuses),
-        ) {
-            Ok(_) => {}
-            Err(StatusWaitFailure::Fatal(err)) => panic!("admin status error: {err:?}"),
-            Err(StatusWaitFailure::TimedOut {
-                last_statuses,
-                last_error,
-            }) => match last_error {
-                Some(err) => panic!(
-                    "replication peers not observed: last_error={err:?} last_statuses={last_statuses:?}"
-                ),
-                None => panic!("replication peers not observed: {last_statuses:?}"),
+                None => panic!("replication did not converge: {last_fingerprints:?}"),
             },
         }
     }
@@ -441,6 +444,27 @@ impl ReplRig {
                     "replication not ready: last_error={err:?} last_statuses={last_statuses:?}"
                 ),
                 None => panic!("replication not ready: {last_statuses:?}"),
+            },
+        }
+    }
+
+    pub fn assert_replication_durability_ready(&self, timeout: Duration) {
+        match self.wait_for_statuses(
+            "fixture.repl_rig.assert_replication_durability_ready",
+            "replication-durability-ready",
+            timeout,
+            |statuses| self.replication_durability_ready_with_statuses(statuses),
+        ) {
+            Ok(_) => {}
+            Err(StatusWaitFailure::Fatal(err)) => panic!("admin status error: {err:?}"),
+            Err(StatusWaitFailure::TimedOut {
+                last_statuses,
+                last_error,
+            }) => match last_error {
+                Some(err) => panic!(
+                    "replication durability not ready: last_error={err:?} last_statuses={last_statuses:?}"
+                ),
+                None => panic!("replication durability not ready: {last_statuses:?}"),
             },
         }
     }
@@ -530,6 +554,69 @@ impl ReplRig {
         }
     }
 
+    fn wait_for_fingerprints<F>(
+        &self,
+        phase: &'static str,
+        context: impl std::fmt::Display,
+        timeout: Duration,
+        mut predicate: F,
+    ) -> Result<Vec<AdminFingerprintOutput>, FingerprintWaitFailure>
+    where
+        F: FnMut(&[AdminFingerprintOutput]) -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        let mut last_fingerprints = Vec::new();
+        let mut last_debug_summary: Option<String> = None;
+        let result = wait::retry_with_backoff(
+            phase,
+            context,
+            timeout,
+            STATUS_RETRY_INITIAL_BACKOFF,
+            STATUS_RETRY_MAX_BACKOFF,
+            || match self.admin_fingerprints_with_read(ReadConsistency::default(), deadline) {
+                Ok(fingerprints) => {
+                    if predicate(&fingerprints) {
+                        Ok(fingerprints)
+                    } else {
+                        let summary = summarize_fingerprints(&fingerprints);
+                        if last_debug_summary.as_deref() != Some(summary.as_str()) {
+                            debug_detail("fingerprint-pending", &summary);
+                            last_debug_summary = Some(summary);
+                        }
+                        last_fingerprints = fingerprints;
+                        Err(StatusWaitRetry::Pending)
+                    }
+                }
+                Err(err) if err.retryable => {
+                    debug_detail("fingerprint-retryable-error", format!("{err:?}"));
+                    Err(StatusWaitRetry::Retryable(err))
+                }
+                Err(err) => {
+                    debug_detail("fingerprint-fatal-error", format!("{err:?}"));
+                    Err(StatusWaitRetry::Fatal(err))
+                }
+            },
+            |err| {
+                matches!(
+                    err,
+                    StatusWaitRetry::Pending | StatusWaitRetry::Retryable(_)
+                )
+            },
+        );
+        match result {
+            Ok(fingerprints) => Ok(fingerprints),
+            Err(StatusWaitRetry::Fatal(err)) => Err(FingerprintWaitFailure::Fatal(err)),
+            Err(StatusWaitRetry::Pending) => Err(FingerprintWaitFailure::TimedOut {
+                last_fingerprints,
+                last_error: None,
+            }),
+            Err(StatusWaitRetry::Retryable(err)) => Err(FingerprintWaitFailure::TimedOut {
+                last_fingerprints,
+                last_error: Some(err),
+            }),
+        }
+    }
+
     fn admin_statuses_with_read(
         &self,
         mut read: ReadConsistency,
@@ -544,6 +631,23 @@ impl ReplRig {
         self.nodes
             .iter()
             .map(|node| node.admin_status_with_read(read.clone()))
+            .collect()
+    }
+
+    fn admin_fingerprints_with_read(
+        &self,
+        mut read: ReadConsistency,
+        deadline: Instant,
+    ) -> Result<Vec<AdminFingerprintOutput>, ErrorPayload> {
+        let wait_timeout_ms = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        read.wait_timeout_ms = Some(wait_timeout_ms);
+        self.nodes
+            .iter()
+            .map(|node| node.admin_fingerprint_with_read(read.clone()))
             .collect()
     }
 
@@ -583,22 +687,48 @@ impl ReplRig {
         true
     }
 
-    fn peers_seen_with_statuses(&self, statuses: &[AdminStatusOutput]) -> bool {
+    fn converged_with_fingerprints(
+        &self,
+        fingerprints: &[AdminFingerprintOutput],
+        namespaces: &[NamespaceId],
+    ) -> bool {
         if self.nodes.len() < 2 {
             return true;
         }
-        let expected: BTreeSet<ReplicaId> = self.nodes.iter().map(|node| node.replica_id).collect();
-        for status in statuses {
-            let seen: BTreeSet<ReplicaId> = status
-                .replica_liveness
-                .iter()
-                .map(|row| row.replica_id)
-                .collect();
-            for peer in &expected {
-                if *peer == status.replica_id {
-                    continue;
+        let Some(base) = fingerprints.first() else {
+            return false;
+        };
+        for fingerprint in &fingerprints[1..] {
+            for namespace in namespaces {
+                if !watermarks_equal_for_namespace(
+                    &base.watermarks_applied,
+                    &fingerprint.watermarks_applied,
+                    namespace,
+                ) {
+                    return false;
                 }
-                if !seen.contains(peer) {
+                if !watermarks_equal_for_namespace(
+                    &base.watermarks_durable,
+                    &fingerprint.watermarks_durable,
+                    namespace,
+                ) {
+                    return false;
+                }
+                let Some(base_namespace) = base
+                    .namespaces
+                    .iter()
+                    .find(|row| row.namespace == *namespace)
+                else {
+                    return false;
+                };
+                let Some(namespace_fingerprint) = fingerprint
+                    .namespaces
+                    .iter()
+                    .find(|row| row.namespace == *namespace)
+                else {
+                    return false;
+                };
+                if namespace_fingerprint.namespace_root != base_namespace.namespace_root {
                     return false;
                 }
             }
@@ -624,6 +754,31 @@ impl ReplRig {
                     return false;
                 };
                 if row.last_handshake_ms == 0 {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn replication_durability_ready_with_statuses(&self, statuses: &[AdminStatusOutput]) -> bool {
+        if self.nodes.len() < 2 {
+            return true;
+        }
+        let expected: BTreeSet<ReplicaId> = self.nodes.iter().map(|node| node.replica_id).collect();
+        for status in statuses {
+            for peer in &expected {
+                if *peer == status.replica_id {
+                    continue;
+                }
+                let Some(row) = status
+                    .replica_liveness
+                    .iter()
+                    .find(|row| row.replica_id == *peer)
+                else {
+                    return false;
+                };
+                if row.last_handshake_ms == 0 || !row.durability_eligible {
                     return false;
                 }
             }
@@ -672,7 +827,7 @@ impl ReplRig {
 impl Drop for ReplRig {
     fn drop(&mut self) {
         for node in &self.nodes {
-            shutdown_daemon(&node.runtime_dir);
+            node.shutdown_owned_daemon();
         }
     }
 }
@@ -685,6 +840,7 @@ pub struct Node {
     listen_addr: String,
     store_id_override: Option<StoreId>,
     replica_id: ReplicaId,
+    daemon_child: Mutex<Option<Child>>,
     admin_conn: Mutex<Option<IpcConnection>>,
     ipc_conn: Mutex<Option<IpcConnection>>,
     issue_min_seen: Arc<Mutex<BTreeMap<String, Watermarks<Applied>>>>,
@@ -695,6 +851,7 @@ impl Node {
         seed: NodeSeed,
         store_id_override: Option<StoreId>,
         replica_id: ReplicaId,
+        daemon_child: Child,
         issue_min_seen: Arc<Mutex<BTreeMap<String, Watermarks<Applied>>>>,
     ) -> Self {
         Self {
@@ -705,6 +862,7 @@ impl Node {
             listen_addr: seed.listen_addr,
             store_id_override,
             replica_id,
+            daemon_child: Mutex::new(Some(daemon_child)),
             admin_conn: Mutex::new(None),
             ipc_conn: Mutex::new(None),
             issue_min_seen,
@@ -735,25 +893,12 @@ impl Node {
         &self.listen_addr
     }
 
-    fn bd_cmd(&self) -> Command {
-        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
-        configure_node_bd_cmd(
-            &mut cmd,
-            &self.repo_dir,
-            &self.runtime_dir,
-            &self.data_dir,
-            &self.config_dir,
-            self.store_id_override,
-        );
-        cmd
-    }
-
     fn unlock_store(&self, store_id: StoreId) {
         unlock_store(&self.data_dir, store_id).expect("unlock store");
     }
 
     fn start_daemon(&mut self) {
-        self.bd_cmd().args(["status"]).assert().success();
+        self.ensure_daemon_child_running();
         self.wait_for_admin_ready(IPC_RELOAD_REPLICATION_TIMEOUT);
         let status = self.admin_status();
         let listen_addr = status.replication_listen_addr.unwrap_or_else(|| {
@@ -763,6 +908,60 @@ impl Node {
             )
         });
         self.listen_addr = listen_addr;
+    }
+
+    fn ensure_daemon_child_running(&self) {
+        let mut guard = self.daemon_child.lock().expect("daemon child lock");
+        let needs_spawn = match guard.as_mut() {
+            Some(child) => child.try_wait().expect("poll daemon child").is_some(),
+            None => true,
+        };
+        if !needs_spawn {
+            return;
+        }
+
+        let child = spawn_node_daemon(
+            &self.repo_dir,
+            &self.runtime_dir,
+            &self.data_dir,
+            &self.config_dir,
+            self.store_id_override,
+        );
+        *guard = Some(child);
+    }
+
+    fn sync_daemon_child_exit(&self, timeout: Duration) -> bool {
+        let mut guard = self.daemon_child.lock().expect("daemon child lock");
+        let Some(child) = guard.as_mut() else {
+            return true;
+        };
+        if wait::wait_for_child_exit(child, timeout) {
+            let _ = guard.take();
+            return true;
+        }
+        false
+    }
+
+    fn kill_owned_daemon_child(&self, timeout: Duration) {
+        let mut guard = self.daemon_child.lock().expect("daemon child lock");
+        let Some(child) = guard.as_mut() else {
+            return;
+        };
+        if wait::kill_child_and_wait(child, timeout) {
+            let _ = guard.take();
+        }
+    }
+
+    fn crash_owned_daemon(&self) {
+        crash_daemon(&self.runtime_dir);
+        self.sync_daemon_child_exit(Duration::from_secs(1));
+    }
+
+    fn shutdown_owned_daemon(&self) {
+        shutdown_daemon(&self.runtime_dir);
+        if !self.sync_daemon_child_exit(Duration::from_secs(2)) {
+            self.kill_owned_daemon_child(Duration::from_secs(1));
+        }
     }
 
     pub fn create_issue(&self, title: &str) -> String {
@@ -933,14 +1132,18 @@ impl Node {
     }
 
     pub fn reload_replication(&self) {
+        debug_step("node-reload-replication-wait-ready-start");
         self.wait_for_admin_ready(IPC_RELOAD_REPLICATION_TIMEOUT);
+        debug_step("node-reload-replication-wait-ready-done");
         let request = Request::Admin(AdminOp::ReloadReplication {
             ctx: RepoCtx::new(self.repo_dir.clone()),
             payload: EmptyPayload {},
         });
+        debug_step("node-reload-replication-send-start");
         let response = self
-            .send_admin_request_resilient(&request)
+            .send_admin_request_fresh(&request)
             .expect("admin reload replication");
+        debug_step("node-reload-replication-send-done");
         match response {
             Response::Ok {
                 ok: ResponsePayload::Query(QueryResult::AdminReloadReplication(_)),
@@ -957,7 +1160,7 @@ impl Node {
             payload: EmptyPayload {},
         });
         let response = self
-            .send_admin_request_resilient(&request)
+            .send_admin_request_fresh(&request)
             .expect("admin reload replication peers");
         match response {
             Response::Ok {
@@ -990,6 +1193,33 @@ impl Node {
                 other => Err(ErrorPayload::new(
                     ProtocolErrorCode::InternalError.into(),
                     format!("unexpected admin status payload: {other:?}"),
+                    false,
+                )),
+            },
+            Response::Err { err } => Err(err),
+        }
+    }
+
+    fn admin_fingerprint_with_read(
+        &self,
+        read: ReadConsistency,
+    ) -> Result<AdminFingerprintOutput, ErrorPayload> {
+        let request = Request::Admin(AdminOp::Fingerprint {
+            ctx: ReadCtx::new(self.repo_dir.clone(), read),
+            payload: AdminFingerprintPayload {
+                mode: AdminFingerprintMode::Full,
+                sample: None,
+            },
+        });
+        let response = self
+            .send_admin_request_resilient(&request)
+            .map_err(IntoErrorPayload::into_error_payload)?;
+        match response {
+            Response::Ok { ok } => match ok {
+                ResponsePayload::Query(QueryResult::AdminFingerprint(output)) => Ok(output),
+                other => Err(ErrorPayload::new(
+                    ProtocolErrorCode::InternalError.into(),
+                    format!("unexpected admin fingerprint payload: {other:?}"),
                     false,
                 )),
             },
@@ -1097,28 +1327,26 @@ struct NodeSeed {
     listen_addr: String,
 }
 
-impl NodeSeed {
-    fn bd_cmd(&self, store_id_override: Option<StoreId>) -> Command {
-        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
-        configure_node_bd_cmd(
-            &mut cmd,
-            &self.repo_dir,
-            &self.runtime_dir,
-            &self.data_dir,
-            &self.config_dir,
-            store_id_override,
-        );
-        cmd
-    }
-}
-
-fn bootstrap_replica(node: &NodeSeed, store_id_override: Option<StoreId>) -> (StoreId, ReplicaId) {
-    node.bd_cmd(store_id_override)
-        .args(["init"])
-        .assert()
-        .success();
+fn bootstrap_replica(
+    node: &NodeSeed,
+    store_id_override: Option<StoreId>,
+) -> (StoreId, ReplicaId, Child) {
+    let child = spawn_node_daemon(
+        &node.repo_dir,
+        &node.runtime_dir,
+        &node.data_dir,
+        &node.config_dir,
+        store_id_override,
+    );
+    let client = IpcClient::for_runtime_dir(&node.runtime_dir).with_autostart(false);
+    assert!(
+        wait_for_daemon_ready(&client, Duration::from_secs(5)),
+        "daemon failed to start for {}",
+        node.repo_dir.display()
+    );
+    initialize_repo_with_client(&client, &node.repo_dir);
     let meta = read_store_meta(&node.data_dir, store_id_override);
-    (meta.store_id(), meta.replica_id)
+    (meta.store_id(), meta.replica_id, child)
 }
 
 fn read_store_meta(data_dir: &Path, store_id_override: Option<StoreId>) -> StoreMeta {
@@ -1173,25 +1401,21 @@ fn discover_store_meta_path(stores_dir: &Path) -> Option<PathBuf> {
     meta_path.exists().then_some(meta_path)
 }
 
-fn configure_node_bd_cmd(
-    cmd: &mut Command,
+fn spawn_node_daemon(
     repo_dir: &Path,
     runtime_dir: &Path,
     data_dir: &Path,
     config_dir: &Path,
     store_id_override: Option<StoreId>,
-) {
-    scrub_assert_test_env(cmd);
-    cmd.current_dir(repo_dir);
-    cmd.env("XDG_RUNTIME_DIR", runtime_dir);
-    cmd.env("BD_RUNTIME_DIR", runtime_dir);
-    cmd.env("BD_DATA_DIR", data_dir);
-    if let Some(store_id) = store_id_override {
-        cmd.env("BD_STORE_ID", store_id.to_string());
-    }
-    cmd.env("BD_NO_AUTO_UPGRADE", "1");
-    cmd.env("BD_CONFIG_DIR", config_dir);
-    cmd.env("BD_TESTING", "1");
+) -> Child {
+    spawn_daemon_with_paths(
+        repo_dir,
+        runtime_dir,
+        data_dir,
+        config_dir,
+        store_id_override,
+        BdCommandProfile::cli(),
+    )
 }
 
 fn write_replication_config(
@@ -1573,6 +1797,23 @@ fn handshake_rows(status: &AdminStatusOutput) -> BTreeMap<ReplicaId, u64> {
         .collect()
 }
 
+fn summarize_fingerprints(fingerprints: &[AdminFingerprintOutput]) -> String {
+    let mut parts = Vec::with_capacity(fingerprints.len());
+    for (idx, fingerprint) in fingerprints.iter().enumerate() {
+        let namespaces = fingerprint
+            .namespaces
+            .iter()
+            .map(|row| format!("{}={}", row.namespace, row.namespace_root))
+            .collect::<Vec<_>>()
+            .join(",");
+        parts.push(format!(
+            "node={idx} applied={:?} durable={:?} namespaces=[{namespaces}]",
+            fingerprint.watermarks_applied, fingerprint.watermarks_durable
+        ));
+    }
+    parts.join(" | ")
+}
+
 fn wait_timeout_ms(timeout: Duration) -> u64 {
     timeout.as_millis().clamp(1, u128::from(u64::MAX)) as u64
 }
@@ -1601,6 +1842,7 @@ fn request_read_wait_timeout(request: &Request) -> Option<u64> {
     match request {
         Request::Show { ctx, .. } => ctx.read.wait_timeout_ms,
         Request::Admin(AdminOp::Status { ctx, .. }) => ctx.read.wait_timeout_ms,
+        Request::Admin(AdminOp::Fingerprint { ctx, .. }) => ctx.read.wait_timeout_ms,
         _ => None,
     }
 }
@@ -1609,9 +1851,30 @@ fn request_is_retry_safe(request: &Request) -> bool {
     match request {
         Request::Show { .. } => true,
         Request::Admin(AdminOp::Status { .. }) => true,
+        Request::Admin(AdminOp::Fingerprint { .. }) => true,
         Request::Admin(
             AdminOp::ReloadReplication { .. } | AdminOp::ReloadReplicationPeers { .. },
         ) => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn admin_fingerprint_requests_are_retry_safe() {
+        let request = Request::Admin(AdminOp::Fingerprint {
+            ctx: ReadCtx::new(PathBuf::from("/test"), ReadConsistency::default()),
+            payload: AdminFingerprintPayload {
+                mode: AdminFingerprintMode::Full,
+                sample: None,
+            },
+        });
+
+        assert!(request_is_retry_safe(&request));
     }
 }

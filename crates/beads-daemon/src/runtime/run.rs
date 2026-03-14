@@ -24,6 +24,16 @@ fn wake_listener(socket: &Path) {
     }
 }
 
+fn duration_ms_since_epoch(duration: std::time::Duration) -> u64 {
+    u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
+}
+
+fn system_time_ms(time: SystemTime) -> Option<u64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(duration_ms_since_epoch)
+}
+
 /// Run the daemon in the current process.
 ///
 /// This never returns on success until shutdown is requested by signal or IPC.
@@ -75,14 +85,12 @@ pub fn run_daemon(
     tracing::info!("daemon listening on {:?}", socket);
 
     // Write daemon metadata for client version checks.
+    let started_at_ms = system_time_ms(SystemTime::now());
     let meta = crate::api::DaemonInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         protocol_version: crate::runtime::ipc::IPC_PROTOCOL_VERSION,
         pid: std::process::id(),
-        started_at_ms: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .ok()
-            .map(|duration| duration.as_millis() as u64),
+        started_at_ms,
     };
     let _ = std::fs::write(
         &meta_path,
@@ -109,7 +117,8 @@ pub fn run_daemon(
     let limits = Arc::new(runtime_config.limits.clone());
 
     // Create daemon core and git worker.
-    let daemon = Daemon::new_with_runtime_config(actor, layout, runtime_config);
+    let mut daemon = Daemon::new_with_runtime_config(actor, layout, runtime_config);
+    daemon.set_started_at_ms(started_at_ms);
     let git_worker = GitWorker::new(git_result_tx, (*limits).clone());
 
     // Spawn state thread.
@@ -213,4 +222,24 @@ pub fn run_daemon(
     let _ = std::fs::remove_file(&meta_path);
     tracing::info!("daemon stopped");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{duration_ms_since_epoch, system_time_ms};
+    use std::time::{Duration, UNIX_EPOCH};
+
+    #[test]
+    fn duration_ms_since_epoch_saturates_large_durations() {
+        assert_eq!(
+            duration_ms_since_epoch(Duration::from_secs(u64::MAX)),
+            u64::MAX
+        );
+    }
+
+    #[test]
+    fn system_time_ms_rejects_pre_epoch_timestamps() {
+        let before_epoch = UNIX_EPOCH - Duration::from_secs(1);
+        assert_eq!(system_time_ms(before_epoch), None);
+    }
 }

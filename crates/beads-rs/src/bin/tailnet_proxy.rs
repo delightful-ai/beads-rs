@@ -922,3 +922,30 @@ fn frame_error_desc(err: &FrameError) -> String {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::Profile;
+
+    #[test]
+    fn tailnet_profile_is_latency_only() {
+        let profile = Profile::tailnet();
+        assert_eq!(profile.base_latency_ms, 20);
+        assert_eq!(profile.jitter_ms, 30);
+        assert_eq!(profile.loss_rate, 0.0);
+        assert_eq!(profile.duplicate_rate, 0.0);
+        assert_eq!(profile.reorder_rate, 0.0);
+        assert_eq!(profile.blackhole_after_frames, None);
+        assert_eq!(profile.reset_after_frames, None);
+    }
+
+    #[test]
+    fn pathological_profile_keeps_packet_faults_explicit() {
+        let profile = Profile::pathological();
+        assert!(profile.loss_rate > 0.0);
+        assert!(profile.reorder_rate > 0.0);
+        assert_eq!(profile.duplicate_rate, 0.0);
+        assert!(profile.blackhole_after_frames.is_some());
+        assert!(profile.reset_after_frames.is_some());
+    }
+}

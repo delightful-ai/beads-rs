@@ -6,8 +6,7 @@ use std::path::PathBuf;
 use std::process::{Child, Command};
 use std::time::Duration;
 
-use tempfile::TempDir;
-
+use super::temp;
 use super::timing;
 use super::wait;
 
@@ -109,7 +108,7 @@ pub struct TailnetTrace {
 pub struct TailnetProxy {
     child: Child,
     listen_addr: String,
-    _ready_dir: TempDir,
+    _ready_dir: tempfile::TempDir,
 }
 
 impl TailnetProxy {
@@ -135,7 +134,7 @@ impl TailnetProxy {
     ) -> Self {
         let _phase = timing::scoped_phase_with_context("fixture.tailnet_proxy.spawn", &listen_addr);
         let bin = assert_cmd::cargo::cargo_bin!("tailnet_proxy");
-        let ready_dir = TempDir::new().expect("ready dir");
+        let ready_dir = temp::fixture_tempdir("tailnet-proxy");
         let ready_path = ready_dir.path().join("ready");
         let mut cmd = Command::new(bin);
         cmd.args([
