@@ -24,6 +24,7 @@ mod tests {
             version: "0.1.26".to_string(),
             protocol_version: 3,
             pid: 4242,
+            started_at_ms: None,
         };
         assert_eq!(
             render_daemon_info(&info),

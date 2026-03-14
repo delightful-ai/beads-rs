@@ -2614,8 +2614,11 @@ mod tests {
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Lww,
         Priority, ReplicaId, Stamp, StateJsonlSha256, Tombstone, Workflow,
     };
+    use git2::Time;
     #[cfg(feature = "slow-tests")]
-    use proptest::prelude::*;
+    use proptest::test_runner::TestCaseError;
+    #[cfg(feature = "slow-tests")]
+    use proptest::{prop_assert, prop_assert_eq};
     use std::collections::BTreeMap;
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
@@ -3669,6 +3672,35 @@ mod tests {
             .unwrap()
             .commit_oid
             .expect("winner migration commit");
+        let winner_oid = {
+            let commit = remote_repo.find_commit(winner_oid).unwrap();
+            let tree = commit.tree().unwrap();
+            let mut parents = Vec::new();
+            for idx in 0..commit.parent_count() {
+                parents.push(commit.parent(idx).unwrap());
+            }
+            let parent_refs: Vec<_> = parents.iter().collect();
+            let sig =
+                Signature::new("test", "test@example.com", &Time::new(1_900_000_005, 0)).unwrap();
+            let distinct_oid = remote_repo
+                .commit(
+                    None,
+                    &sig,
+                    &sig,
+                    "simulate distinct remote winner",
+                    &tree,
+                    &parent_refs,
+                )
+                .unwrap();
+            update_ref(
+                &remote_repo,
+                "refs/heads/beads/store",
+                distinct_oid,
+                "rewrite remote winner",
+            )
+            .unwrap();
+            distinct_oid
+        };
         update_ref(
             &remote_repo,
             "refs/heads/beads/store",
@@ -3676,7 +3708,6 @@ mod tests {
             "reset remote to legacy base",
         )
         .unwrap();
-        std::thread::sleep(Duration::from_secs(1));
 
         {
             let mut remote = local_repo.find_remote("origin").unwrap();
@@ -4214,7 +4245,7 @@ mod tests {
     }
 
     #[cfg(feature = "slow-tests")]
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, Copy)]
     enum Relation {
         BothMissing,
         LocalOnly,
@@ -4226,15 +4257,15 @@ mod tests {
     }
 
     #[cfg(feature = "slow-tests")]
-    fn relation_strategy() -> impl Strategy<Value = Relation> {
-        prop_oneof![
-            Just(Relation::BothMissing),
-            Just(Relation::LocalOnly),
-            Just(Relation::RemoteOnly),
-            Just(Relation::Same),
-            Just(Relation::LocalAhead),
-            Just(Relation::RemoteAhead),
-            Just(Relation::Diverged),
+    fn relation_cases() -> [Relation; 7] {
+        [
+            Relation::BothMissing,
+            Relation::LocalOnly,
+            Relation::RemoteOnly,
+            Relation::Same,
+            Relation::LocalAhead,
+            Relation::RemoteAhead,
+            Relation::Diverged,
         ]
     }
 
@@ -4279,13 +4310,92 @@ mod tests {
     }
 
     #[cfg(feature = "slow-tests")]
-    fn action_strategy() -> impl Strategy<Value = Action> {
-        prop_oneof![
-            (1u8..=3).prop_map(Action::LocalCommit),
-            (1u8..=3).prop_map(Action::RemoteCommit),
-            Just(Action::PushLocal),
-            Just(Action::ForcePushRemote),
-            Just(Action::Fetch),
+    fn fetch_sequence_cases() -> Vec<(&'static str, Vec<Action>)> {
+        vec![
+            (
+                "local_only_fetch_noop",
+                vec![Action::LocalCommit(1), Action::Fetch],
+            ),
+            (
+                "remote_only_fetch_imports_remote",
+                vec![Action::RemoteCommit(1), Action::Fetch],
+            ),
+            (
+                "same_head_fetch_noop",
+                vec![Action::LocalCommit(1), Action::PushLocal, Action::Fetch],
+            ),
+            (
+                "local_ahead_fetch_preserves_local",
+                vec![
+                    Action::LocalCommit(1),
+                    Action::PushLocal,
+                    Action::LocalCommit(2),
+                    Action::Fetch,
+                ],
+            ),
+            (
+                "remote_ahead_fetch_fast_forwards",
+                vec![
+                    Action::LocalCommit(1),
+                    Action::PushLocal,
+                    Action::RemoteCommit(2),
+                    Action::Fetch,
+                ],
+            ),
+            (
+                "diverged_fetch_preserves_local_and_backup",
+                vec![
+                    Action::LocalCommit(1),
+                    Action::PushLocal,
+                    Action::LocalCommit(1),
+                    Action::RemoteCommit(1),
+                    Action::Fetch,
+                ],
+            ),
+            (
+                "repeat_fetch_after_divergence_is_stable",
+                vec![
+                    Action::LocalCommit(1),
+                    Action::PushLocal,
+                    Action::LocalCommit(1),
+                    Action::RemoteCommit(1),
+                    Action::Fetch,
+                    Action::Fetch,
+                ],
+            ),
+            (
+                "non_fast_forward_push_is_ignored_then_fetch_recovers",
+                vec![
+                    Action::LocalCommit(1),
+                    Action::PushLocal,
+                    Action::RemoteCommit(1),
+                    Action::PushLocal,
+                    Action::Fetch,
+                ],
+            ),
+            (
+                "force_push_after_tracking_creates_backup",
+                vec![
+                    Action::LocalCommit(1),
+                    Action::PushLocal,
+                    Action::Fetch,
+                    Action::LocalCommit(1),
+                    Action::ForcePushRemote,
+                    Action::Fetch,
+                ],
+            ),
+            (
+                "interleaved_remote_and_local_updates",
+                vec![
+                    Action::LocalCommit(1),
+                    Action::PushLocal,
+                    Action::RemoteCommit(1),
+                    Action::Fetch,
+                    Action::LocalCommit(1),
+                    Action::RemoteCommit(1),
+                    Action::Fetch,
+                ],
+            ),
         ]
     }
 
@@ -4306,476 +4416,389 @@ mod tests {
     }
 
     #[cfg(feature = "slow-tests")]
-    proptest! {
-        #[test]
-        fn fetch_respects_history_invariants(
-            relation in relation_strategy(),
-            local_steps in 0u8..=3,
-            remote_steps in 0u8..=3,
-        ) {
-            let tmp = match TempDir::new() {
-                Ok(tmp) => tmp,
-                Err(e) => return Err(TestCaseError::fail(format!("tempdir: {e}"))),
-            };
-            let remote_dir = tmp.path().join("remote");
-            let local_dir = tmp.path().join("local");
-
-            let remote_repo = match Repository::init_bare(&remote_dir) {
-                Ok(repo) => repo,
-                Err(e) => return Err(TestCaseError::fail(format!("init remote: {e}"))),
-            };
-            let local_repo = match Repository::init(&local_dir) {
-                Ok(repo) => repo,
-                Err(e) => return Err(TestCaseError::fail(format!("init local: {e}"))),
-            };
-            let remote_url = match remote_dir.to_str() {
-                Some(url) => url,
-                None => return Err(TestCaseError::fail("remote path not utf8")),
-            };
-            if let Err(e) = local_repo.remote("origin", remote_url) {
-                return Err(TestCaseError::fail(format!("add remote: {e}")));
-            }
-
-            let mut local_head: Option<Oid> = None;
-            let mut remote_head: Option<Oid> = None;
-
-            match relation {
-                Relation::BothMissing => {}
-                Relation::LocalOnly => {
-                    let steps = nonzero_steps(local_steps);
-                    local_head = write_chain(&local_repo, None, steps, "local");
-                }
-                Relation::RemoteOnly => {
-                    let steps = nonzero_steps(remote_steps);
-                    remote_head = write_chain(&remote_repo, None, steps, "remote");
-                }
-                Relation::Same => {
-                    local_head = write_chain(&local_repo, None, 1, "base");
-                    push_store(&local_repo)?;
-                    remote_head = local_head;
-                }
-                Relation::LocalAhead => {
-                    local_head = write_chain(&local_repo, None, 1, "base");
-                    push_store(&local_repo)?;
-                    remote_head = local_head;
-
-                    let steps = nonzero_steps(local_steps);
-                    local_head = write_chain(&local_repo, local_head, steps, "local");
-                }
-                Relation::RemoteAhead => {
-                    local_head = write_chain(&local_repo, None, 1, "base");
-                    push_store(&local_repo)?;
-                    remote_head = local_head;
-
-                    let steps = nonzero_steps(remote_steps);
-                    remote_head = write_chain(&remote_repo, remote_head, steps, "remote");
-                }
-                Relation::Diverged => {
-                    local_head = write_chain(&local_repo, None, 1, "base");
-                    push_store(&local_repo)?;
-                    remote_head = local_head;
-
-                    let local_extra = nonzero_steps(local_steps);
-                    let remote_extra = nonzero_steps(remote_steps);
-                    local_head = write_chain(&local_repo, local_head, local_extra, "local");
-                    remote_head = write_chain(&remote_repo, remote_head, remote_extra, "remote");
-                }
-            }
-
-            let local_before = match refname_to_id_optional(&local_repo, "refs/heads/beads/store") {
-                Ok(oid) => oid,
-                Err(e) => return Err(TestCaseError::fail(format!("local before: {e}"))),
-            };
-            prop_assert_eq!(local_before, local_head);
-
-            let fetched = match SyncProcess::new(local_dir.clone()).fetch(&local_repo) {
-                Ok(result) => result,
-                Err(e) => return Err(TestCaseError::fail(format!("fetch: {e}"))),
-            };
-
-            let local_after = match refname_to_id_optional(&local_repo, "refs/heads/beads/store") {
-                Ok(oid) => oid,
-                Err(e) => return Err(TestCaseError::fail(format!("local after: {e}"))),
-            };
-            let remote_after =
-                match refname_to_id_optional(&local_repo, "refs/remotes/origin/beads/store") {
-                    Ok(oid) => oid,
-                    Err(e) => return Err(TestCaseError::fail(format!("remote tracking: {e}"))),
-                };
-
-            if let Some(remote_oid) = remote_head {
-                prop_assert_eq!(remote_after, Some(remote_oid));
-                match local_before {
-                    None => {
-                        prop_assert_eq!(local_after, Some(remote_oid));
-                    }
-                    Some(local_oid) => {
-                        if local_oid == remote_oid {
-                            prop_assert_eq!(local_after, Some(local_oid));
-                        } else {
-                            let remote_is_descendant =
-                                match local_repo.graph_descendant_of(remote_oid, local_oid) {
-                                    Ok(value) => value,
-                                    Err(e) => {
-                                        return Err(TestCaseError::fail(format!(
-                                            "descendant: {e}"
-                                        )));
-                                    }
-                                };
-                            if remote_is_descendant {
-                                prop_assert_eq!(local_after, Some(remote_oid));
-                            } else {
-                                prop_assert_eq!(local_after, Some(local_oid));
-                                let backup_ref = format!("refs/beads/backup/{}", local_oid);
-                                let backup_oid = match refname_to_id_optional(
-                                    &local_repo,
-                                    &backup_ref,
-                                ) {
-                                    Ok(oid) => oid,
-                                    Err(e) => {
-                                        return Err(TestCaseError::fail(format!(
-                                            "backup ref: {e}"
-                                        )));
-                                    }
-                                };
-                                prop_assert_eq!(backup_oid, Some(local_oid));
-                            }
-                        }
-                    }
-                }
-            } else {
-                prop_assert_eq!(remote_after, None);
-                prop_assert_eq!(local_after, local_before);
-                if let Some(local_oid) = local_before {
-                    prop_assert_eq!(fetched.phase.remote_oid, local_oid);
-                } else {
-                    prop_assert!(fetched.phase.remote_oid.is_zero());
-                }
-            }
-        }
+    struct SyncTestRepos {
+        _tmp: TempDir,
+        local_dir: PathBuf,
+        local_repo: Repository,
+        remote_repo: Repository,
     }
 
     #[cfg(feature = "slow-tests")]
-    proptest! {
-        #[test]
-        fn fetch_sequence_preserves_local_history(
-            actions in prop::collection::vec(action_strategy(), 1..=8),
-        ) {
-            let tmp = match TempDir::new() {
-                Ok(tmp) => tmp,
-                Err(e) => return Err(TestCaseError::fail(format!("tempdir: {e}"))),
-            };
-            let remote_dir = tmp.path().join("remote");
-            let local_dir = tmp.path().join("local");
-
-            let remote_repo = match Repository::init_bare(&remote_dir) {
-                Ok(repo) => repo,
-                Err(e) => return Err(TestCaseError::fail(format!("init remote: {e}"))),
-            };
-            let local_repo = match Repository::init(&local_dir) {
-                Ok(repo) => repo,
-                Err(e) => return Err(TestCaseError::fail(format!("init local: {e}"))),
-            };
-            let remote_url = match remote_dir.to_str() {
-                Some(url) => url,
-                None => return Err(TestCaseError::fail("remote path not utf8")),
-            };
-            if let Err(e) = local_repo.remote("origin", remote_url) {
-                return Err(TestCaseError::fail(format!("add remote: {e}")));
-            }
-
-            for action in actions {
-                match action {
-                    Action::LocalCommit(steps) => {
-                        let parent = match local_ref(&local_repo) {
-                            Ok(oid) => oid,
-                            Err(e) => return Err(e),
-                        };
-                        write_chain(&local_repo, parent, steps, "local");
-                    }
-                    Action::RemoteCommit(steps) => {
-                        let parent = match remote_ref(&remote_repo) {
-                            Ok(oid) => oid,
-                            Err(e) => return Err(e),
-                        };
-                        write_chain(&remote_repo, parent, steps, "remote");
-                    }
-                    Action::PushLocal => {
-                        if let Err(e) = push_store(&local_repo) {
-                            // non-fast-forward is expected sometimes; ignore and continue
-                            let _ = e;
-                        }
-                    }
-                    Action::ForcePushRemote => {
-                        let _ = write_chain(&remote_repo, None, 1, "force");
-                    }
-                    Action::Fetch => {
-                        let local_before = match local_ref(&local_repo) {
-                            Ok(oid) => oid,
-                            Err(e) => return Err(e),
-                        };
-                        let remote_before = match remote_ref(&remote_repo) {
-                            Ok(oid) => oid,
-                            Err(e) => return Err(e),
-                        };
-
-                        let fetched = match SyncProcess::new(local_dir.clone()).fetch(&local_repo) {
-                            Ok(result) => result,
-                            Err(e) => return Err(TestCaseError::fail(format!("fetch: {e}"))),
-                        };
-
-                        let local_after = match local_ref(&local_repo) {
-                            Ok(oid) => oid,
-                            Err(e) => return Err(e),
-                        };
-                        let remote_tracking = match refname_to_id_optional(
-                            &local_repo,
-                            "refs/remotes/origin/beads/store",
-                        ) {
-                            Ok(oid) => oid,
-                            Err(e) => return Err(TestCaseError::fail(format!("remote tracking: {e}"))),
-                        };
-
-                        if let Some(remote_oid) = remote_before {
-                            prop_assert_eq!(remote_tracking, Some(remote_oid));
-                            match local_before {
-                                None => {
-                                    prop_assert_eq!(local_after, Some(remote_oid));
-                                }
-                                Some(local_oid) => {
-                                    if local_oid == remote_oid {
-                                        prop_assert_eq!(local_after, Some(local_oid));
-                                    } else {
-                                        let remote_is_descendant = match local_repo
-                                            .graph_descendant_of(remote_oid, local_oid)
-                                        {
-                                            Ok(value) => value,
-                                            Err(e) => {
-                                                return Err(TestCaseError::fail(format!(
-                                                    "descendant: {e}"
-                                                )));
-                                            }
-                                        };
-                                        if remote_is_descendant {
-                                            prop_assert_eq!(local_after, Some(remote_oid));
-                                        } else {
-                                            prop_assert_eq!(local_after, Some(local_oid));
-                                            let backup_ref = format!("refs/beads/backup/{}", local_oid);
-                                            let backup_oid =
-                                                match refname_to_id_optional(&local_repo, &backup_ref) {
-                                                    Ok(oid) => oid,
-                                                    Err(e) => {
-                                                        return Err(TestCaseError::fail(format!(
-                                                            "backup ref: {e}"
-                                                        )));
-                                                    }
-                                                };
-                                            prop_assert_eq!(backup_oid, Some(local_oid));
-                                            let local_is_descendant =
-                                                match local_repo.graph_descendant_of(local_oid, remote_oid) {
-                                                    Ok(value) => value,
-                                                    Err(e) => {
-                                                        return Err(TestCaseError::fail(format!(
-                                                            "descendant: {e}"
-                                                        )));
-                                                    }
-                                                };
-                                            prop_assert!(fetched.phase.divergence.is_some() || local_is_descendant);
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            prop_assert_eq!(remote_tracking, None);
-                            prop_assert_eq!(local_after, local_before);
-                        }
-                    }
-                }
-            }
-        }
+    struct RelationFixture {
+        repos: SyncTestRepos,
+        local_head: Option<Oid>,
+        remote_head: Option<Oid>,
     }
 
     #[cfg(feature = "slow-tests")]
-    proptest! {
-        #[test]
-        fn sync_with_retry_surfaces_fetch_divergence(
-            relation in relation_strategy(),
-            local_steps in 0u8..=3,
-            remote_steps in 0u8..=3,
-        ) {
-            let tmp = match TempDir::new() {
-                Ok(tmp) => tmp,
-                Err(e) => return Err(TestCaseError::fail(format!("tempdir: {e}"))),
-            };
-            let remote_dir = tmp.path().join("remote");
-            let local_dir = tmp.path().join("local");
+    fn sync_test_repos() -> Result<SyncTestRepos, TestCaseError> {
+        let tmp = TempDir::new().map_err(|e| TestCaseError::fail(format!("tempdir: {e}")))?;
+        let remote_dir = tmp.path().join("remote");
+        let local_dir = tmp.path().join("local");
 
-            let remote_repo = match Repository::init_bare(&remote_dir) {
-                Ok(repo) => repo,
-                Err(e) => return Err(TestCaseError::fail(format!("init remote: {e}"))),
-            };
-            let local_repo = match Repository::init(&local_dir) {
-                Ok(repo) => repo,
-                Err(e) => return Err(TestCaseError::fail(format!("init local: {e}"))),
-            };
-            let remote_url = match remote_dir.to_str() {
-                Some(url) => url,
-                None => return Err(TestCaseError::fail("remote path not utf8")),
-            };
-            if let Err(e) = local_repo.remote("origin", remote_url) {
-                return Err(TestCaseError::fail(format!("add remote: {e}")));
+        let remote_repo = Repository::init_bare(&remote_dir)
+            .map_err(|e| TestCaseError::fail(format!("init remote: {e}")))?;
+        let local_repo = Repository::init(&local_dir)
+            .map_err(|e| TestCaseError::fail(format!("init local: {e}")))?;
+        let remote_url = remote_dir
+            .to_str()
+            .ok_or_else(|| TestCaseError::fail("remote path not utf8"))?;
+        local_repo
+            .remote("origin", remote_url)
+            .map_err(|e| TestCaseError::fail(format!("add remote: {e}")))?;
+
+        Ok(SyncTestRepos {
+            _tmp: tmp,
+            local_dir,
+            local_repo,
+            remote_repo,
+        })
+    }
+
+    #[cfg(feature = "slow-tests")]
+    fn setup_relation_fixture(
+        relation: Relation,
+        local_steps: u8,
+        remote_steps: u8,
+    ) -> Result<RelationFixture, TestCaseError> {
+        let repos = sync_test_repos()?;
+        let local_repo = &repos.local_repo;
+        let remote_repo = &repos.remote_repo;
+        let mut local_head = None;
+        let mut remote_head = None;
+
+        match relation {
+            Relation::BothMissing => {}
+            Relation::LocalOnly => {
+                local_head = write_chain(local_repo, None, nonzero_steps(local_steps), "local");
             }
-
-            match relation {
-                Relation::BothMissing => {}
-                Relation::LocalOnly => {
-                    let steps = nonzero_steps(local_steps);
-                    let _ = write_chain(&local_repo, None, steps, "local");
-                }
-                Relation::RemoteOnly => {
-                    let steps = nonzero_steps(remote_steps);
-                    let _ = write_chain(&remote_repo, None, steps, "remote");
-                }
-                Relation::Same => {
-                    let _ = write_chain(&local_repo, None, 1, "base");
-                    push_store(&local_repo)?;
-                }
-                Relation::LocalAhead => {
-                    let _ = write_chain(&local_repo, None, 1, "base");
-                    push_store(&local_repo)?;
-                    let parent = match local_ref(&local_repo) {
-                        Ok(oid) => oid,
-                        Err(e) => return Err(e),
-                    };
-                    let _ = write_chain(&local_repo, parent, nonzero_steps(local_steps), "local");
-                }
-                Relation::RemoteAhead => {
-                    let _ = write_chain(&local_repo, None, 1, "base");
-                    push_store(&local_repo)?;
-                    let parent = match remote_ref(&remote_repo) {
-                        Ok(oid) => oid,
-                        Err(e) => return Err(e),
-                    };
-                    let _ = write_chain(&remote_repo, parent, nonzero_steps(remote_steps), "remote");
-                }
-                Relation::Diverged => {
-                    let _ = write_chain(&local_repo, None, 1, "base");
-                    push_store(&local_repo)?;
-                    let local_parent = match local_ref(&local_repo) {
-                        Ok(oid) => oid,
-                        Err(e) => return Err(e),
-                    };
-                    let remote_parent = match remote_ref(&remote_repo) {
-                        Ok(oid) => oid,
-                        Err(e) => return Err(e),
-                    };
-                    let _ = write_chain(&local_repo, local_parent, nonzero_steps(local_steps), "local");
-                    let _ = write_chain(&remote_repo, remote_parent, nonzero_steps(remote_steps), "remote");
-                }
+            Relation::RemoteOnly => {
+                remote_head = write_chain(remote_repo, None, nonzero_steps(remote_steps), "remote");
             }
+            Relation::Same => {
+                local_head = write_chain(local_repo, None, 1, "base");
+                push_store(local_repo)?;
+                remote_head = local_head;
+            }
+            Relation::LocalAhead => {
+                local_head = write_chain(local_repo, None, 1, "base");
+                push_store(local_repo)?;
+                remote_head = local_head;
+                local_head =
+                    write_chain(local_repo, local_head, nonzero_steps(local_steps), "local");
+            }
+            Relation::RemoteAhead => {
+                local_head = write_chain(local_repo, None, 1, "base");
+                push_store(local_repo)?;
+                remote_head = local_head;
+                remote_head = write_chain(
+                    remote_repo,
+                    remote_head,
+                    nonzero_steps(remote_steps),
+                    "remote",
+                );
+            }
+            Relation::Diverged => {
+                local_head = write_chain(local_repo, None, 1, "base");
+                push_store(local_repo)?;
+                remote_head = local_head;
+                local_head =
+                    write_chain(local_repo, local_head, nonzero_steps(local_steps), "local");
+                remote_head = write_chain(
+                    remote_repo,
+                    remote_head,
+                    nonzero_steps(remote_steps),
+                    "remote",
+                );
+            }
+        }
 
-            let fetched = match SyncProcess::new(local_dir.clone()).fetch(&local_repo) {
-                Ok(result) => result,
-                Err(e) => return Err(TestCaseError::fail(format!("fetch: {e}"))),
-            };
+        Ok(RelationFixture {
+            repos,
+            local_head,
+            remote_head,
+        })
+    }
 
-            let expected_diverged = fetched.phase.divergence.is_some();
-            let local_after_fetch = match local_ref(&local_repo) {
-                Ok(oid) => oid,
-                Err(e) => return Err(e),
-            };
-            let remote_after_fetch = match refname_to_id_optional(
-                &local_repo,
+    #[cfg(feature = "slow-tests")]
+    fn seed_remote_tracking(local_repo: &Repository, remote_oid: Oid) -> Result<(), TestCaseError> {
+        local_repo
+            .reference(
                 "refs/remotes/origin/beads/store",
-            ) {
-                Ok(oid) => oid,
-                Err(e) => return Err(TestCaseError::fail(format!("remote tracking: {e}"))),
-            };
+                remote_oid,
+                true,
+                "seed remote tracking ref for fetch test",
+            )
+            .map(|_| ())
+            .map_err(|e| TestCaseError::fail(format!("seed remote tracking: {e}")))
+    }
 
-            let outcome = match sync_with_retry(
-                &local_repo,
-                &local_dir,
-                &CanonicalState::new(),
-                1,
-            ) {
-                Ok(outcome) => outcome,
-                Err(e) => return Err(TestCaseError::fail(format!("sync_with_retry: {e}"))),
-            };
+    #[cfg(feature = "slow-tests")]
+    fn run_fetch_respects_history_invariants_case(
+        relation: Relation,
+        local_steps: u8,
+        remote_steps: u8,
+    ) -> Result<(), TestCaseError> {
+        let fixture = setup_relation_fixture(relation, local_steps, remote_steps)?;
+        let local_repo = &fixture.repos.local_repo;
+        let local_before = refname_to_id_optional(local_repo, "refs/heads/beads/store")
+            .map_err(|e| TestCaseError::fail(format!("local before: {e}")))?;
+        prop_assert_eq!(local_before, fixture.local_head);
 
-            prop_assert_eq!(outcome.divergence.is_some(), expected_diverged);
+        let fetched = SyncProcess::new(fixture.repos.local_dir.clone())
+            .fetch(local_repo)
+            .map_err(|e| TestCaseError::fail(format!("fetch: {e}")))?;
 
-            if let (Some(local_oid), Some(remote_oid)) = (local_after_fetch, remote_after_fetch) {
-                let remote_is_descendant = if remote_oid == local_oid {
-                    true
-                } else {
-                    match local_repo.graph_descendant_of(remote_oid, local_oid) {
-                        Ok(value) => value,
-                        Err(e) => return Err(TestCaseError::fail(format!("descendant: {e}"))),
+        let local_after = refname_to_id_optional(local_repo, "refs/heads/beads/store")
+            .map_err(|e| TestCaseError::fail(format!("local after: {e}")))?;
+        let remote_after = refname_to_id_optional(local_repo, "refs/remotes/origin/beads/store")
+            .map_err(|e| TestCaseError::fail(format!("remote tracking: {e}")))?;
+
+        if let Some(remote_oid) = fixture.remote_head {
+            prop_assert_eq!(remote_after, Some(remote_oid));
+            match local_before {
+                None => {
+                    prop_assert_eq!(local_after, Some(remote_oid));
+                }
+                Some(local_oid) => {
+                    if local_oid == remote_oid {
+                        prop_assert_eq!(local_after, Some(local_oid));
+                    } else if local_repo
+                        .graph_descendant_of(remote_oid, local_oid)
+                        .map_err(|e| TestCaseError::fail(format!("descendant: {e}")))?
+                    {
+                        prop_assert_eq!(local_after, Some(remote_oid));
+                    } else {
+                        prop_assert_eq!(local_after, Some(local_oid));
+                        let backup_ref = format!("refs/beads/backup/{local_oid}");
+                        let backup_oid = refname_to_id_optional(local_repo, &backup_ref)
+                            .map_err(|e| TestCaseError::fail(format!("backup ref: {e}")))?;
+                        prop_assert_eq!(backup_oid, Some(local_oid));
                     }
-                };
-                if !remote_is_descendant {
-                    let backup_ref = format!("refs/beads/backup/{}", local_oid);
-                    let backup_oid = match refname_to_id_optional(&local_repo, &backup_ref) {
-                        Ok(oid) => oid,
-                        Err(e) => return Err(TestCaseError::fail(format!("backup ref: {e}"))),
-                    };
-                    prop_assert_eq!(backup_oid, Some(local_oid));
+                }
+            }
+        } else {
+            prop_assert_eq!(remote_after, None);
+            prop_assert_eq!(local_after, local_before);
+            if let Some(local_oid) = local_before {
+                prop_assert_eq!(fetched.phase.remote_oid, local_oid);
+            } else {
+                prop_assert!(fetched.phase.remote_oid.is_zero());
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "slow-tests")]
+    #[test]
+    fn fetch_respects_history_invariants() {
+        for relation in relation_cases() {
+            for local_steps in 0u8..=3 {
+                for remote_steps in 0u8..=3 {
+                    run_fetch_respects_history_invariants_case(
+                        relation,
+                        local_steps,
+                        remote_steps,
+                    )
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "fetch_respects_history_invariants failed for relation={relation:?} local_steps={local_steps} remote_steps={remote_steps}: {err:?}"
+                        )
+                    });
                 }
             }
         }
     }
 
     #[cfg(feature = "slow-tests")]
-    proptest! {
-        #[test]
-        fn fetch_detects_force_push(rewrite_steps in 1u8..=3) {
-            let tmp = match TempDir::new() {
-                Ok(tmp) => tmp,
-                Err(e) => return Err(TestCaseError::fail(format!("tempdir: {e}"))),
-            };
-            let remote_dir = tmp.path().join("remote");
-            let local_dir = tmp.path().join("local");
+    fn run_fetch_sequence_preserves_local_history_case(
+        actions: &[Action],
+    ) -> Result<(), TestCaseError> {
+        let repos = sync_test_repos()?;
+        let remote_repo = &repos.remote_repo;
+        let local_repo = &repos.local_repo;
+        let local_dir = repos.local_dir.clone();
 
-            let remote_repo = match Repository::init_bare(&remote_dir) {
-                Ok(repo) => repo,
-                Err(e) => return Err(TestCaseError::fail(format!("init remote: {e}"))),
-            };
-            let local_repo = match Repository::init(&local_dir) {
-                Ok(repo) => repo,
-                Err(e) => return Err(TestCaseError::fail(format!("init local: {e}"))),
-            };
-            let remote_url = match remote_dir.to_str() {
-                Some(url) => url,
-                None => return Err(TestCaseError::fail("remote path not utf8")),
-            };
-            if let Err(e) = local_repo.remote("origin", remote_url) {
-                return Err(TestCaseError::fail(format!("add remote: {e}")));
+        for action in actions {
+            match action {
+                Action::LocalCommit(steps) => {
+                    let parent = local_ref(local_repo)?;
+                    write_chain(local_repo, parent, *steps, "local");
+                }
+                Action::RemoteCommit(steps) => {
+                    let parent = remote_ref(remote_repo)?;
+                    write_chain(remote_repo, parent, *steps, "remote");
+                }
+                Action::PushLocal => {
+                    if let Err(err) = push_store(local_repo) {
+                        let _ = err;
+                    }
+                }
+                Action::ForcePushRemote => {
+                    let _ = write_chain(remote_repo, None, 1, "force");
+                }
+                Action::Fetch => {
+                    let local_before = local_ref(local_repo)?;
+                    let remote_before = remote_ref(remote_repo)?;
+
+                    let fetched = SyncProcess::new(local_dir.clone())
+                        .fetch(local_repo)
+                        .map_err(|e| TestCaseError::fail(format!("fetch: {e}")))?;
+
+                    let local_after = local_ref(local_repo)?;
+                    let remote_tracking =
+                        refname_to_id_optional(local_repo, "refs/remotes/origin/beads/store")
+                            .map_err(|e| TestCaseError::fail(format!("remote tracking: {e}")))?;
+
+                    if let Some(remote_oid) = remote_before {
+                        prop_assert_eq!(remote_tracking, Some(remote_oid));
+                        match local_before {
+                            None => {
+                                prop_assert_eq!(local_after, Some(remote_oid));
+                            }
+                            Some(local_oid) => {
+                                if local_oid == remote_oid {
+                                    prop_assert_eq!(local_after, Some(local_oid));
+                                } else {
+                                    let remote_is_descendant = local_repo
+                                        .graph_descendant_of(remote_oid, local_oid)
+                                        .map_err(|e| {
+                                            TestCaseError::fail(format!("descendant: {e}"))
+                                        })?;
+                                    if remote_is_descendant {
+                                        prop_assert_eq!(local_after, Some(remote_oid));
+                                    } else {
+                                        prop_assert_eq!(local_after, Some(local_oid));
+                                        let backup_ref = format!("refs/beads/backup/{local_oid}");
+                                        let backup_oid =
+                                            refname_to_id_optional(local_repo, &backup_ref)
+                                                .map_err(|e| {
+                                                    TestCaseError::fail(format!("backup ref: {e}"))
+                                                })?;
+                                        prop_assert_eq!(backup_oid, Some(local_oid));
+                                        let local_is_descendant = local_repo
+                                            .graph_descendant_of(local_oid, remote_oid)
+                                            .map_err(|e| {
+                                                TestCaseError::fail(format!("descendant: {e}"))
+                                            })?;
+                                        prop_assert!(
+                                            fetched.phase.divergence.is_some()
+                                                || local_is_descendant
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        prop_assert_eq!(remote_tracking, None);
+                        prop_assert_eq!(local_after, local_before);
+                    }
+                }
             }
+        }
+        Ok(())
+    }
 
-            let base = write_store_commit(&local_repo, None, "base");
-            push_store(&local_repo)?;
-            let _ = SyncProcess::new(local_dir.clone()).fetch(&local_repo);
-            let local_oid = write_store_commit(&local_repo, Some(base), "local");
-            let _ = write_chain(&remote_repo, None, rewrite_steps, "force");
+    #[cfg(feature = "slow-tests")]
+    #[test]
+    fn fetch_sequence_preserves_local_history() {
+        for (name, actions) in fetch_sequence_cases() {
+            run_fetch_sequence_preserves_local_history_case(&actions).unwrap_or_else(|err| {
+                panic!("fetch_sequence_preserves_local_history failed for {name}: {err:?}")
+            });
+        }
+    }
 
-            let fetched = match SyncProcess::new(local_dir.clone()).fetch(&local_repo) {
-                Ok(result) => result,
-                Err(e) => return Err(TestCaseError::fail(format!("fetch: {e}"))),
-            };
+    #[cfg(feature = "slow-tests")]
+    fn run_sync_with_retry_surfaces_fetch_divergence_case(
+        relation: Relation,
+        local_steps: u8,
+        remote_steps: u8,
+    ) -> Result<(), TestCaseError> {
+        let fixture = setup_relation_fixture(relation, local_steps, remote_steps)?;
+        let local_repo = &fixture.repos.local_repo;
+        let expected_diverged = matches!(relation, Relation::Diverged);
 
-            prop_assert!(fetched.phase.force_push.is_some());
-            let local_after = match local_ref(&local_repo) {
-                Ok(oid) => oid,
-                Err(e) => return Err(e),
-            };
-            prop_assert_eq!(local_after, Some(local_oid));
+        let outcome = sync_with_retry(
+            local_repo,
+            &fixture.repos.local_dir,
+            &CanonicalState::new(),
+            1,
+        )
+        .map_err(|e| TestCaseError::fail(format!("sync_with_retry: {e}")))?;
 
-            let backup_ref = format!("refs/beads/backup/{}", local_oid);
-            let backup_oid = match refname_to_id_optional(&local_repo, &backup_ref) {
-                Ok(oid) => oid,
-                Err(e) => return Err(TestCaseError::fail(format!("backup ref: {e}"))),
-            };
-            prop_assert_eq!(backup_oid, Some(local_oid));
+        prop_assert_eq!(outcome.divergence.is_some(), expected_diverged);
+
+        let local_after = local_ref(local_repo)?;
+        let remote_after = refname_to_id_optional(local_repo, "refs/remotes/origin/beads/store")
+            .map_err(|e| TestCaseError::fail(format!("remote tracking: {e}")))?;
+        if let (Some(local_oid), Some(remote_oid)) = (local_after, remote_after) {
+            let remote_is_descendant = remote_oid == local_oid
+                || local_repo
+                    .graph_descendant_of(remote_oid, local_oid)
+                    .map_err(|e| TestCaseError::fail(format!("descendant: {e}")))?;
+            if !remote_is_descendant {
+                let backup_ref = format!("refs/beads/backup/{local_oid}");
+                let backup_oid = refname_to_id_optional(local_repo, &backup_ref)
+                    .map_err(|e| TestCaseError::fail(format!("backup ref: {e}")))?;
+                prop_assert_eq!(backup_oid, Some(local_oid));
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "slow-tests")]
+    #[test]
+    fn sync_with_retry_surfaces_fetch_divergence() {
+        for relation in relation_cases() {
+            for local_steps in 0u8..=3 {
+                for remote_steps in 0u8..=3 {
+                    run_sync_with_retry_surfaces_fetch_divergence_case(
+                        relation,
+                        local_steps,
+                        remote_steps,
+                    )
+                    .unwrap_or_else(|err| {
+                        panic!(
+                            "sync_with_retry_surfaces_fetch_divergence failed for relation={relation:?} local_steps={local_steps} remote_steps={remote_steps}: {err:?}"
+                        )
+                    });
+                }
+            }
+        }
+    }
+
+    #[cfg(feature = "slow-tests")]
+    fn run_fetch_detects_force_push_case(rewrite_steps: u8) -> Result<(), TestCaseError> {
+        let repos = sync_test_repos()?;
+        let base = write_store_commit(&repos.local_repo, None, "base");
+        push_store(&repos.local_repo)?;
+        seed_remote_tracking(&repos.local_repo, base)?;
+        let local_oid = write_store_commit(&repos.local_repo, Some(base), "local");
+        let _ = write_chain(&repos.remote_repo, None, rewrite_steps, "force");
+
+        let fetched = SyncProcess::new(repos.local_dir.clone())
+            .fetch(&repos.local_repo)
+            .map_err(|e| TestCaseError::fail(format!("fetch: {e}")))?;
+
+        prop_assert!(fetched.phase.force_push.is_some());
+        let local_after = local_ref(&repos.local_repo)?;
+        prop_assert_eq!(local_after, Some(local_oid));
+
+        let backup_ref = format!("refs/beads/backup/{local_oid}");
+        let backup_oid = refname_to_id_optional(&repos.local_repo, &backup_ref)
+            .map_err(|e| TestCaseError::fail(format!("backup ref: {e}")))?;
+        prop_assert_eq!(backup_oid, Some(local_oid));
+        Ok(())
+    }
+
+    #[cfg(feature = "slow-tests")]
+    #[test]
+    fn fetch_detects_force_push() {
+        for rewrite_steps in 1u8..=3 {
+            run_fetch_detects_force_push_case(rewrite_steps).unwrap_or_else(|err| {
+                panic!("fetch_detects_force_push failed for rewrite_steps={rewrite_steps}: {err:?}")
+            });
         }
     }
 

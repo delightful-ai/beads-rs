@@ -131,11 +131,11 @@ Shared integration fixtures write timing events when `BD_TEST_TIMING_DIR` is set
 
 ### Current Baseline
 
-Fast-tier baseline artifact:
+Pre-fix baseline artifact:
 
 - `tmp/perf/tests-20260314-104053`
 
-Current receipts from that run:
+What that baseline showed:
 
 - fast profile exit code: `100`
 - blocking failures: `cli::migration::test_migrate_fixture_related_divergence_merges_realistic_fixtures` and `cli::migration::test_migrate_fixture_unrelated_divergence_requires_force`
@@ -143,6 +143,44 @@ Current receipts from that run:
 - next hottest suite: `beads-git::beads_git` at about `65.7s`
 - hottest test: `daemon::repl_e2e::repl_checkpoint_bootstrap_under_churn` at about `17.8s`
 - hottest instrumented setup phase: `fixture.repl_rig.new` with `24.4s` total across the run
+
+Current passing profiling artifact:
+
+- `tmp/perf/tests-20260314-122418`
+
+Current receipts from that run:
+
+- fast profile exit code: `0`
+- slow profile exit code: `0`
+- profiling threads: `2` (`PROFILE_TEST_THREADS=2`)
+- fast hottest suite: `beads-rs::integration` at about `118.0s`
+- slow hottest suite: `beads-rs::integration` at about `147.2s`
+- hottest fast test: `daemon::repl_e2e::repl_daemon_replicated_fsync_timeout_receipt` at about `4.4s`
+- hottest slow test: `daemon::repl_e2e::repl_daemon_replicated_fsync_receipt` at about `31.1s`
+- hottest common setup phase after consolidation: `fixture.repl_rig.new` at about `7.0s` fast / `6.9s` slow total across the run
+- the prior flaky restart/tailnet tests now pass inside the profiling run: `repl_daemon_crash_restart_tailnet_roundtrip`, `repl_daemon_pathological_tailnet_roundtrip`, `test_crash_recovery_replays_wal`, and the lifecycle restart tests
+
+Warm runner burn-in receipts:
+
+- `tmp/perf/burnin-20260314-121518`
+- all six iterations green
+- fast tier wall time: `63.865s`, `42.515s`, `41.896s`
+- slow tier wall time: `45.980s`, `42.504s`, `42.185s`
+- acceptance targets met on warm runs: fast tier `<60s`, slow tier `<120s`
+
+Stability notes behind the current receipts:
+
+- `.config/nextest.toml` now caps the shared runner at `test-threads = 4`
+- tailnet fault-injection tests are fenced into the `tailnet-fault-injection` nextest group so proxy-heavy `repl_e2e` cases do not oversubscribe the fast tier
+- `scripts/profile-tests.sh` runs with `PROFILE_TEST_THREADS=2` by default for reproducible timing artifacts
+- restart-tailnet readiness now requires fresh post-restart handshakes instead of trusting persisted pre-crash liveness rows
+- test fixtures now share common wait/runtime helpers instead of repeating ad-hoc socket/meta/store polling
+
+Latest hostile-env runner receipts:
+
+- `env BD_CONFIG_DIR=/tmp/codex-ambient-config BD_RUNTIME_DIR=/tmp/codex-ambient-runtime XDG_CONFIG_HOME=/tmp/codex-ambient-xdg GIT_DIR=/tmp/codex-ambient-git-dir GIT_WORK_TREE=/tmp/codex-ambient-git-worktree cargo xtest --no-fail-fast --status-level none --final-status-level slow` -> `42.099s`
+- `env BD_CONFIG_DIR=/tmp/codex-ambient-config BD_RUNTIME_DIR=/tmp/codex-ambient-runtime XDG_CONFIG_HOME=/tmp/codex-ambient-xdg GIT_DIR=/tmp/codex-ambient-git-dir GIT_WORK_TREE=/tmp/codex-ambient-git-worktree cargo nextest run --profile slow --workspace --all-features --features slow-tests --no-fail-fast --status-level none --final-status-level slow` -> `41.689s`
+- the remaining tailnet nextest flake was fixed by combining port-race removal in `ReplRig`/`tailnet_proxy` with the explicit tailnet nextest group
 
 Tracker linkage:
 

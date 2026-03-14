@@ -16,6 +16,13 @@ use crate::runtime::wal::WalIndex;
 
 const REPL_RUNTIME_RETRY_AFTER_MS: u64 = 100;
 
+struct ReplicationRuntimeInputs {
+    runtime_version: crate::runtime::store::runtime::ReplicationRuntimeVersion,
+    session_store: SharedSessionStore<ReplSessionStore>,
+    manager_config: ReplicationManagerConfig,
+    server_config: ReplicationServerConfig,
+}
+
 impl Daemon {
     pub(in crate::runtime) fn replication_config(&self) -> &crate::config::ReplicationConfig {
         &self.replication
@@ -41,27 +48,17 @@ impl Daemon {
             .collect()
     }
 
-    pub(super) fn ensure_replication_runtime(&mut self, store_id: StoreId) -> Result<(), OpError> {
-        if let Some(session) = self.store_sessions.get_mut(&store_id) {
-            let current_runtime_version = session.runtime().replication_runtime_version();
-            if let Some(handles) = session.take_repl_handles() {
-                if handles.runtime_version() == current_runtime_version {
-                    session.set_repl_handles(handles);
-                    return Ok(());
-                }
-                handles.shutdown();
-            }
-        } else {
-            return Ok(());
-        }
-
+    fn build_replication_runtime_inputs(
+        &self,
+        store_id: StoreId,
+    ) -> Result<Option<ReplicationRuntimeInputs>, OpError> {
         let Some(ingest_tx) = self.repl_ingest_tx.clone() else {
             tracing::warn!("replication ingest channel not initialized");
-            return Ok(());
+            return Ok(None);
         };
 
         let Some(session) = self.store_sessions.get(&store_id) else {
-            return Ok(());
+            return Ok(None);
         };
         let store = session.runtime();
         let runtime_version = store.replication_runtime_version();
@@ -82,7 +79,6 @@ impl Daemon {
         let roster = load_replica_roster(self.layout(), store_id)
             .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
         let peers = self.replication_peers();
-
         let manager_config = ReplicationManagerConfig {
             local_store: store.meta.identity,
             local_replica_id: store.meta.replica_id,
@@ -96,7 +92,6 @@ impl Daemon {
             limits: self.limits.clone(),
             backoff: replication_backoff(&self.replication),
         };
-        let manager_handle = ReplicationManager::new(session_store.clone(), manager_config).start();
 
         let max_connections = if roster.is_some() {
             None
@@ -117,17 +112,53 @@ impl Daemon {
             max_connections,
         };
 
-        let server_handle = match ReplicationServer::new(session_store, server_config).start() {
+        Ok(Some(ReplicationRuntimeInputs {
+            runtime_version,
+            session_store,
+            manager_config,
+            server_config,
+        }))
+    }
+
+    fn start_replication_server(
+        &self,
+        session_store: SharedSessionStore<ReplSessionStore>,
+        server_config: ReplicationServerConfig,
+    ) -> Option<crate::runtime::repl::ReplicationServerHandle> {
+        match ReplicationServer::new(session_store, server_config).start() {
             Ok(handle) => Some(handle),
             Err(err) => {
                 tracing::warn!("replication server failed to start: {err}");
                 None
             }
+        }
+    }
+
+    pub(super) fn ensure_replication_runtime(&mut self, store_id: StoreId) -> Result<(), OpError> {
+        if let Some(session) = self.store_sessions.get_mut(&store_id) {
+            let current_runtime_version = session.runtime().replication_runtime_version();
+            if let Some(handles) = session.take_repl_handles() {
+                if handles.runtime_version() == current_runtime_version {
+                    session.set_repl_handles(handles);
+                    return Ok(());
+                }
+                handles.shutdown();
+            }
+        } else {
+            return Ok(());
+        }
+
+        let Some(inputs) = self.build_replication_runtime_inputs(store_id)? else {
+            return Ok(());
         };
+        let manager_handle =
+            ReplicationManager::new(inputs.session_store.clone(), inputs.manager_config).start();
+        let server_handle =
+            self.start_replication_server(inputs.session_store, inputs.server_config);
 
         if let Some(session) = self.store_sessions.get_mut(&store_id) {
             session.set_repl_handles(ReplicationHandles {
-                runtime_version,
+                runtime_version: inputs.runtime_version,
                 manager: Some(manager_handle),
                 server: server_handle,
             });
@@ -282,6 +313,39 @@ impl Daemon {
             handles.shutdown();
         }
         self.ensure_replication_runtime(store_id)
+    }
+
+    pub(crate) fn reload_replication_peers(&mut self, store_id: StoreId) -> Result<(), OpError> {
+        let preserved_server = if let Some(session) = self.store_sessions.get_mut(&store_id) {
+            if let Some(mut handles) = session.take_repl_handles() {
+                if let Some(manager) = handles.manager.take() {
+                    manager.shutdown();
+                }
+                handles.server.take()
+            } else {
+                None
+            }
+        } else {
+            return Ok(());
+        };
+
+        let Some(inputs) = self.build_replication_runtime_inputs(store_id)? else {
+            return Ok(());
+        };
+        let manager_handle =
+            ReplicationManager::new(inputs.session_store.clone(), inputs.manager_config).start();
+        let server_handle = preserved_server
+            .or_else(|| self.start_replication_server(inputs.session_store, inputs.server_config));
+
+        if let Some(session) = self.store_sessions.get_mut(&store_id) {
+            session.set_repl_handles(ReplicationHandles {
+                runtime_version: inputs.runtime_version,
+                manager: Some(manager_handle),
+                server: server_handle,
+            });
+        }
+
+        Ok(())
     }
 
     pub(crate) fn reload_replication_config(&mut self, repo_path: &Path) -> Result<(), OpError> {

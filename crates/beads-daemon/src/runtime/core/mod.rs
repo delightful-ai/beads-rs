@@ -191,6 +191,12 @@ impl ReplicationHandles {
         self.runtime_version
     }
 
+    fn server_local_addr(&self) -> Option<String> {
+        self.server
+            .as_ref()
+            .map(|handle| handle.local_addr().to_string())
+    }
+
     fn shutdown(self) {
         if let Some(handle) = self.manager {
             handle.shutdown();
@@ -204,6 +210,13 @@ impl ReplicationHandles {
 impl Daemon {
     pub(crate) fn layout(&self) -> &DaemonLayout {
         &self.layout
+    }
+
+    pub(crate) fn replication_server_local_addr(&self, store_id: StoreId) -> Option<String> {
+        self.store_sessions
+            .get(&store_id)
+            .and_then(StoreSession::repl_handles)
+            .and_then(ReplicationHandles::server_local_addr)
     }
 
     /// Create a daemon with default runtime config and current layout wiring.

@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::OnceLock;
 
 use git2::Repository;
@@ -7,7 +7,17 @@ use tempfile::Builder;
 
 use super::timing;
 
-static TEMPLATE_REPO_PATH: OnceLock<Result<PathBuf, String>> = OnceLock::new();
+static TEMPLATE_REPO: OnceLock<Result<TemplateRepo, String>> = OnceLock::new();
+
+struct TemplateRepo {
+    dir: tempfile::TempDir,
+}
+
+impl TemplateRepo {
+    fn path(&self) -> &Path {
+        self.dir.path()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BranchPresence {
@@ -30,8 +40,8 @@ pub fn init_bare_repo(path: &Path) -> Result<(), String> {
 
 pub fn init_repo(path: &Path) -> Result<Repository, String> {
     let _phase = timing::scoped_phase_with_context("fixture.git.init_repo", path.display());
-    let template = template_repo_path()?;
-    copy_dir_all(template, path)?;
+    let template = template_repo()?;
+    copy_dir_all(template.path(), path)?;
     Repository::open(path).map_err(|err| format!("open repo failed for {path:?}: {err}"))
 }
 
@@ -75,19 +85,18 @@ fn add_origin_remote(repo: &Repository, remote_dir: &Path) -> Result<(), String>
     Ok(())
 }
 
-fn template_repo_path() -> Result<&'static Path, String> {
-    match TEMPLATE_REPO_PATH.get_or_init(|| {
+fn template_repo() -> Result<&'static TemplateRepo, String> {
+    match TEMPLATE_REPO.get_or_init(|| {
         let dir = Builder::new()
             .prefix("beads-git-template")
             .tempdir()
             .map_err(|err| format!("create template dir failed: {err}"))?;
-        let path = dir.keep();
-        let repo = Repository::init(&path)
-            .map_err(|err| format!("git init failed for {path:?}: {err}"))?;
+        let repo = Repository::init(dir.path())
+            .map_err(|err| format!("git init failed for {:?}: {err}", dir.path()))?;
         configure_test_repo(&repo)?;
-        Ok(path)
+        Ok(TemplateRepo { dir })
     }) {
-        Ok(path) => Ok(path.as_path()),
+        Ok(template) => Ok(template),
         Err(err) => Err(err.clone()),
     }
 }
@@ -119,4 +128,30 @@ fn copy_dir_all(src: &Path, dst: &Path) -> Result<(), String> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{init_repo, template_repo};
+
+    #[test]
+    fn template_repo_is_cached() {
+        let left = template_repo().expect("template repo").path().to_path_buf();
+        let right = template_repo().expect("template repo").path().to_path_buf();
+
+        assert_eq!(left, right);
+    }
+
+    #[test]
+    fn init_repo_copies_configured_identity() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let repo = init_repo(dir.path()).expect("init repo");
+        let cfg = repo.config().expect("repo config");
+
+        assert_eq!(cfg.get_string("user.name").expect("user.name"), "Test");
+        assert_eq!(
+            cfg.get_string("user.email").expect("user.email"),
+            "test@test.com"
+        );
+    }
 }

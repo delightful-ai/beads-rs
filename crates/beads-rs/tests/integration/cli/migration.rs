@@ -7,10 +7,10 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::fixtures::daemon_runtime::shutdown_daemon;
-use crate::fixtures::git::{init_bare_repo, init_repo, init_repo_with_origin};
-use crate::fixtures::legacy_store::{fetch_remote_store_ref, fixture};
-use assert_cmd::Command;
+use crate::fixtures::bd_runtime::BdRuntimeRepo;
+use crate::fixtures::legacy_store::{
+    fetch_remote_store_ref, fixture, wait_for_fetched_remote_store_ref,
+};
 use beads_core::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey, DepKind,
     Lww, Priority, Stamp, Workflow, WriteStamp,
@@ -19,81 +19,8 @@ use beads_git::sync::migrate_store_ref_to_v1_with_before_push_for_testing;
 use beads_git::wire::{StoreChecksums, serialize_meta};
 use git2::{ObjectType, Oid, Repository, Signature, Time};
 use predicates::prelude::*;
-use tempfile::TempDir;
 
-fn data_dir_for_runtime(runtime_dir: &std::path::Path) -> std::path::PathBuf {
-    let dir = runtime_dir.join("data");
-    fs::create_dir_all(&dir).expect("failed to create test data dir");
-    dir
-}
-
-/// Test fixture: working repo + bare remote.
-struct TestRepo {
-    work_dir: TempDir,
-    #[allow(dead_code)]
-    remote_dir: TempDir,
-    runtime_dir: TempDir,
-    data_dir: std::path::PathBuf,
-}
-
-impl TestRepo {
-    fn new() -> Self {
-        let remote_dir = TempDir::new().expect("failed to create remote dir");
-        init_bare_repo(remote_dir.path()).expect("failed to init bare repo");
-
-        let work_dir = TempDir::new().expect("failed to create work dir");
-
-        init_repo_with_origin(work_dir.path(), remote_dir.path())
-            .expect("failed to init repo with origin");
-
-        let runtime_dir = TempDir::new().expect("failed to create runtime dir");
-        let data_dir = data_dir_for_runtime(runtime_dir.path());
-
-        Self {
-            work_dir,
-            remote_dir,
-            runtime_dir,
-            data_dir,
-        }
-    }
-
-    fn new_local_only() -> Self {
-        let remote_dir = TempDir::new().expect("failed to create remote dir");
-        let work_dir = TempDir::new().expect("failed to create work dir");
-        init_repo(work_dir.path()).expect("failed to init local-only repo");
-
-        let runtime_dir = TempDir::new().expect("failed to create runtime dir");
-        let data_dir = data_dir_for_runtime(runtime_dir.path());
-
-        Self {
-            work_dir,
-            remote_dir,
-            runtime_dir,
-            data_dir,
-        }
-    }
-
-    fn path(&self) -> &std::path::Path {
-        self.work_dir.path()
-    }
-
-    fn bd(&self) -> Command {
-        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
-        cmd.current_dir(self.path());
-        cmd.env("XDG_RUNTIME_DIR", self.runtime_dir.path());
-        cmd.env("BD_DATA_DIR", &self.data_dir);
-        cmd.env("BD_NO_AUTO_UPGRADE", "1");
-        cmd.env("BD_TESTING", "1");
-        cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
-        cmd
-    }
-}
-
-impl Drop for TestRepo {
-    fn drop(&mut self) {
-        shutdown_daemon(self.runtime_dir.path());
-    }
-}
+type TestRepo = BdRuntimeRepo;
 
 /// Sample Go beads JSONL export with various issue types.
 fn sample_go_export() -> &'static str {
@@ -270,6 +197,12 @@ fn backup_ref_oid(repo_path: &Path, oid: Oid) -> Option<Oid> {
     store_ref_oid(repo_path, &format!("refs/beads/backup/{oid}"))
 }
 
+fn set_ref_target(repo_path: &Path, refname: &str, oid: Oid, message: &str) {
+    let repo = Repository::open(repo_path).expect("open repo");
+    repo.reference(refname, oid, true, message)
+        .expect("update ref");
+}
+
 fn backup_ref_targets(repo_path: &Path) -> BTreeSet<Oid> {
     let repo = Repository::open(repo_path).expect("open repo");
     let refs = repo
@@ -296,6 +229,26 @@ fn create_detached_store_commit(repo_path: &Path, time_secs: i64, message: &str)
         Signature::new("test", "test@example.com", &Time::new(time_secs, 0)).expect("signature");
     repo.commit(None, &sig, &sig, message, &tree, &[])
         .expect("detached commit")
+}
+
+fn rewrite_store_ref_commit(repo_path: &Path, refname: &str, time_secs: i64, message: &str) -> Oid {
+    let repo = Repository::open(repo_path).expect("open repo");
+    let store_oid = repo.refname_to_id(refname).expect("store ref");
+    let commit = repo.find_commit(store_oid).expect("store commit");
+    let tree = commit.tree().expect("store tree");
+    let mut parents = Vec::new();
+    for idx in 0..commit.parent_count() {
+        parents.push(commit.parent(idx).expect("parent commit"));
+    }
+    let parent_refs: Vec<_> = parents.iter().collect();
+    let sig =
+        Signature::new("test", "test@example.com", &Time::new(time_secs, 0)).expect("signature");
+    let rewritten_oid = repo
+        .commit(None, &sig, &sig, message, &tree, &parent_refs)
+        .expect("rewrite store commit");
+    repo.reference(refname, rewritten_oid, true, "rewrite store ref")
+        .expect("rewrite store ref");
+    rewritten_oid
 }
 
 fn create_backup_ref(repo_path: &Path, oid: Oid) {
@@ -2037,6 +1990,12 @@ fn test_migrate_fixture_related_divergence_merges_realistic_fixtures() {
     let remote_oid =
         fixture("rich_workflow_peer").install_with_parent(repo.remote_dir.path(), Some(base_oid));
     let remote_before = store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store");
+    let remote_tracking_oid = fetch_remote_store_ref(repo.path());
+    assert_eq!(
+        remote_tracking_oid,
+        remote_before.expect("remote store ref"),
+        "test setup must seed the remote-tracking ref before exercising no-push divergence"
+    );
 
     repo.bd()
         .args(["migrate", "to", "1", "--no-push", "--json"])
@@ -2089,6 +2048,12 @@ fn test_migrate_fixture_unrelated_divergence_requires_force() {
     let local_before = fixture("rich_workflow_peer").install(repo.path());
     let remote_oid = fixture("tombstone_deleted_dep").install(repo.remote_dir.path());
     let remote_before = store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store");
+    let remote_tracking_oid = fetch_remote_store_ref(repo.path());
+    assert_eq!(
+        remote_tracking_oid,
+        remote_before.expect("remote store ref"),
+        "test setup must seed the remote-tracking ref before exercising no-push divergence"
+    );
 
     repo.bd()
         .args(["migrate", "to", "1", "--dry-run", "--json"])
@@ -2164,7 +2129,7 @@ fn test_migrate_retryable_push_race_recomputes_and_preserves_backup_ref() {
     push_store_ref(repo.path());
 
     let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
-    let winner_oid = beads_git::sync::migrate_store_ref_to_v1(
+    beads_git::sync::migrate_store_ref_to_v1(
         &remote_repo,
         repo.remote_dir.path(),
         false,
@@ -2175,16 +2140,19 @@ fn test_migrate_retryable_push_race_recomputes_and_preserves_backup_ref() {
     .expect("winner migration")
     .commit_oid
     .expect("winner commit oid");
-    remote_repo
-        .reference(
-            "refs/heads/beads/store",
-            base_oid,
-            true,
-            "reset remote to base",
-        )
-        .expect("reset remote store ref");
-    std::thread::sleep(Duration::from_secs(1));
-    fetch_remote_store_ref(repo.path());
+    let winner_oid = rewrite_store_ref_commit(
+        repo.remote_dir.path(),
+        "refs/heads/beads/store",
+        1_900_000_001,
+        "simulate distinct remote winner",
+    );
+    set_ref_target(
+        repo.remote_dir.path(),
+        "refs/heads/beads/store",
+        base_oid,
+        "reset remote to base",
+    );
+    wait_for_fetched_remote_store_ref(repo.path(), base_oid, Duration::from_secs(1));
 
     let local_repo = Repository::open(repo.path()).expect("open local repo");
     let outcome = migrate_store_ref_to_v1_with_before_push_for_testing(
@@ -2196,14 +2164,12 @@ fn test_migrate_retryable_push_race_recomputes_and_preserves_backup_ref() {
         1,
         |retries, _commit_oid| {
             if retries == 0 {
-                remote_repo
-                    .reference(
-                        "refs/heads/beads/store",
-                        winner_oid,
-                        true,
-                        "simulate remote winner before first push",
-                    )
-                    .map_err(beads_git::SyncError::from)?;
+                set_ref_target(
+                    repo.remote_dir.path(),
+                    "refs/heads/beads/store",
+                    winner_oid,
+                    "simulate remote winner before first push",
+                );
             }
             Ok(())
         },
@@ -2244,7 +2210,7 @@ fn test_migrate_retryable_push_race_exhausts_retry_budget() {
     push_store_ref(repo.path());
 
     let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
-    let winner_oid = beads_git::sync::migrate_store_ref_to_v1(
+    beads_git::sync::migrate_store_ref_to_v1(
         &remote_repo,
         repo.remote_dir.path(),
         false,
@@ -2255,16 +2221,19 @@ fn test_migrate_retryable_push_race_exhausts_retry_budget() {
     .expect("winner migration")
     .commit_oid
     .expect("winner commit oid");
-    remote_repo
-        .reference(
-            "refs/heads/beads/store",
-            base_oid,
-            true,
-            "reset remote to base",
-        )
-        .expect("reset remote store ref");
-    std::thread::sleep(Duration::from_secs(1));
-    fetch_remote_store_ref(repo.path());
+    let winner_oid = rewrite_store_ref_commit(
+        repo.remote_dir.path(),
+        "refs/heads/beads/store",
+        1_900_000_002,
+        "simulate distinct remote winner",
+    );
+    set_ref_target(
+        repo.remote_dir.path(),
+        "refs/heads/beads/store",
+        base_oid,
+        "reset remote to base",
+    );
+    wait_for_fetched_remote_store_ref(repo.path(), base_oid, Duration::from_secs(1));
 
     let local_repo = Repository::open(repo.path()).expect("open local repo");
     let err = migrate_store_ref_to_v1_with_before_push_for_testing(
@@ -2276,14 +2245,12 @@ fn test_migrate_retryable_push_race_exhausts_retry_budget() {
         0,
         |retries, _commit_oid| {
             if retries == 0 {
-                remote_repo
-                    .reference(
-                        "refs/heads/beads/store",
-                        winner_oid,
-                        true,
-                        "simulate remote winner before first push",
-                    )
-                    .map_err(beads_git::SyncError::from)?;
+                set_ref_target(
+                    repo.remote_dir.path(),
+                    "refs/heads/beads/store",
+                    winner_oid,
+                    "simulate remote winner before first push",
+                );
             }
             Ok(())
         },
@@ -2323,7 +2290,7 @@ fn test_migrate_cli_retryable_push_race_recomputes_and_preserves_backup_ref() {
     push_store_ref(repo.path());
 
     let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
-    let winner_oid = beads_git::sync::migrate_store_ref_to_v1(
+    beads_git::sync::migrate_store_ref_to_v1(
         &remote_repo,
         repo.remote_dir.path(),
         false,
@@ -2334,15 +2301,19 @@ fn test_migrate_cli_retryable_push_race_recomputes_and_preserves_backup_ref() {
     .expect("winner migration")
     .commit_oid
     .expect("winner commit oid");
-    remote_repo
-        .reference(
-            "refs/heads/beads/store",
-            base_oid,
-            true,
-            "reset remote to base",
-        )
-        .expect("reset remote store ref");
-    std::thread::sleep(Duration::from_secs(1));
+    let winner_oid = rewrite_store_ref_commit(
+        repo.remote_dir.path(),
+        "refs/heads/beads/store",
+        1_900_000_003,
+        "simulate distinct remote winner",
+    );
+    set_ref_target(
+        repo.remote_dir.path(),
+        "refs/heads/beads/store",
+        base_oid,
+        "reset remote to base",
+    );
+    wait_for_fetched_remote_store_ref(repo.path(), base_oid, Duration::from_secs(1));
 
     let output = repo
         .bd()
@@ -2392,7 +2363,7 @@ fn test_migrate_cli_retryable_push_race_exhausts_retry_budget() {
     push_store_ref(repo.path());
 
     let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
-    let winner_oid = beads_git::sync::migrate_store_ref_to_v1(
+    beads_git::sync::migrate_store_ref_to_v1(
         &remote_repo,
         repo.remote_dir.path(),
         false,
@@ -2403,15 +2374,19 @@ fn test_migrate_cli_retryable_push_race_exhausts_retry_budget() {
     .expect("winner migration")
     .commit_oid
     .expect("winner commit oid");
-    remote_repo
-        .reference(
-            "refs/heads/beads/store",
-            base_oid,
-            true,
-            "reset remote to base",
-        )
-        .expect("reset remote store ref");
-    std::thread::sleep(Duration::from_secs(1));
+    let winner_oid = rewrite_store_ref_commit(
+        repo.remote_dir.path(),
+        "refs/heads/beads/store",
+        1_900_000_004,
+        "simulate distinct remote winner",
+    );
+    set_ref_target(
+        repo.remote_dir.path(),
+        "refs/heads/beads/store",
+        base_oid,
+        "reset remote to base",
+    );
+    wait_for_fetched_remote_store_ref(repo.path(), base_oid, Duration::from_secs(1));
 
     repo.bd()
         .env(

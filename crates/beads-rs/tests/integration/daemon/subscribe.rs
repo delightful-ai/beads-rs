@@ -15,6 +15,13 @@ use crate::fixtures::admin_status::StatusCollector;
 use crate::fixtures::ipc_stream::{StreamClientError, StreamingClient};
 use crate::fixtures::load_gen::{Autostart, LoadGenerator, LoadReport};
 use crate::fixtures::realtime::RealtimeFixture;
+use crate::fixtures::wait;
+
+const MAX_RECONNECTS: usize = 3;
+const MAX_WAIT: Duration = Duration::from_secs(30);
+const STREAM_READ_TIMEOUT: Duration = Duration::from_millis(200);
+const RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
+const RECONNECT_MAX_BACKOFF: Duration = Duration::from_millis(200);
 
 #[test]
 fn subscribe_streams_events_in_order() {
@@ -23,7 +30,7 @@ fn subscribe_streams_events_in_order() {
 
     let namespace = NamespaceId::core();
     let repo = fixture.repo_path().to_path_buf();
-    let ipc_client = fixture.ipc_client().with_autostart(false);
+    let ipc_client = fixture.ipc_client();
 
     let (origin, start_seq) = current_origin_seq(&repo, &namespace, ipc_client.clone());
 
@@ -60,7 +67,7 @@ fn subscribe_gates_on_require_min_seen() {
 
     let namespace = NamespaceId::core();
     let repo = fixture.repo_path().to_path_buf();
-    let ipc_client = fixture.ipc_client().with_autostart(false);
+    let ipc_client = fixture.ipc_client();
     let (origin, start_seq) = current_origin_seq(&repo, &namespace, ipc_client.clone());
 
     let required_seq = start_seq + 1;
@@ -127,7 +134,7 @@ fn subscribe_multiple_clients_receive_same_events() {
 
     let namespace = NamespaceId::core();
     let repo = fixture.repo_path().to_path_buf();
-    let ipc_client = fixture.ipc_client().with_autostart(false);
+    let ipc_client = fixture.ipc_client();
     let (origin, start_seq) = current_origin_seq(&repo, &namespace, ipc_client.clone());
 
     let required = require_min_seen(&namespace, origin, start_seq);
@@ -226,17 +233,13 @@ fn collect_origin_seqs(
     read: &ReadConsistency,
     ipc_client: &beads_surface::ipc::IpcClient,
 ) -> Vec<u64> {
-    const MAX_RECONNECTS: usize = 3;
-    const MAX_WAIT: Duration = Duration::from_secs(30);
-    let read_timeout = Duration::from_millis(200);
-
     let mut seqs = Vec::with_capacity(total);
     let mut last_seq = start_seq;
     let mut reconnects = 0;
     let deadline = Instant::now() + MAX_WAIT;
 
     client
-        .set_read_timeout(Some(read_timeout))
+        .set_read_timeout(Some(STREAM_READ_TIMEOUT))
         .expect("set subscribe timeout");
 
     while seqs.len() < total {
@@ -269,42 +272,11 @@ fn collect_origin_seqs(
                 continue;
             }
             Err(StreamClientError::Ipc(IpcError::Disconnected)) => {
-                reconnects += 1;
-                if reconnects > MAX_RECONNECTS {
-                    let _ = client.set_read_timeout(None);
-                    panic!("subscribe stream disconnected {} times", reconnects);
-                }
-                std::thread::sleep(Duration::from_millis(50 * reconnects as u64));
-                *client = StreamingClient::subscribe_with_client(
-                    repo.clone(),
-                    read.clone(),
-                    ipc_client.clone(),
-                )
-                .expect("resubscribe");
-                client
-                    .set_read_timeout(Some(read_timeout))
-                    .expect("reset subscribe timeout");
+                reconnect_stream(client, &mut reconnects, repo, read, ipc_client, deadline);
             }
             Err(StreamClientError::Remote(err)) => {
                 if err.retryable && err.code == CliErrorCode::Disconnected.into() {
-                    reconnects += 1;
-                    if reconnects > MAX_RECONNECTS {
-                        let _ = client.set_read_timeout(None);
-                        panic!(
-                            "subscribe stream disconnected {} times (remote)",
-                            reconnects
-                        );
-                    }
-                    std::thread::sleep(Duration::from_millis(50 * reconnects as u64));
-                    *client = StreamingClient::subscribe_with_client(
-                        repo.clone(),
-                        read.clone(),
-                        ipc_client.clone(),
-                    )
-                    .expect("resubscribe");
-                    client
-                        .set_read_timeout(Some(read_timeout))
-                        .expect("reset subscribe timeout");
+                    reconnect_stream(client, &mut reconnects, repo, read, ipc_client, deadline);
                 } else {
                     let _ = client.set_read_timeout(None);
                     panic!("stream event: {err:?}");
@@ -318,4 +290,47 @@ fn collect_origin_seqs(
     }
     let _ = client.set_read_timeout(None);
     seqs
+}
+
+fn reconnect_stream(
+    client: &mut StreamingClient,
+    reconnects: &mut usize,
+    repo: &PathBuf,
+    read: &ReadConsistency,
+    ipc_client: &beads_surface::ipc::IpcClient,
+    deadline: Instant,
+) {
+    *reconnects += 1;
+    if *reconnects > MAX_RECONNECTS {
+        let _ = client.set_read_timeout(None);
+        panic!("subscribe stream disconnected {} times", reconnects);
+    }
+    let timeout = deadline.saturating_duration_since(Instant::now());
+    let replacement = wait::retry_with_backoff(
+        "fixture.subscribe.reconnect",
+        format!("repo={} reconnects={reconnects}", repo.display()),
+        timeout,
+        RECONNECT_INITIAL_BACKOFF,
+        RECONNECT_MAX_BACKOFF,
+        || StreamingClient::subscribe_with_client(repo.clone(), read.clone(), ipc_client.clone()),
+        retryable_reconnect_error,
+    )
+    .unwrap_or_else(|err| {
+        let _ = client.set_read_timeout(None);
+        panic!("subscribe reconnect failed after {reconnects} disconnects: {err:?}");
+    });
+    *client = replacement;
+    client
+        .set_read_timeout(Some(STREAM_READ_TIMEOUT))
+        .expect("reset subscribe timeout");
+}
+
+fn retryable_reconnect_error(err: &StreamClientError) -> bool {
+    match err {
+        StreamClientError::Ipc(err) => err.transience().is_retryable(),
+        StreamClientError::Remote(err) => {
+            err.retryable && err.code == CliErrorCode::Disconnected.into()
+        }
+        StreamClientError::Unexpected(_) => false,
+    }
 }

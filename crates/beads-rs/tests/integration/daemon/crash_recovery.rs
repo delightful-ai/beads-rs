@@ -5,12 +5,16 @@ use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use crate::fixtures::bd_runtime::{
+    store_dir_from_data_dir, store_meta_from_data_dir, wait_for_daemon_pid, wait_for_store_id,
+};
 use crate::fixtures::realtime::RealtimeFixture;
 use crate::fixtures::store_lock::unlock_store;
+use crate::fixtures::wait;
 use beads_api::QueryResult;
-use beads_core::{BeadId, BeadType, EventId, NamespaceId, Priority, Seq1, StoreId, StoreMeta};
+use beads_core::{BeadId, BeadType, EventId, NamespaceId, Priority, Seq1};
 use beads_daemon::testkit::wal::{IndexDurabilityMode, SqliteWalIndex, WalIndex};
 use beads_surface::ipc::{
     CreatePayload, IpcClient, MutationCtx, MutationMeta, Request, Response, ResponsePayload,
@@ -20,75 +24,12 @@ fn marker_path(dir: &Path, stage: &str) -> PathBuf {
     dir.join(format!("beads-wal-hang-{stage}"))
 }
 
-fn wait_for_marker(path: &Path, timeout: Duration) -> bool {
-    let deadline = Instant::now() + timeout;
-    let mut backoff = Duration::from_millis(5);
-    while Instant::now() < deadline {
-        if path.exists() {
-            return true;
-        }
-        thread::sleep(backoff);
-        backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(50));
-    }
-    path.exists()
-}
-
-fn daemon_pid(runtime_dir: &Path) -> u32 {
-    let meta_path = runtime_dir.join("beads").join("daemon.meta.json");
-    assert!(
-        wait_for_marker(&meta_path, Duration::from_secs(2)),
-        "daemon meta missing"
-    );
-    let contents = fs::read_to_string(&meta_path).expect("read daemon meta");
-    let meta: serde_json::Value = serde_json::from_str(&contents).expect("parse daemon meta");
-    meta["pid"].as_u64().expect("pid missing") as u32
-}
-
 fn kill_daemon(pid: u32) {
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
 
     let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
-    wait_for_exit(pid, Duration::from_secs(2));
-}
-
-fn wait_for_exit(pid: u32, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if !process_alive(pid) {
-            break;
-        }
-        thread::sleep(Duration::from_millis(10));
-    }
-}
-
-fn process_alive(pid: u32) -> bool {
-    use nix::sys::signal::kill;
-    use nix::unistd::Pid;
-    kill(Pid::from_raw(pid as i32), None).is_ok()
-}
-
-fn store_dir_from_data_dir(data_dir: &Path) -> PathBuf {
-    let stores_dir = data_dir.join("stores");
-    let mut entries: Vec<PathBuf> = fs::read_dir(&stores_dir)
-        .expect("read stores dir")
-        .flatten()
-        .map(|entry| entry.path())
-        .collect();
-    entries.sort();
-    assert_eq!(entries.len(), 1, "expected exactly one store dir");
-    entries.remove(0)
-}
-
-fn store_meta_from_data_dir(data_dir: &Path) -> StoreMeta {
-    let store_dir = store_dir_from_data_dir(data_dir);
-    let meta_path = store_dir.join("meta.json");
-    let contents = fs::read_to_string(&meta_path).expect("read store meta");
-    serde_json::from_str(&contents).expect("parse store meta")
-}
-
-fn store_id_from_data_dir(data_dir: &Path) -> StoreId {
-    store_meta_from_data_dir(data_dir).store_id()
+    let _ = wait::wait_for_process_exit(pid, Duration::from_secs(2));
 }
 
 fn latest_wal_segment(store_dir: &Path, namespace: &NamespaceId) -> PathBuf {
@@ -174,15 +115,17 @@ fn crash_recovery_truncates_tail_and_resets_origin_seq() {
 
     let marker = marker_path(&hang_dir, "wal_after_write");
     assert!(
-        wait_for_marker(&marker, Duration::from_secs(5)),
+        wait::wait_for_path(&marker, Duration::from_secs(5)),
         "wal hang marker missing"
     );
-    let pid = daemon_pid(fixture.runtime_dir());
+    let pid = wait_for_daemon_pid(fixture.runtime_dir(), Duration::from_secs(2))
+        .expect("daemon meta missing");
     kill_daemon(pid);
     let _ = handle.join();
 
-    let store_id = store_id_from_data_dir(fixture.data_dir());
-    let store_dir = store_dir_from_data_dir(fixture.data_dir());
+    let store_id = wait_for_store_id(fixture.data_dir(), Duration::from_secs(2))
+        .expect("store id should be discovered");
+    let store_dir = store_dir_from_data_dir(fixture.data_dir()).expect("expected store dir");
     let wal_segment = latest_wal_segment(&store_dir, &NamespaceId::core());
     ensure_partial_tail(&wal_segment);
 
@@ -241,16 +184,18 @@ fn crash_recovery_rebuilds_index_after_fsync_before_commit() {
 
     let marker = marker_path(&hang_dir, "wal_mutation_before_atomic_commit");
     assert!(
-        wait_for_marker(&marker, Duration::from_secs(5)),
+        wait::wait_for_path(&marker, Duration::from_secs(5)),
         "wal hang marker missing"
     );
-    let pid = daemon_pid(fixture.runtime_dir());
+    let pid = wait_for_daemon_pid(fixture.runtime_dir(), Duration::from_secs(2))
+        .expect("daemon meta missing");
     kill_daemon(pid);
     let _ = handle.join();
 
-    let store_id = store_id_from_data_dir(fixture.data_dir());
-    let store_dir = store_dir_from_data_dir(fixture.data_dir());
-    let store_meta = store_meta_from_data_dir(fixture.data_dir());
+    let store_id = wait_for_store_id(fixture.data_dir(), Duration::from_secs(2))
+        .expect("store id should be discovered");
+    let store_dir = store_dir_from_data_dir(fixture.data_dir()).expect("expected store dir");
+    let store_meta = store_meta_from_data_dir(fixture.data_dir()).expect("store meta");
     let namespace = NamespaceId::core();
     let origin = store_meta.replica_id;
     let event_id = EventId::new(

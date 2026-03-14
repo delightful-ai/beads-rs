@@ -1,14 +1,24 @@
 [store]
 dir = "target/nextest"
 
+[test-groups]
+tailnet-fault-injection = { max-threads = 1 }
+
 [profile.default]
 retries = 0
-test-threads = "num-cpus"
+test-threads = 4
 failure-output = "immediate-final"
 success-output = "never"
 status-level = "pass"
 final-status-level = "slow"
 slow-timeout = { period = "30s", terminate-after = 4, grace-period = "10s" }
+
+[[profile.default.overrides]]
+filter = 'package(beads-rs) and test(/^daemon::repl_e2e::repl_.*tailnet.*$/)'
+test-group = 'tailnet-fault-injection'
+# These tests spin full daemon+proxy fault networks and can hang in convergence
+# when nextest runs other REPL-heavy integration tests beside them.
+threads-required = "num-test-threads"
 
 [profile.default.junit]
 path = "junit.xml"

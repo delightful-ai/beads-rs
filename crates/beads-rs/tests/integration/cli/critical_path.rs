@@ -2,126 +2,30 @@
 //!
 //! These tests run the actual `bd` binary against temp git repos.
 
+#[cfg(feature = "slow-tests")]
 use std::fs;
 #[cfg(feature = "slow-tests")]
-use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "slow-tests")]
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crate::fixtures::daemon_runtime::shutdown_daemon;
+use crate::fixtures::bd_runtime::BdRuntimeRepo;
 #[cfg(feature = "slow-tests")]
-use crate::fixtures::git::init_repo;
-use crate::fixtures::git::{init_bare_repo, init_repo_with_origin, repo_has_branch};
-use assert_cmd::Command;
+use crate::fixtures::bd_runtime::{
+    bd_with_runtime_sync_enabled, data_dir_for_runtime,
+    wait_for_daemon_pid as runtime_wait_for_daemon_pid,
+    wait_for_store_id as runtime_wait_for_store_id,
+};
+use crate::fixtures::git::repo_has_branch;
+#[cfg(feature = "slow-tests")]
+use crate::fixtures::wait;
 use predicates::prelude::*;
+#[cfg(feature = "slow-tests")]
 use tempfile::TempDir;
-
-fn data_dir_for_runtime(runtime_dir: &Path) -> PathBuf {
-    let dir = runtime_dir.join("data");
-    fs::create_dir_all(&dir).expect("failed to create test data dir");
-    dir
-}
-
-fn bd_with_runtime(repo: &Path, runtime_dir: &Path, data_dir: &Path) -> Command {
-    let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
-    cmd.current_dir(repo);
-    cmd.env("XDG_RUNTIME_DIR", runtime_dir);
-    cmd.env("BD_WAL_DIR", runtime_dir);
-    cmd.env("BD_DATA_DIR", data_dir);
-    cmd.env("BD_NO_AUTO_UPGRADE", "1");
-    cmd.env("BD_TESTING", "1");
-    cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
-    cmd
-}
-
-#[cfg(feature = "slow-tests")]
-fn bd_with_runtime_sync_enabled(repo: &Path, runtime_dir: &Path, data_dir: &Path) -> Command {
-    let mut cmd = bd_with_runtime(repo, runtime_dir, data_dir);
-    cmd.env("BD_TEST_DISABLE_GIT_SYNC", "0");
-    cmd
-}
-
-#[cfg(feature = "slow-tests")]
-fn socket_path(runtime_dir: &Path) -> PathBuf {
-    runtime_dir.join("beads").join("daemon.sock")
-}
-
-#[cfg(feature = "slow-tests")]
-fn daemon_pid(runtime_dir: &Path) -> u32 {
-    use beads_api::QueryResult;
-    use beads_surface::ipc::{Request, Response, ResponsePayload};
-
-    let socket = socket_path(runtime_dir);
-    let mut stream =
-        std::os::unix::net::UnixStream::connect(&socket).expect("connect daemon socket");
-    let mut json = serde_json::to_string(&Request::Ping).expect("serialize ping");
-    json.push('\n');
-    stream.write_all(json.as_bytes()).expect("write ping");
-    stream.flush().expect("flush ping");
-
-    let mut reader = BufReader::new(stream);
-    let mut line = String::new();
-    reader.read_line(&mut line).expect("read ping response");
-    let resp: Response = serde_json::from_str(&line).expect("parse ping response");
-    let Response::Ok { ok } = resp else {
-        panic!("unexpected ping response: {resp:?}");
-    };
-    let ResponsePayload::Query(QueryResult::DaemonInfo(info)) = ok else {
-        panic!("unexpected ping payload: {ok:?}");
-    };
-    info.pid
-}
 
 #[cfg(feature = "slow-tests")]
 fn parse_response_payload(bytes: &[u8]) -> beads_surface::ipc::ResponsePayload {
     serde_json::from_slice(bytes).expect("parse response payload")
-}
-
-#[cfg(feature = "slow-tests")]
-fn wait_for_exit(pid: u32, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    while Instant::now() < deadline {
-        if !process_alive(pid) {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
-}
-
-#[cfg(feature = "slow-tests")]
-fn process_alive(pid: u32) -> bool {
-    use nix::sys::signal::kill;
-    use nix::unistd::Pid;
-    kill(Pid::from_raw(pid as i32), None).is_ok()
-}
-
-#[cfg(feature = "slow-tests")]
-fn store_id_from_data_dir(data_dir: &Path) -> beads_core::StoreId {
-    let stores_dir = data_dir.join("stores");
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
-        let mut entries: Vec<PathBuf> = match fs::read_dir(&stores_dir) {
-            Ok(read_dir) => read_dir.flatten().map(|entry| entry.path()).collect(),
-            Err(_) => Vec::new(),
-        };
-        entries.sort();
-        if entries.len() == 1 {
-            let meta_path = entries.remove(0).join("meta.json");
-            let contents = fs::read_to_string(&meta_path).expect("read store meta");
-            let meta: beads_core::StoreMeta =
-                serde_json::from_str(&contents).expect("parse store meta");
-            return meta.store_id();
-        }
-        if Instant::now() >= deadline {
-            panic!(
-                "expected exactly one store dir under {}, found {}",
-                stores_dir.display(),
-                entries.len()
-            );
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
 }
 
 #[cfg(feature = "slow-tests")]
@@ -140,70 +44,43 @@ fn wal_segments(wal_dir: &Path) -> Vec<PathBuf> {
 
 #[cfg(feature = "slow-tests")]
 fn wait_for_wal_segments(wal_dir: &Path, timeout: Duration) -> Vec<PathBuf> {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let entries = wal_segments(wal_dir);
-        if !entries.is_empty() {
-            return entries;
-        }
-        if Instant::now() >= deadline {
-            return entries;
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    let mut entries = Vec::new();
+    let _ = wait::poll_until_with_phase(
+        "fixture.critical_path.wait_for_wal_segments",
+        wal_dir.display(),
+        timeout,
+        || {
+            entries = wal_segments(wal_dir);
+            !entries.is_empty()
+        },
+    );
+    entries
 }
 
 /// Test fixture: working repo + bare remote.
-struct TestRepo {
-    work_dir: TempDir,
-    #[allow(dead_code)]
-    remote_dir: TempDir,
-    runtime_dir: TempDir,
-    data_dir: PathBuf,
-    store_id: beads_core::StoreId,
-}
+struct TestRepo(BdRuntimeRepo);
 
 impl TestRepo {
     fn new() -> Self {
-        // Create bare remote first
-        let remote_dir = TempDir::new().expect("failed to create remote dir");
-        init_bare_repo(remote_dir.path()).expect("failed to init bare repo");
-
-        // Create working directory
-        let work_dir = TempDir::new().expect("failed to create work dir");
-
-        init_repo_with_origin(work_dir.path(), remote_dir.path())
-            .expect("failed to init repo with origin");
-
-        let runtime_dir = TempDir::new().expect("failed to create runtime dir");
-        let data_dir = data_dir_for_runtime(runtime_dir.path());
-        let runtime_str = runtime_dir.path().to_string_lossy();
-        let store_uuid = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, runtime_str.as_bytes());
-        let store_id = beads_core::StoreId::new(store_uuid);
-
-        Self {
-            work_dir,
-            remote_dir,
-            runtime_dir,
-            data_dir,
-            store_id,
-        }
+        Self(BdRuntimeRepo::new_with_origin().with_runtime_derived_store_id())
     }
 
     fn path(&self) -> &std::path::Path {
-        self.work_dir.path()
+        self.0.path()
     }
 
-    fn bd(&self) -> Command {
-        let mut cmd = bd_with_runtime(self.path(), self.runtime_dir.path(), &self.data_dir);
-        cmd.env("BD_STORE_ID", self.store_id.to_string());
-        cmd
+    #[cfg(feature = "slow-tests")]
+    fn remote_dir(&self) -> &Path {
+        self.0.remote_dir.path()
     }
-}
 
-impl Drop for TestRepo {
-    fn drop(&mut self) {
-        shutdown_daemon(self.runtime_dir.path());
+    fn bd(&self) -> assert_cmd::Command {
+        self.0.bd()
+    }
+
+    #[cfg(feature = "slow-tests")]
+    fn bd_sync_enabled(&self) -> assert_cmd::Command {
+        self.0.bd_sync_enabled()
     }
 }
 
@@ -1170,25 +1047,19 @@ fn test_stale_command() {
 #[test]
 fn test_sync_command() {
     let repo = TestRepo::new();
-    bd_with_runtime_sync_enabled(repo.path(), repo.runtime_dir.path(), &repo.data_dir)
-        .arg("init")
-        .assert()
-        .success();
+    repo.bd_sync_enabled().arg("init").assert().success();
 
     // Create an issue to have something to sync
-    bd_with_runtime_sync_enabled(repo.path(), repo.runtime_dir.path(), &repo.data_dir)
+    repo.bd_sync_enabled()
         .args(["create", "Test sync", "--type=task", "--json"])
         .assert()
         .success();
 
     // Sync should succeed
-    bd_with_runtime_sync_enabled(repo.path(), repo.runtime_dir.path(), &repo.data_dir)
-        .arg("sync")
-        .assert()
-        .success();
+    repo.bd_sync_enabled().arg("sync").assert().success();
 
     // List should still work after sync
-    bd_with_runtime_sync_enabled(repo.path(), repo.runtime_dir.path(), &repo.data_dir)
+    repo.bd_sync_enabled()
         .args(["list", "--json"])
         .assert()
         .success()
@@ -2766,16 +2637,9 @@ fn test_double_init() {
 #[cfg(feature = "slow-tests")]
 #[test]
 fn test_init_fails_without_origin_remote() {
-    let work_dir = TempDir::new().expect("failed to create work dir");
-    let runtime_dir = TempDir::new().expect("failed to create runtime dir");
-    let data_dir = data_dir_for_runtime(runtime_dir.path());
+    let repo = BdRuntimeRepo::new_local_only();
 
-    init_repo(work_dir.path()).expect("failed to git init");
-
-    let mut cmd = bd_with_runtime(work_dir.path(), runtime_dir.path(), &data_dir);
-    cmd.arg("init").assert().failure();
-
-    shutdown_daemon(runtime_dir.path());
+    repo.bd().arg("init").assert().failure();
 }
 
 #[cfg(feature = "slow-tests")]
@@ -3715,7 +3579,8 @@ fn test_crash_recovery_replays_wal() {
         other => panic!("unexpected create payload: {other:?}"),
     };
 
-    let store_id = store_id_from_data_dir(&data_dir);
+    let store_id = runtime_wait_for_store_id(&data_dir, Duration::from_secs(2))
+        .expect("store id should be discovered");
     let wal_dir = data_dir
         .join("stores")
         .join(store_id.to_string())
@@ -3724,11 +3589,12 @@ fn test_crash_recovery_replays_wal() {
     let wal_entries = wait_for_wal_segments(&wal_dir, Duration::from_secs(2));
     assert!(!wal_entries.is_empty(), "expected WAL entry before crash");
 
-    let pid = daemon_pid(runtime_dir.path());
+    let pid = runtime_wait_for_daemon_pid(runtime_dir.path(), Duration::from_secs(2))
+        .expect("daemon should publish pid");
     use nix::sys::signal::{Signal, kill};
     use nix::unistd::Pid;
     kill(Pid::from_raw(pid as i32), Signal::SIGKILL).expect("failed to SIGKILL daemon");
-    wait_for_exit(pid, Duration::from_secs(1));
+    let _ = wait::wait_for_process_exit(pid, Duration::from_secs(1));
 
     let store_id_arg = store_id.to_string();
     let unlock_out = bd_with_runtime_sync_enabled(repo.path(), runtime_dir.path(), &data_dir)
@@ -3757,7 +3623,7 @@ fn test_crash_recovery_replays_wal() {
         .expect("run bd sync");
     assert!(sync_out.status.success());
 
-    let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
+    let remote_repo = Repository::open(repo.remote_dir()).expect("open remote repo");
     let remote_oid = remote_repo
         .refname_to_id("refs/heads/beads/store")
         .expect("remote beads ref");

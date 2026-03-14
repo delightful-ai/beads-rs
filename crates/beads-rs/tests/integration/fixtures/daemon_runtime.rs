@@ -76,10 +76,10 @@ struct DaemonCandidate {
 
 fn daemon_candidate_from_meta(runtime_dir: &Path) -> Option<DaemonCandidate> {
     let contents = fs::read_to_string(daemon_meta_path(runtime_dir)).ok()?;
-    let meta: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    let meta: beads_api::DaemonInfo = serde_json::from_str(&contents).ok()?;
     Some(DaemonCandidate {
-        pid: meta["pid"].as_u64()? as u32,
-        started_at_ms: meta["started_at_ms"].as_u64(),
+        pid: meta.pid,
+        started_at_ms: meta.started_at_ms,
     })
 }
 
@@ -112,7 +112,7 @@ fn cleanup_store_locks(runtime_dir: &Path) {
                     Some(false)
                 )
             }
-            (Some(pid), None) => matches!(process_looks_like_bd_daemon(pid), Some(false)),
+            (Some(_), None) => true,
         };
         if stale_or_missing {
             let _ = fs::remove_file(entry.path);
@@ -194,12 +194,10 @@ fn candidate_matches_running_process(candidate: &DaemonCandidate) -> bool {
     if !process_alive(candidate.pid) {
         return false;
     }
-
-    match pid_matches_started_at(candidate.pid, candidate.started_at_ms) {
-        Some(true) => true,
-        Some(false) => false,
-        None => matches!(process_looks_like_bd_daemon(candidate.pid), Some(true)),
-    }
+    matches!(
+        pid_matches_started_at(candidate.pid, candidate.started_at_ms),
+        Some(true)
+    )
 }
 
 fn wait_for_exit(pid: u32, timeout: Duration) {
@@ -242,18 +240,6 @@ fn process_elapsed_secs(pid: u32) -> Option<u64> {
         return None;
     }
     parse_etime_to_secs(std::str::from_utf8(&output.stdout).ok()?)
-}
-
-fn process_looks_like_bd_daemon(pid: u32) -> Option<bool> {
-    let output = Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "command="])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let command = std::str::from_utf8(&output.stdout).ok()?.trim();
-    Some(command.contains("bd daemon run"))
 }
 
 fn parse_etime_to_secs(etime: &str) -> Option<u64> {

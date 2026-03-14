@@ -10,52 +10,45 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 use std::sync::{Arc, Barrier};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crate::fixtures::git::{init_bare_repo, init_repo_with_origin};
+use crate::fixtures::bd_runtime::{BdCommandProfile, BdRuntimeRepo, configure_std_bd_command};
 use crate::fixtures::store_lock::unlock_store;
+use crate::fixtures::wait;
 use assert_cmd::Command;
-use tempfile::TempDir;
 
 // =============================================================================
 // Test Fixture
 // =============================================================================
 
 struct DaemonFixture {
-    runtime_dir: TempDir,
-    repo_dir: TempDir,
-    #[allow(dead_code)]
-    remote_dir: TempDir,
+    runtime: BdRuntimeRepo,
 }
 
 impl DaemonFixture {
     fn new() -> Self {
-        let runtime_dir = TempDir::new().expect("create runtime dir");
-        let repo_dir = TempDir::new().expect("create repo dir");
-        let remote_dir = TempDir::new().expect("create remote dir");
-
-        init_bare_repo(remote_dir.path()).expect("git init --bare");
-        init_repo_with_origin(repo_dir.path(), remote_dir.path()).expect("git init with origin");
-
         Self {
-            runtime_dir,
-            repo_dir,
-            remote_dir,
+            runtime: BdRuntimeRepo::new_with_origin(),
         }
     }
 
+    fn repo_path(&self) -> &Path {
+        self.runtime.path()
+    }
+
+    fn runtime_dir(&self) -> &Path {
+        self.runtime.runtime_dir()
+    }
+
     fn socket_path(&self) -> PathBuf {
-        self.runtime_dir.path().join("beads").join("daemon.sock")
+        self.runtime.daemon_socket_path()
     }
 
     fn meta_path(&self) -> PathBuf {
-        self.runtime_dir
-            .path()
-            .join("beads")
-            .join("daemon.meta.json")
+        self.runtime.daemon_meta_path()
     }
 
     fn store_id(&self) -> beads_core::StoreId {
@@ -75,37 +68,20 @@ impl DaemonFixture {
     }
 
     fn data_dir(&self) -> PathBuf {
-        let dir = self.runtime_dir.path().join("data");
-        fs::create_dir_all(&dir).expect("create test data dir");
-        dir
+        self.runtime.data_dir().to_path_buf()
     }
 
     fn bd(&self) -> Command {
-        let data_dir = self.data_dir();
-        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
-        cmd.current_dir(self.repo_dir.path());
-        cmd.env("XDG_RUNTIME_DIR", self.runtime_dir.path());
-        cmd.env("BD_WAL_DIR", self.runtime_dir.path());
-        cmd.env("BD_DATA_DIR", &data_dir);
-        cmd.env("BD_NO_AUTO_UPGRADE", "1");
-        cmd.env("BD_TESTING", "1");
-        cmd.env("BD_TEST_FAST", "1");
-        cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
-        cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
-        cmd.env("BD_WAL_SYNC_MODE", "none");
-        cmd
+        self.runtime
+            .bd_with_profile(BdCommandProfile::fast_daemon())
     }
 
     fn daemon_pid(&self) -> Option<u32> {
-        let contents = fs::read_to_string(self.meta_path()).ok()?;
-        let meta: serde_json::Value = serde_json::from_str(&contents).ok()?;
-        meta["pid"].as_u64().map(|p| p as u32)
+        self.runtime.daemon_pid()
     }
 
     fn daemon_version(&self) -> Option<String> {
-        let contents = fs::read_to_string(self.meta_path()).ok()?;
-        let meta: serde_json::Value = serde_json::from_str(&contents).ok()?;
-        meta["version"].as_str().map(|s| s.to_string())
+        self.runtime.daemon_version()
     }
 
     fn start_daemon(&self) {
@@ -123,36 +99,18 @@ impl DaemonFixture {
         use nix::unistd::Pid;
         if let Some(pid) = self.daemon_pid() {
             let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
-            let deadline = std::time::Instant::now() + Duration::from_secs(2);
-            while std::time::Instant::now() < deadline {
-                if !Self::process_alive(pid) {
-                    break;
-                }
-                std::thread::sleep(Duration::from_millis(25));
-            }
+            let _ = wait::wait_for_process_exit(pid, Duration::from_secs(2));
         }
     }
 
     fn wait_for_cleanup(&self, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if !self.socket_path().exists() && !self.meta_path().exists() {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        !self.socket_path().exists() && !self.meta_path().exists()
+        wait::poll_until(timeout, || {
+            !self.socket_path().exists() && !self.meta_path().exists()
+        })
     }
 
     fn wait_for_process_exit(pid: u32, timeout: Duration) -> bool {
-        let deadline = Instant::now() + timeout;
-        while Instant::now() < deadline {
-            if !Self::process_alive(pid) {
-                return true;
-            }
-            std::thread::sleep(Duration::from_millis(25));
-        }
-        !Self::process_alive(pid)
+        wait::wait_for_process_exit(pid, timeout)
     }
 
     fn request_shutdown(&self) {
@@ -188,21 +146,7 @@ impl DaemonFixture {
     }
 
     fn process_alive(pid: u32) -> bool {
-        use nix::sys::signal::kill;
-        use nix::unistd::Pid;
-        // Signal 0 checks if process exists without sending a signal
-        kill(Pid::from_raw(pid as i32), None).is_ok()
-    }
-}
-
-impl Drop for DaemonFixture {
-    fn drop(&mut self) {
-        use nix::sys::signal::{Signal, kill};
-        use nix::unistd::Pid;
-        // Clean up daemon if running
-        if let Some(pid) = self.daemon_pid() {
-            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
-        }
+        wait::process_alive(pid)
     }
 }
 
@@ -324,8 +268,8 @@ fn test_concurrent_restart_safety() {
     // Spawn multiple CLI commands simultaneously
     let n_clients = 5;
     let barrier = Arc::new(Barrier::new(n_clients));
-    let runtime_path = fixture.runtime_dir.path().to_path_buf();
-    let repo_path = fixture.repo_dir.path().to_path_buf();
+    let runtime_path = fixture.runtime_dir().to_path_buf();
+    let repo_path = fixture.repo_path().to_path_buf();
     let data_path = fixture.data_dir();
     let bd_bin = PathBuf::from(assert_cmd::cargo::cargo_bin!("bd"));
 
@@ -338,20 +282,15 @@ fn test_concurrent_restart_safety() {
             let bd_bin = bd_bin.clone();
             std::thread::spawn(move || {
                 barrier.wait(); // Start all at once
-                let output = StdCommand::new(&bd_bin)
-                    .current_dir(&repo_path)
-                    .env("XDG_RUNTIME_DIR", &runtime_path)
-                    .env("BD_WAL_DIR", &runtime_path)
-                    .env("BD_DATA_DIR", &data_path)
-                    .env("BD_NO_AUTO_UPGRADE", "1")
-                    .env("BD_TESTING", "1")
-                    .env("BD_TEST_FAST", "1")
-                    .env("BD_TEST_DISABLE_GIT_SYNC", "1")
-                    .env("BD_TEST_DISABLE_CHECKPOINTS", "1")
-                    .env("BD_WAL_SYNC_MODE", "none")
-                    .arg("status")
-                    .output()
-                    .expect("spawn bd status");
+                let mut cmd = StdCommand::new(&bd_bin);
+                configure_std_bd_command(
+                    &mut cmd,
+                    &repo_path,
+                    &runtime_path,
+                    &data_path,
+                    BdCommandProfile::fast_daemon(),
+                );
+                let output = cmd.arg("status").output().expect("spawn bd status");
                 assert!(
                     output.status.success(),
                     "bd status failed: stdout={} stderr={}",
@@ -381,8 +320,8 @@ fn test_thundering_herd_single_daemon() {
 
     let n_clients = 10;
     let barrier = Arc::new(Barrier::new(n_clients));
-    let runtime_path = fixture.runtime_dir.path().to_path_buf();
-    let repo_path = fixture.repo_dir.path().to_path_buf();
+    let runtime_path = fixture.runtime_dir().to_path_buf();
+    let repo_path = fixture.repo_path().to_path_buf();
     let data_path = fixture.data_dir();
     let bd_bin = PathBuf::from(assert_cmd::cargo::cargo_bin!("bd"));
 
@@ -396,20 +335,15 @@ fn test_thundering_herd_single_daemon() {
             let bd_bin = bd_bin.clone();
             std::thread::spawn(move || {
                 barrier.wait();
-                let output = StdCommand::new(&bd_bin)
-                    .current_dir(&repo_path)
-                    .env("XDG_RUNTIME_DIR", &runtime_path)
-                    .env("BD_WAL_DIR", &runtime_path)
-                    .env("BD_DATA_DIR", &data_path)
-                    .env("BD_NO_AUTO_UPGRADE", "1")
-                    .env("BD_TESTING", "1")
-                    .env("BD_TEST_FAST", "1")
-                    .env("BD_TEST_DISABLE_GIT_SYNC", "1")
-                    .env("BD_TEST_DISABLE_CHECKPOINTS", "1")
-                    .env("BD_WAL_SYNC_MODE", "none")
-                    .arg("init")
-                    .output()
-                    .expect("spawn bd init");
+                let mut cmd = StdCommand::new(&bd_bin);
+                configure_std_bd_command(
+                    &mut cmd,
+                    &repo_path,
+                    &runtime_path,
+                    &data_path,
+                    BdCommandProfile::fast_daemon(),
+                );
+                let output = cmd.arg("init").output().expect("spawn bd init");
                 assert!(
                     output.status.success(),
                     "bd init failed: stdout={} stderr={}",

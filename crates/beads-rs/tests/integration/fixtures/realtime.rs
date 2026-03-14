@@ -1,152 +1,48 @@
 #![allow(dead_code)]
 
-use assert_cmd::Command;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command as StdCommand, Stdio};
-use std::time::Duration;
-use tempfile::TempDir;
+use std::path::Path;
 
-use super::daemon_runtime::shutdown_daemon;
-use super::git::{init_bare_repo, init_repo_with_origin};
+use assert_cmd::Command;
+use beads_surface::ipc::IpcClient;
+
+use super::bd_runtime::{BdCommandProfile, BdRuntimeRepo};
 use super::timing;
-use beads_api::QueryResult;
-use beads_daemon::test_utils::poll_until;
-use beads_surface::ipc::{EmptyPayload, IpcClient, RepoCtx, Request, Response, ResponsePayload};
 
 pub struct RealtimeFixture {
-    runtime_dir: TempDir,
-    repo_dir: TempDir,
-    #[allow(dead_code)]
-    remote_dir: TempDir,
-    data_dir: PathBuf,
+    runtime: BdRuntimeRepo,
 }
 
 impl RealtimeFixture {
     pub fn new() -> Self {
         let _phase = timing::scoped_phase("fixture.realtime.new");
-        let runtime_dir = TempDir::new().expect("create runtime dir");
-        let repo_dir = TempDir::new().expect("create repo dir");
-        let remote_dir = TempDir::new().expect("create remote dir");
-
-        {
-            let _phase = timing::scoped_phase("fixture.realtime.git_init");
-            init_git_repo(repo_dir.path(), remote_dir.path())
-                .unwrap_or_else(|err| panic!("git fixture init failed: {err}"));
-        }
-
-        let data_dir = runtime_dir.path().join("data");
-        {
-            let _phase = timing::scoped_phase("fixture.realtime.data_dir");
-            fs::create_dir_all(&data_dir).expect("create test data dir");
-        }
-
         Self {
-            runtime_dir,
-            repo_dir,
-            remote_dir,
-            data_dir,
+            runtime: BdRuntimeRepo::new_with_origin(),
         }
     }
 
     pub fn repo_path(&self) -> &Path {
-        self.repo_dir.path()
+        self.runtime.path()
     }
 
     pub fn runtime_dir(&self) -> &Path {
-        self.runtime_dir.path()
+        self.runtime.runtime_dir()
     }
 
     pub fn data_dir(&self) -> &Path {
-        &self.data_dir
+        self.runtime.data_dir()
     }
 
     pub fn bd(&self) -> Command {
-        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
-        cmd.current_dir(self.repo_dir.path());
-        cmd.env("XDG_RUNTIME_DIR", self.runtime_dir.path());
-        cmd.env("BD_WAL_DIR", self.runtime_dir.path());
-        cmd.env("BD_DATA_DIR", &self.data_dir);
-        cmd.env("BD_NO_AUTO_UPGRADE", "1");
-        cmd.env("BD_TESTING", "1");
-        cmd.env("BD_TEST_FAST", "1");
-        cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
-        cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
-        cmd.env("BD_WAL_SYNC_MODE", "none");
-        cmd
+        self.runtime
+            .bd_with_profile(BdCommandProfile::fast_daemon())
     }
 
     pub fn ipc_client(&self) -> IpcClient {
-        IpcClient::for_runtime_dir(self.runtime_dir())
+        self.runtime.ipc_client_no_autostart()
     }
 
     pub fn start_daemon(&self) {
         let _phase = timing::scoped_phase("fixture.realtime.start_daemon");
-        let client = self.ipc_client().with_autostart(false);
-        if !ping_daemon(&client) {
-            let mut cmd = StdCommand::new(assert_cmd::cargo::cargo_bin!("bd"));
-            cmd.current_dir(self.repo_dir.path());
-            cmd.env("XDG_RUNTIME_DIR", self.runtime_dir.path());
-            cmd.env("BD_WAL_DIR", self.runtime_dir.path());
-            cmd.env("BD_DATA_DIR", &self.data_dir);
-            cmd.env("BD_NO_AUTO_UPGRADE", "1");
-            cmd.env("BD_TESTING", "1");
-            cmd.env("BD_TEST_FAST", "1");
-            cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
-            cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
-            cmd.env("BD_WAL_SYNC_MODE", "none");
-            cmd.args(["daemon", "run"]);
-            cmd.stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            {
-                let _phase = timing::scoped_phase("fixture.realtime.daemon_spawn");
-                cmd.spawn().expect("spawn daemon");
-            }
-
-            let ok = {
-                let _phase = timing::scoped_phase("fixture.realtime.daemon_ready_wait");
-                poll_until(Duration::from_secs(5), || ping_daemon(&client))
-            };
-            assert!(ok, "daemon failed to start");
-        }
-
-        let request = Request::Init {
-            ctx: RepoCtx::new(self.repo_dir.path().to_path_buf()),
-            payload: EmptyPayload {},
-        };
-        let response = {
-            let _phase = timing::scoped_phase("fixture.realtime.init_request");
-            client
-                .send_request_no_autostart(&request)
-                .expect("init response")
-        };
-        match response {
-            Response::Ok {
-                ok: ResponsePayload::Initialized(_),
-            } => {}
-            other => panic!("unexpected init response: {other:?}"),
-        }
+        self.runtime.start_daemon(BdCommandProfile::fast_daemon());
     }
-}
-
-impl Drop for RealtimeFixture {
-    fn drop(&mut self) {
-        shutdown_daemon(self.runtime_dir.path());
-    }
-}
-
-fn init_git_repo(repo_dir: &Path, remote_dir: &Path) -> Result<(), String> {
-    init_bare_repo(remote_dir)?;
-    init_repo_with_origin(repo_dir, remote_dir)?;
-    Ok(())
-}
-
-fn ping_daemon(client: &IpcClient) -> bool {
-    matches!(
-        client.send_request_no_autostart(&Request::Ping),
-        Ok(Response::Ok {
-            ok: ResponsePayload::Query(QueryResult::DaemonInfo(_)),
-        })
-    )
 }

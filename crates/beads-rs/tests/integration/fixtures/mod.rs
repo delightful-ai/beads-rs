@@ -7,6 +7,7 @@
 //! their owner crates and must not grow back here.
 
 pub mod admin_status;
+pub mod bd_runtime;
 pub mod daemon_boundary;
 pub mod daemon_runtime;
 pub mod event_body;
@@ -23,5 +24,6 @@ pub mod store_dir;
 pub mod store_lock;
 pub mod tailnet_proxy;
 pub mod timing;
+pub mod wait;
 pub mod wal;
 pub mod wal_corrupt;

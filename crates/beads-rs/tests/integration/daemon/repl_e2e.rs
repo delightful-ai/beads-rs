@@ -4,12 +4,13 @@ use std::num::NonZeroU32;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::fixtures::load_gen::LoadGenerator;
 use crate::fixtures::receipt;
 use crate::fixtures::repl_rig::{
     DurabilityEligibility, FaultProfile, ReplRig, ReplRigOptions, TailnetTraceConfig,
 };
 use crate::fixtures::tailnet_proxy::TailnetTraceMode;
+use crate::fixtures::timing;
+use crate::fixtures::wait;
 use beads_api::QueryResult;
 use beads_core::error::details::{DurabilityTimeoutDetails, RequireMinSeenUnsatisfiedDetails};
 use beads_core::{
@@ -58,21 +59,50 @@ fn wal_total_bytes(rig: &ReplRig, node_idx: usize) -> u64 {
     wal.total_bytes
 }
 
-fn churn_node(node: &crate::fixtures::repl_rig::Node, total: usize, workers: usize) {
-    let client = IpcClient::for_runtime_dir(node.runtime_dir()).with_autostart(false);
-    let mut generator = LoadGenerator::with_client(node.repo_dir().to_path_buf(), client);
-    generator.config_mut().total_requests = total;
-    generator.config_mut().workers = workers;
-    generator.config_mut().max_errors = 4;
-    let report = generator.run();
-    assert_eq!(
-        report.failures, 0,
-        "load generator failures: {:#?}",
-        report.errors
+fn wal_status(rig: &ReplRig, idx: usize, namespace: &NamespaceId) -> (usize, u64) {
+    let status = rig.node(idx).admin_status();
+    status
+        .wal
+        .iter()
+        .find(|row| &row.namespace == namespace)
+        .map(|row| (row.segment_count, row.total_bytes))
+        .unwrap_or((0, 0))
+}
+
+fn create_until_wal_segments(
+    rig: &ReplRig,
+    idx: usize,
+    namespace: &NamespaceId,
+    min_segments: usize,
+    timeout: Duration,
+) {
+    let _phase = timing::scoped_phase_with_context(
+        "fixture.repl_e2e.create_until_wal_segments",
+        format!("node={idx} namespace={namespace} min_segments={min_segments}"),
+    );
+    let deadline = Instant::now() + timeout;
+    let mut seq = 0usize;
+    while Instant::now() < deadline {
+        if wal_status(rig, idx, namespace).0 >= min_segments {
+            return;
+        }
+        for _ in 0..8 {
+            let title = format!("wal-churn-{idx}-{seq}");
+            rig.create_issue(idx, &title);
+            seq += 1;
+        }
+    }
+    let (segments, total_bytes) = wal_status(rig, idx, namespace);
+    panic!(
+        "wal segments did not reach {min_segments} within {timeout:?}: segments={segments} total_bytes={total_bytes}"
     );
 }
 
 fn wait_for_checkpoint(rig: &ReplRig, idx: usize, namespace: &NamespaceId, timeout: Duration) {
+    let _phase = timing::scoped_phase_with_context(
+        "fixture.repl_e2e.wait_for_checkpoint",
+        format!("node={idx} namespace={namespace}"),
+    );
     let node = rig.node(idx);
     let runtime_dir = node.runtime_dir().to_path_buf();
     let repo_dir = node.repo_dir().to_path_buf();
@@ -114,25 +144,17 @@ fn wait_for_wal_segments(
     min_segments: usize,
     timeout: Duration,
 ) {
-    let deadline = Instant::now() + timeout;
-    loop {
-        let status = rig.node(idx).admin_status();
-        let (segments, total_bytes) = status
-            .wal
-            .iter()
-            .find(|row| &row.namespace == namespace)
-            .map(|row| (row.segment_count, row.total_bytes))
-            .unwrap_or((0, 0));
-        if segments >= min_segments {
-            return;
-        }
-        if Instant::now() >= deadline {
-            panic!(
-                "wal segments did not reach {min_segments} within {timeout:?}: segments={segments} total_bytes={total_bytes}"
-            );
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    assert!(
+        wait::poll_until_with_phase(
+            "fixture.repl_e2e.wait_for_wal_segments",
+            format!("node={idx} namespace={namespace} min_segments={min_segments}"),
+            timeout,
+            || wal_status(rig, idx, namespace).0 >= min_segments
+        ),
+        "wal segments did not reach {min_segments} within {timeout:?}: segments={} total_bytes={}",
+        wal_status(rig, idx, namespace).0,
+        wal_status(rig, idx, namespace).1
+    );
 }
 
 fn trace_path(trace_dir: &Path, from: usize, to: usize) -> std::path::PathBuf {
@@ -155,20 +177,22 @@ fn run_trace_harness(mode: TailnetTraceMode, trace_dir: &Path) {
 
     rig.create_issue(0, "trace-0");
     rig.create_issue(1, "trace-1");
-    for idx in 0..2 {
-        rig.reload_replication(idx);
-    }
-    std::thread::sleep(Duration::from_millis(500));
 
     if matches!(mode, TailnetTraceMode::Record) {
+        let trace_0_1 = trace_path(trace_dir, 0, 1);
+        let trace_1_0 = trace_path(trace_dir, 1, 0);
         assert!(
-            trace_path(trace_dir, 0, 1).exists(),
-            "missing trace for 0->1"
+            wait::poll_until_with_phase(
+                "fixture.repl_e2e.wait_for_trace_files",
+                trace_dir.display(),
+                Duration::from_secs(5),
+                || trace_0_1.exists() && trace_1_0.exists()
+            ),
+            "missing trace files under {}",
+            trace_dir.display()
         );
-        assert!(
-            trace_path(trace_dir, 1, 0).exists(),
-            "missing trace for 1->0"
-        );
+        assert!(trace_0_1.exists(), "missing trace for 0->1");
+        assert!(trace_1_0.exists(), "missing trace for 1->0");
     }
 }
 
@@ -199,9 +223,6 @@ fn repl_daemon_to_daemon_tailnet_roundtrip() {
         rig.create_issue(0, "tailnet-0"),
         rig.create_issue(1, "tailnet-1"),
     ];
-    for idx in 0..2 {
-        rig.reload_replication(idx);
-    }
 
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(90));
     wait_for_sample(&rig, &ids, Duration::from_secs(30));
@@ -241,9 +262,6 @@ fn repl_daemon_pathological_tailnet_roundtrip() {
         rig.create_issue(0, "pathology-0"),
         rig.create_issue(1, "pathology-1"),
     ];
-    for idx in 0..2 {
-        rig.reload_replication(idx);
-    }
 
     rig.assert_replication_ready(Duration::from_secs(60));
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(300));
@@ -284,15 +302,14 @@ fn repl_checkpoint_bootstrap_under_churn() {
     options.wal_segment_max_bytes = Some(64 * 1024);
     // Note: checkpoints are now always enabled by default
 
-    let rig = ReplRig::new(2, options);
+    let mut rig = ReplRig::new(2, options);
 
     rig.shutdown_node(1);
 
     let warm_ids = [rig.create_issue(0, "bootstrap-pre-0")];
 
-    churn_node(rig.node(0), 400, 2);
-
-    wait_for_wal_segments(&rig, 0, &NamespaceId::core(), 2, Duration::from_secs(20));
+    create_until_wal_segments(&rig, 0, &NamespaceId::core(), 2, Duration::from_secs(20));
+    wait_for_wal_segments(&rig, 0, &NamespaceId::core(), 2, Duration::from_secs(5));
     wait_for_checkpoint(&rig, 0, &NamespaceId::core(), Duration::from_secs(60));
 
     let tail_ids = [rig.create_issue(0, "bootstrap-tail-0")];
@@ -319,7 +336,7 @@ fn repl_daemon_crash_restart_roundtrip() {
     let mut options = ReplRigOptions::default();
     options.seed = 29;
 
-    let rig = ReplRig::new(2, options);
+    let mut rig = ReplRig::new(2, options);
 
     let initial = [
         rig.create_issue(0, "crash-pre-0"),
@@ -349,7 +366,7 @@ fn repl_daemon_crash_restart_tailnet_roundtrip() {
     options.seed = 51;
     options.fault_profile = Some(FaultProfile::tailnet());
 
-    let rig = ReplRig::new(2, options);
+    let mut rig = ReplRig::new(2, options);
     rig.assert_replication_ready(Duration::from_secs(60));
 
     let initial = [
@@ -363,6 +380,7 @@ fn repl_daemon_crash_restart_tailnet_roundtrip() {
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
     wait_for_sample(&rig, &initial, Duration::from_secs(20));
 
+    let recovery_ready = rig.replication_ready_snapshot();
     rig.crash_node(1);
 
     let post = [rig.create_issue(0, "tailnet-crash-post-0")];
@@ -373,7 +391,7 @@ fn repl_daemon_crash_restart_tailnet_roundtrip() {
     rig.wait_for_admin_ready(1, Duration::from_secs(30));
     rig.reload_replication(0);
     rig.reload_replication(1);
-    rig.assert_replication_ready(Duration::from_secs(90));
+    rig.assert_replication_ready_since(&recovery_ready, Duration::from_secs(90));
 
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(180));
     let combined: Vec<String> = initial.iter().chain(post.iter()).cloned().collect();
@@ -385,7 +403,7 @@ fn repl_daemon_roster_reload_and_epoch_bump_roundtrip() {
     let mut options = ReplRigOptions::default();
     options.seed = 37;
 
-    let rig = ReplRig::new(2, options);
+    let mut rig = ReplRig::new(2, options);
 
     let initial = [
         rig.create_issue(0, "roster-pre-0"),
@@ -657,10 +675,13 @@ fn create_issue_with_durability(
     title: &str,
     k: NonZeroU32,
 ) -> (BeadId, beads_core::DurabilityReceipt) {
-    let mut attempts = 0u8;
-    loop {
-        let response = create_issue_with_durability_result(rig, node_idx, title, k);
-        match response {
+    wait::retry_with_backoff(
+        "fixture.repl_e2e.create_issue_with_durability",
+        format!("node={node_idx} title={title} k={}", k.get()),
+        Duration::from_secs(3),
+        Duration::from_millis(50),
+        Duration::from_millis(250),
+        || match create_issue_with_durability_result(rig, node_idx, title, k) {
             Response::Ok {
                 ok: ResponsePayload::Op(op),
             } => {
@@ -668,17 +689,19 @@ fn create_issue_with_durability(
                     OpResult::Created { id } => id,
                     other => panic!("unexpected op result: {other:?}"),
                 };
-                return (issue_id, op.receipt);
+                Ok((issue_id, op.receipt))
             }
-            Response::Err { err }
-                if err.code == ProtocolErrorCode::DurabilityTimeout.into() && attempts < 5 =>
-            {
-                attempts += 1;
-                std::thread::sleep(Duration::from_millis(500));
-            }
-            other => panic!("unexpected create response: {other:?}"),
-        }
-    }
+            other => Err(other),
+        },
+        |response| {
+            matches!(
+                response,
+                Response::Err { err }
+                    if err.code == ProtocolErrorCode::DurabilityTimeout.into()
+            )
+        },
+    )
+    .unwrap_or_else(|other| panic!("unexpected create response: {other:?}"))
 }
 
 fn create_issue_with_durability_result(

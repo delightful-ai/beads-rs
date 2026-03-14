@@ -99,7 +99,11 @@ impl Drop for ScopedPhase {
         let Some(sink) = self.sink.as_ref() else {
             return;
         };
-        sink.record(self.phase, self.context.as_deref(), self.start.elapsed().as_millis());
+        sink.record(
+            self.phase,
+            self.context.as_deref(),
+            self.start.elapsed().as_millis(),
+        );
     }
 }
 
@@ -117,14 +121,29 @@ pub fn scoped_phase_with_context(
 fn current_binary_name() -> String {
     std::env::current_exe()
         .ok()
-        .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+        .and_then(|path| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
         .unwrap_or_else(|| "unknown-binary".to_string())
 }
 
 fn current_test_name() -> Option<String> {
+    if let Some(test_name) = std::env::var_os("NEXTEST_TEST_NAME") {
+        return Some(test_name.to_string_lossy().into_owned());
+    }
     let args = std::env::args().collect::<Vec<_>>();
-    args.windows(2)
-        .find_map(|window| (window[0] == "--exact").then(|| window[1].clone()))
+    if args.iter().any(|arg| arg == "--exact") {
+        let positional = args
+            .into_iter()
+            .skip(1)
+            .filter(|arg| !arg.starts_with('-'))
+            .collect::<Vec<_>>();
+        if positional.len() == 1 {
+            return positional.into_iter().next();
+        }
+    }
+    None
 }
 
 fn sanitize_filename(raw: &str) -> String {
@@ -177,12 +196,24 @@ mod tests {
         let parsed = {
             let args = vec![
                 "integration".to_string(),
-                "--exact".to_string(),
                 "fixtures::timing::tests::current_test_name_reads_exact_filter".to_string(),
+                "--exact".to_string(),
                 "--nocapture".to_string(),
             ];
-            args.windows(2)
-                .find_map(|window| (window[0] == "--exact").then(|| window[1].clone()))
+            if args.iter().any(|arg| arg == "--exact") {
+                let positional = args
+                    .into_iter()
+                    .skip(1)
+                    .filter(|arg| !arg.starts_with('-'))
+                    .collect::<Vec<_>>();
+                if positional.len() == 1 {
+                    positional.into_iter().next()
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
         };
         assert_eq!(
             parsed.as_deref(),

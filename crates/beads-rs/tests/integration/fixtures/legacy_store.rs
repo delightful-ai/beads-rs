@@ -1,7 +1,10 @@
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use git2::{FetchOptions, Oid, Repository, Signature};
+
+use super::wait;
 
 const STORE_REF: &str = "refs/heads/beads/store";
 const REMOTE_STORE_REF: &str = "refs/remotes/origin/beads/store";
@@ -59,6 +62,19 @@ pub fn fetch_remote_store_ref(repo_path: &Path) -> Oid {
         .expect("fetch remote tracking ref");
     repo.refname_to_id(REMOTE_STORE_REF)
         .expect("remote tracking store ref")
+}
+
+pub fn wait_for_fetched_remote_store_ref(repo_path: &Path, expected: Oid, timeout: Duration) {
+    assert!(
+        wait::poll_until_with_phase(
+            "fixture.legacy_store.wait_for_fetched_remote_store_ref",
+            format!("repo={} expected={expected}", repo_path.display()),
+            timeout,
+            || fetch_remote_store_ref(repo_path) == expected
+        ),
+        "remote tracking store ref under {} did not reach {expected} within {timeout:?}",
+        repo_path.display()
+    );
 }
 
 fn write_store_ref(

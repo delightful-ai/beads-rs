@@ -6,6 +6,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::DaemonRuntimeConfig;
 use crate::layout::DaemonLayout;
@@ -78,6 +79,10 @@ pub fn run_daemon(
         version: env!("CARGO_PKG_VERSION").to_string(),
         protocol_version: crate::runtime::ipc::IPC_PROTOCOL_VERSION,
         pid: std::process::id(),
+        started_at_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .map(|duration| duration.as_millis() as u64),
     };
     let _ = std::fs::write(
         &meta_path,

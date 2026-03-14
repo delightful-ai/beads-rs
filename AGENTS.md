@@ -46,10 +46,17 @@ Logging: `LOG=debug` or `LOG=beads_rs=trace`, or `-v/-vv` on `bd`.
 ## Test Infrastructure
 
 - Default to `cargo xtest` for the warm fast tier. Use `cargo nextest run --profile slow --workspace --all-features --features slow-tests` for the slow tier.
+- The shared nextest runner is intentionally capped in `.config/nextest.toml` (`test-threads = 4`). Do not raise it blindly; prove any change with repeated whole-suite burn-in receipts.
+- Tailnet fault-injection `daemon::repl_e2e` tests run in the `tailnet-fault-injection` nextest group (`max-threads = 1`). If you add another tailnet/proxy stress test, fence it into the same group instead of letting it silently contend with the rest of the fast tier.
 - Profile the suite with `./scripts/profile-tests.sh`. It captures per-test nextest timing plus env-gated fixture timing under `tmp/perf/tests-*`.
+- `./scripts/profile-tests.sh` defaults to `PROFILE_TEST_THREADS=2` so profiling artifacts stay reproducible under load. Override only when you are deliberately measuring a different concurrency level.
 - Reuse shared helpers under `crates/beads-rs/tests/integration/fixtures/`. If a test needs new repo/runtime/daemon setup behavior, add or extend a shared fixture instead of creating another one-off local `TestRepo`.
 - Shared fixture timing lives in `crates/beads-rs/tests/integration/fixtures/timing.rs` and is activated with `BD_TEST_TIMING_DIR`.
 - Avoid fixed sleeps in tests. Prefer shared condition-based wait helpers and explicit readiness barriers.
+- Reuse `fixtures::bd_runtime` and `fixtures::wait` for daemon socket/meta/store discovery and process-exit polling instead of open-coding JSON/socket probes in individual tests.
+- For crash/restart replication tests, snapshot readiness first and then require fresh post-restart handshakes with `replication_ready_snapshot()` and `assert_replication_ready_since(...)`. Do not treat persisted pre-crash liveness rows as proof of recovery.
+- Do not call `reload_replication()` after ordinary replicated writes when the roster/config has not changed; wait on the existing readiness/convergence helpers instead.
+- The default tailnet smoke profile should stay deterministic (latency/jitter only). Put loss, duplication, blackholes, and reorder stress in the explicit pathological tailnet tests instead of the default roundtrip smoke.
 
 ## Coding Style
 

@@ -19,6 +19,8 @@ pub struct DaemonInfo {
     pub version: String,
     pub protocol_version: u32,
     pub pid: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<u64>,
 }
 
 // =============================================================================
@@ -29,6 +31,8 @@ pub struct DaemonInfo {
 pub struct AdminStatusOutput {
     pub store_id: StoreId,
     pub replica_id: ReplicaId,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replication_listen_addr: Option<String>,
     pub namespaces: Vec<NamespaceId>,
     pub watermarks_applied: Watermarks<Applied>,
     pub watermarks_durable: Watermarks<Durable>,

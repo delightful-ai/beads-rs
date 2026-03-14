@@ -1,12 +1,15 @@
 #![allow(dead_code)]
 
+use std::fs;
+use std::path::Path;
 use std::path::PathBuf;
 use std::process::{Child, Command};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use tempfile::TempDir;
 
 use super::timing;
+use super::wait;
 
 #[derive(Clone, Debug)]
 pub struct TailnetProfile {
@@ -130,8 +133,7 @@ impl TailnetProxy {
         profile: TailnetProfile,
         trace: Option<TailnetTrace>,
     ) -> Self {
-        let _phase =
-            timing::scoped_phase_with_context("fixture.tailnet_proxy.spawn", &listen_addr);
+        let _phase = timing::scoped_phase_with_context("fixture.tailnet_proxy.spawn", &listen_addr);
         let bin = assert_cmd::cargo::cargo_bin!("tailnet_proxy");
         let ready_dir = TempDir::new().expect("ready dir");
         let ready_path = ready_dir.path().join("ready");
@@ -178,11 +180,19 @@ impl TailnetProxy {
         };
         {
             let _phase = timing::scoped_phase("fixture.tailnet_proxy.ready_wait");
-            wait_for_ready(&ready_path, Duration::from_secs(2));
+            assert!(
+                wait::poll_until(Duration::from_secs(2), || read_ready_listen_addr(
+                    &ready_path
+                )
+                .is_some()),
+                "tailnet proxy did not publish readiness at {}",
+                ready_path.display()
+            );
         }
         if let Some(status) = child.try_wait().expect("check proxy status") {
             panic!("tailnet proxy exited early: {status}");
         }
+        let listen_addr = read_ready_listen_addr(&ready_path).expect("tailnet proxy listen addr");
         Self {
             child,
             listen_addr,
@@ -208,18 +218,9 @@ fn push_opt_arg<T: ToString>(cmd: &mut Command, flag: &str, value: Option<T>) {
     }
 }
 
-fn wait_for_ready(path: &PathBuf, timeout: Duration) {
-    let deadline = Instant::now() + timeout;
-    loop {
-        if path.exists() {
-            return;
-        }
-        if Instant::now() >= deadline {
-            panic!(
-                "tailnet proxy did not signal readiness at {}",
-                path.display()
-            );
-        }
-        std::thread::sleep(Duration::from_millis(10));
-    }
+fn read_ready_listen_addr(path: &Path) -> Option<String> {
+    let contents = fs::read_to_string(path).ok()?;
+    contents
+        .lines()
+        .find_map(|line| line.strip_prefix("listen_addr=").map(ToOwned::to_owned))
 }

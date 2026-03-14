@@ -44,10 +44,12 @@ impl Daemon {
         let watermarks_durable = store.watermarks_durable.clone();
         drop(proof);
         let checkpoints = build_checkpoint_status(self.checkpoint_group_snapshots(store_id));
+        let replication_listen_addr = self.replication_server_local_addr(store_id);
 
         let output = AdminStatusOutput {
             store_id,
             replica_id,
+            replication_listen_addr,
             namespaces: namespaces.into_iter().collect(),
             watermarks_applied,
             watermarks_durable,
@@ -495,6 +497,52 @@ impl Daemon {
         // Fresh loads already bind replication runtime during repo load.
         // Only force rebind if the store was already loaded before this command.
         if was_loaded && let Err(err) = self.reload_replication_runtime(store_id) {
+            return Response::err_from(err);
+        }
+
+        let roster = match load_replica_roster(self.layout(), store_id) {
+            Ok(roster) => roster,
+            Err(err) => return Response::err_from(OpError::StoreRuntime(Box::new(err))),
+        };
+        let output = AdminReloadReplicationOutput {
+            store_id,
+            roster_present: roster.is_some(),
+        };
+        Response::ok(ResponsePayload::query(QueryResult::AdminReloadReplication(
+            output,
+        )))
+    }
+
+    pub(crate) fn admin_reload_replication_peers(
+        &mut self,
+        repo: &Path,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        let resolved = match self.resolve_store(repo) {
+            Ok(resolved) => resolved,
+            Err(err) => return Response::err_from(err),
+        };
+        let store_id = resolved.store_id();
+        let was_loaded = self
+            .try_loaded_store(store_id, resolved.remote.clone())
+            .is_some();
+        let previous_replication = self.replication_config().clone();
+
+        if let Err(err) = self.reload_replication_config(repo) {
+            return Response::err_from(err);
+        }
+
+        let proof = match self.ensure_repo_loaded_strict(repo, git_tx) {
+            Ok(proof) => proof,
+            Err(err) => {
+                self.set_replication_config(previous_replication);
+                return Response::err_from(err);
+            }
+        };
+        let store_id = proof.store_id();
+        drop(proof);
+
+        if was_loaded && let Err(err) = self.reload_replication_peers(store_id) {
             return Response::err_from(err);
         }
 
