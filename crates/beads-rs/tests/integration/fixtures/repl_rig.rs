@@ -34,6 +34,7 @@ use super::daemon_boundary::wal::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 use super::daemon_runtime::{crash_daemon, shutdown_daemon};
 use super::store_lock::unlock_store;
 use super::tailnet_proxy::{TailnetProfile, TailnetProxy, TailnetTrace, TailnetTraceMode};
+use super::timing;
 
 pub type FaultProfile = TailnetProfile;
 
@@ -104,6 +105,8 @@ pub struct ReplRig {
 impl ReplRig {
     pub fn new(node_count: usize, options: ReplRigOptions) -> Self {
         assert!(node_count > 0, "node_count must be > 0");
+        let _phase =
+            timing::scoped_phase_with_context("fixture.repl_rig.new", format!("nodes={node_count}"));
 
         let tmp_root = ensure_tmp_root();
         let root = TempDir::new_in(&tmp_root).expect("temp root");
@@ -116,7 +119,10 @@ impl ReplRig {
         };
         let remote_dir = root_path.join("remote.git");
         fs::create_dir_all(&remote_dir).expect("create remote dir");
-        run_git(&["init", "--bare"], &remote_dir).expect("git init --bare");
+        {
+            let _phase = timing::scoped_phase("fixture.repl_rig.init_bare_remote");
+            run_git(&["init", "--bare"], &remote_dir).expect("git init --bare");
+        }
 
         let store_id_override = if options.use_store_id_override {
             Some(StoreId::new(Uuid::new_v4()))
@@ -127,7 +133,11 @@ impl ReplRig {
         let issue_min_seen = Arc::new(Mutex::new(BTreeMap::new()));
         let mut seeds = Vec::with_capacity(node_count);
         for idx in 0..node_count {
-            let seed = build_node(&root_path, idx, &remote_dir);
+            let seed = {
+                let _phase =
+                    timing::scoped_phase_with_context("fixture.repl_rig.build_node", idx.to_string());
+                build_node(&root_path, idx, &remote_dir)
+            };
             // Write user config before init so the daemon boots with WAL limits.
             write_replication_user_config(
                 &seed.config_dir,
@@ -143,7 +153,13 @@ impl ReplRig {
 
         let mut nodes = Vec::with_capacity(node_count);
         for seed in seeds {
-            let (store_id, replica_id) = bootstrap_replica(&seed, store_id_override);
+            let (store_id, replica_id) = {
+                let _phase = timing::scoped_phase_with_context(
+                    "fixture.repl_rig.bootstrap_replica",
+                    seed.repo_dir.display(),
+                );
+                bootstrap_replica(&seed, store_id_override)
+            };
             if let Some(existing) = resolved_store_id {
                 assert_eq!(
                     existing, store_id,
@@ -195,10 +211,25 @@ impl ReplRig {
 
         // Start proxies before daemons so configured peer addresses are already listening
         // when replication managers come up and config-triggered reloads run.
-        let proxies = spawn_proxies(proxy_specs);
+        let proxies = {
+            let _phase = timing::scoped_phase("fixture.repl_rig.spawn_proxies");
+            spawn_proxies(proxy_specs)
+        };
         for node in &nodes {
-            node.start_daemon();
-            node.reload_replication();
+            {
+                let _phase = timing::scoped_phase_with_context(
+                    "fixture.repl_rig.start_daemon",
+                    node.runtime_dir.display(),
+                );
+                node.start_daemon();
+            }
+            {
+                let _phase = timing::scoped_phase_with_context(
+                    "fixture.repl_rig.reload_replication",
+                    node.runtime_dir.display(),
+                );
+                node.reload_replication();
+            }
         }
 
         Self {

@@ -5,6 +5,8 @@ use std::sync::OnceLock;
 use git2::Repository;
 use tempfile::Builder;
 
+use super::timing;
+
 static TEMPLATE_REPO_PATH: OnceLock<Result<PathBuf, String>> = OnceLock::new();
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -20,18 +22,22 @@ impl BranchPresence {
 }
 
 pub fn init_bare_repo(path: &Path) -> Result<(), String> {
+    let _phase = timing::scoped_phase_with_context("fixture.git.init_bare_repo", path.display());
     Repository::init_bare(path)
         .map_err(|err| format!("git init --bare failed for {path:?}: {err}"))?;
     Ok(())
 }
 
 pub fn init_repo(path: &Path) -> Result<Repository, String> {
+    let _phase = timing::scoped_phase_with_context("fixture.git.init_repo", path.display());
     let template = template_repo_path()?;
     copy_dir_all(template, path)?;
     Repository::open(path).map_err(|err| format!("open repo failed for {path:?}: {err}"))
 }
 
 pub fn init_repo_with_origin(repo_dir: &Path, remote_dir: &Path) -> Result<(), String> {
+    let _phase =
+        timing::scoped_phase_with_context("fixture.git.init_repo_with_origin", repo_dir.display());
     let repo = init_repo(repo_dir)?;
     add_origin_remote(&repo, remote_dir)?;
     Ok(())

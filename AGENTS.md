@@ -37,11 +37,19 @@ cargo check                      # typecheck (run compulsively)
 cargo fmt --all                  # format
 just dylint                      # required boundary gate (CLI/daemon layering)
 cargo clippy --all-features -- -D warnings  # lint (CI uses --all-features)
-cargo test                       # unit tests
-cargo test --features slow-tests # slow tests (CI runs these separately)
+cargo xtest                      # canonical fast tier (nextest fast profile)
+cargo nextest run --profile slow --workspace --all-features --features slow-tests
 ```
 
 Logging: `LOG=debug` or `LOG=beads_rs=trace`, or `-v/-vv` on `bd`.
+
+## Test Infrastructure
+
+- Default to `cargo xtest` for the warm fast tier. Use `cargo nextest run --profile slow --workspace --all-features --features slow-tests` for the slow tier.
+- Profile the suite with `./scripts/profile-tests.sh`. It captures per-test nextest timing plus env-gated fixture timing under `tmp/perf/tests-*`.
+- Reuse shared helpers under `crates/beads-rs/tests/integration/fixtures/`. If a test needs new repo/runtime/daemon setup behavior, add or extend a shared fixture instead of creating another one-off local `TestRepo`.
+- Shared fixture timing lives in `crates/beads-rs/tests/integration/fixtures/timing.rs` and is activated with `BD_TEST_TIMING_DIR`.
+- Avoid fixed sleeps in tests. Prefer shared condition-based wait helpers and explicit readiness barriers.
 
 ## Coding Style
 

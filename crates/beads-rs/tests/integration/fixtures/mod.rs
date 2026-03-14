@@ -22,5 +22,6 @@ pub mod repl_rig;
 pub mod store_dir;
 pub mod store_lock;
 pub mod tailnet_proxy;
+pub mod timing;
 pub mod wal;
 pub mod wal_corrupt;

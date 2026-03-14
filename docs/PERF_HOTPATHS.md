@@ -100,3 +100,51 @@ Thresholds are configurable:
 - Always compare against a saved baseline artifact directory.
 - Keep benchmark runs pinned to a known binary via `BD_BIN`.
 - Treat `hyperfine-*.json` + `admin-metrics.json` as source-of-truth data.
+
+## Test Suite Profiling
+
+The repo now has a first-class test-suite profiling harness:
+
+- script: `scripts/profile-tests.sh`
+- fast entrypoint: `cargo xtest`
+- slow entrypoint: `cargo nextest run --profile slow --workspace --all-features --features slow-tests`
+
+### What It Captures
+
+- `fast-list.txt`, `slow-list.txt`: enumerated test inventory
+- `fast-raw.log`, `slow-raw.log`: full nextest output
+- `fast-messages.jsonl`, `slow-messages.jsonl`: structured nextest timing events
+- `fast-top-tests.tsv`, `slow-top-tests.tsv`: slowest individual tests
+- `fast-top-suites.tsv`, `slow-top-suites.tsv`: slowest binaries / suites
+- `fast-phase-summary.tsv`, `slow-phase-summary.tsv`: env-gated fixture timing aggregated by phase
+- `fast-phases/`, `slow-phases/`: raw per-process timing JSONL emitted by shared test fixtures
+- `SUMMARY.txt`: condensed run digest
+
+### Fixture Timing
+
+Shared integration fixtures write timing events when `BD_TEST_TIMING_DIR` is set. Current coverage includes:
+
+- git fixture setup in `crates/beads-rs/tests/integration/fixtures/git.rs`
+- realtime fixture setup and daemon bootstrap in `crates/beads-rs/tests/integration/fixtures/realtime.rs`
+- tailnet proxy spawn and readiness in `crates/beads-rs/tests/integration/fixtures/tailnet_proxy.rs`
+- replication rig construction, bootstrap, proxy startup, and daemon startup in `crates/beads-rs/tests/integration/fixtures/repl_rig.rs`
+
+### Current Baseline
+
+Fast-tier baseline artifact:
+
+- `tmp/perf/tests-20260314-104053`
+
+Current receipts from that run:
+
+- fast profile exit code: `100`
+- blocking failures: `cli::migration::test_migrate_fixture_related_divergence_merges_realistic_fixtures` and `cli::migration::test_migrate_fixture_unrelated_divergence_requires_force`
+- hottest suite: `beads-rs::integration` at about `221.5s`
+- next hottest suite: `beads-git::beads_git` at about `65.7s`
+- hottest test: `daemon::repl_e2e::repl_checkpoint_bootstrap_under_churn` at about `17.8s`
+- hottest instrumented setup phase: `fixture.repl_rig.new` with `24.4s` total across the run
+
+Tracker linkage:
+
+- profiling/instrumentation bead: `beads-rs-fblt.1`
+- newly discovered fast-tier blocker: `beads-rs-fblt.6`

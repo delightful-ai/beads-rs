@@ -9,6 +9,7 @@ use tempfile::TempDir;
 
 use super::daemon_runtime::shutdown_daemon;
 use super::git::{init_bare_repo, init_repo_with_origin};
+use super::timing;
 use beads_api::QueryResult;
 use beads_daemon::test_utils::poll_until;
 use beads_surface::ipc::{EmptyPayload, IpcClient, RepoCtx, Request, Response, ResponsePayload};
@@ -23,15 +24,22 @@ pub struct RealtimeFixture {
 
 impl RealtimeFixture {
     pub fn new() -> Self {
+        let _phase = timing::scoped_phase("fixture.realtime.new");
         let runtime_dir = TempDir::new().expect("create runtime dir");
         let repo_dir = TempDir::new().expect("create repo dir");
         let remote_dir = TempDir::new().expect("create remote dir");
 
-        init_git_repo(repo_dir.path(), remote_dir.path())
-            .unwrap_or_else(|err| panic!("git fixture init failed: {err}"));
+        {
+            let _phase = timing::scoped_phase("fixture.realtime.git_init");
+            init_git_repo(repo_dir.path(), remote_dir.path())
+                .unwrap_or_else(|err| panic!("git fixture init failed: {err}"));
+        }
 
         let data_dir = runtime_dir.path().join("data");
-        fs::create_dir_all(&data_dir).expect("create test data dir");
+        {
+            let _phase = timing::scoped_phase("fixture.realtime.data_dir");
+            fs::create_dir_all(&data_dir).expect("create test data dir");
+        }
 
         Self {
             runtime_dir,
@@ -73,6 +81,7 @@ impl RealtimeFixture {
     }
 
     pub fn start_daemon(&self) {
+        let _phase = timing::scoped_phase("fixture.realtime.start_daemon");
         let client = self.ipc_client().with_autostart(false);
         if !ping_daemon(&client) {
             let mut cmd = StdCommand::new(assert_cmd::cargo::cargo_bin!("bd"));
@@ -90,9 +99,15 @@ impl RealtimeFixture {
             cmd.stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            cmd.spawn().expect("spawn daemon");
+            {
+                let _phase = timing::scoped_phase("fixture.realtime.daemon_spawn");
+                cmd.spawn().expect("spawn daemon");
+            }
 
-            let ok = poll_until(Duration::from_secs(5), || ping_daemon(&client));
+            let ok = {
+                let _phase = timing::scoped_phase("fixture.realtime.daemon_ready_wait");
+                poll_until(Duration::from_secs(5), || ping_daemon(&client))
+            };
             assert!(ok, "daemon failed to start");
         }
 
@@ -100,9 +115,12 @@ impl RealtimeFixture {
             ctx: RepoCtx::new(self.repo_dir.path().to_path_buf()),
             payload: EmptyPayload {},
         };
-        let response = client
-            .send_request_no_autostart(&request)
-            .expect("init response");
+        let response = {
+            let _phase = timing::scoped_phase("fixture.realtime.init_request");
+            client
+                .send_request_no_autostart(&request)
+                .expect("init response")
+        };
         match response {
             Response::Ok {
                 ok: ResponsePayload::Initialized(_),

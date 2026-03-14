@@ -6,6 +6,8 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+use super::timing;
+
 #[derive(Clone, Debug)]
 pub struct TailnetProfile {
     pub profile: String,
@@ -128,6 +130,8 @@ impl TailnetProxy {
         profile: TailnetProfile,
         trace: Option<TailnetTrace>,
     ) -> Self {
+        let _phase =
+            timing::scoped_phase_with_context("fixture.tailnet_proxy.spawn", &listen_addr);
         let bin = assert_cmd::cargo::cargo_bin!("tailnet_proxy");
         let ready_dir = TempDir::new().expect("ready dir");
         let ready_path = ready_dir.path().join("ready");
@@ -168,8 +172,14 @@ impl TailnetProxy {
             cmd.arg("--trace-path").arg(&trace.path);
             push_opt_arg(&mut cmd, "--trace-timeout-ms", trace.timeout_ms);
         }
-        let mut child = cmd.spawn().expect("spawn tailnet proxy");
-        wait_for_ready(&ready_path, Duration::from_secs(2));
+        let mut child = {
+            let _phase = timing::scoped_phase("fixture.tailnet_proxy.process_spawn");
+            cmd.spawn().expect("spawn tailnet proxy")
+        };
+        {
+            let _phase = timing::scoped_phase("fixture.tailnet_proxy.ready_wait");
+            wait_for_ready(&ready_path, Duration::from_secs(2));
+        }
         if let Some(status) = child.try_wait().expect("check proxy status") {
             panic!("tailnet proxy exited early: {status}");
         }
