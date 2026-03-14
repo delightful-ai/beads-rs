@@ -122,6 +122,8 @@ impl MetricSink for TracingSink {
 
 static METRIC_SINK: std::sync::OnceLock<RwLock<Arc<dyn MetricSink>>> = std::sync::OnceLock::new();
 static METRIC_STATE: std::sync::OnceLock<Mutex<MetricsState>> = std::sync::OnceLock::new();
+#[cfg(test)]
+static METRICS_TEST_LOCK: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
 
 fn sink() -> Arc<dyn MetricSink> {
     METRIC_SINK
@@ -135,6 +137,45 @@ fn sink() -> Arc<dyn MetricSink> {
 fn set_sink(sink: Arc<dyn MetricSink>) {
     let lock = METRIC_SINK.get_or_init(|| RwLock::new(Arc::new(TracingSink)));
     *lock.write().expect("metrics sink lock poisoned") = sink;
+}
+
+#[cfg(test)]
+pub(crate) struct TestMetricsScope {
+    prev_sink: Arc<dyn MetricSink>,
+    prev_state: MetricsState,
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl TestMetricsScope {
+    pub(crate) fn new() -> Self {
+        let lock = METRICS_TEST_LOCK.get_or_init(|| Mutex::new(()));
+        let test_lock = lock.lock().expect("metrics test lock poisoned");
+        let prev_sink = sink();
+        let prev_state = state()
+            .lock()
+            .expect("metrics state lock poisoned")
+            .clone();
+        set_sink(Arc::new(TracingSink));
+        *state().lock().expect("metrics state lock poisoned") = MetricsState::default();
+        Self {
+            prev_sink,
+            prev_state,
+            _lock: test_lock,
+        }
+    }
+
+    pub(crate) fn set_sink(&self, sink: Arc<dyn MetricSink>) {
+        set_sink(sink);
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestMetricsScope {
+    fn drop(&mut self) {
+        set_sink(self.prev_sink.clone());
+        *state().lock().expect("metrics state lock poisoned") = self.prev_state.clone();
+    }
 }
 
 fn state() -> &'static Mutex<MetricsState> {
@@ -549,7 +590,7 @@ fn record_state(name: &'static str, value: &MetricValue, labels: &[MetricLabel])
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct MetricsState {
     counters: BTreeMap<MetricKey, u64>,
     gauges: BTreeMap<MetricKey, u64>,
@@ -608,7 +649,7 @@ impl MetricsState {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct HistogramState {
     samples: VecDeque<u64>,
     count: u64,
@@ -651,8 +692,9 @@ mod tests {
 
     #[test]
     fn emits_counters_and_histograms() {
+        let scope = TestMetricsScope::new();
         let sink = Arc::new(TestSink::default());
-        set_sink(sink.clone());
+        scope.set_sink(sink.clone());
 
         wal_append_ok(Duration::from_millis(12));
         wal_fsync_err(Duration::from_millis(7));
@@ -707,6 +749,7 @@ mod tests {
 
     #[test]
     fn snapshot_collects_metrics() {
+        let _scope = TestMetricsScope::new();
         wal_append_ok(Duration::from_millis(4));
         wal_fsync_ok(Duration::from_millis(2));
         set_ipc_inflight(3);
@@ -746,5 +789,13 @@ mod tests {
                     .any(|l| l.key == "request_type" && l.value == "ready")
         }));
         assert!(snapshot.gauges.iter().any(|m| m.name == "ipc_inflight"));
+    }
+
+    #[test]
+    fn test_metrics_scope_resets_state_between_tests() {
+        let _scope = TestMetricsScope::new();
+        assert!(snapshot().counters.is_empty());
+        wal_append_ok(Duration::from_millis(1));
+        assert!(snapshot().counters.iter().any(|m| m.name == "wal_append_ok"));
     }
 }
