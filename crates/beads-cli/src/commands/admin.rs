@@ -814,6 +814,7 @@ mod tests {
         let status = AdminStatusOutput {
             store_id,
             replica_id,
+            replication_listen_addr: None,
             namespaces: vec![NamespaceId::core()],
             watermarks_applied: applied,
             watermarks_durable: durable,

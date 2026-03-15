@@ -1,3 +1,571 @@
+yeah — grokked. and yes, this applies to root and every child `agents.md`, not just root.
+
+the big correction is this:
+
+there is no optimal universal static section list.
+
+there **is** an optimal universal contract.
+
+a god-tier `agents.md` is a location-aware, stackable context patch that gives an agent peripheral vision at a particular point in the repo. it is not just “commands + tips.” it is the local map, the local law, the local pattern language, the local hazard atlas, and the local proof strategy.
+
+the actual bar is:
+
+> given only the relevant code plus the stacked `agents.md` files from root to the working directory, a smart stranger should be able to make the right change in the right place, in the house style, without copying legacy nonsense, and with a cheap way to prove they didn’t break the wrong thing.
+
+that’s the spec in one sentence.
+
+## 1. what an `agents.md` actually is
+
+it can be all of these at once:
+
+* a map of the territory
+* a routing table for where new code should go
+* a boundary contract for what does **not** belong here
+* a pattern index for what to copy
+* a hazard register for what not to copy
+* a verification graph for how to check work
+* an exception ledger for where local rules diverge
+* a maintenance contract for how it stays true over time
+
+if a file is only a command catalog, it’s underpowered.
+if it’s only philosophy, it’s decorative.
+if it’s only local trivia, it’s myopic.
+
+the sweet spot is: **it changes decisions**.
+
+## 2. the universal spec is semantic, not sectional
+
+fixed headings are the wrong abstraction.
+
+different repos, and different layers inside the same repo, need different renderings. what should be universal is the set of **semantic obligations**.
+
+for any location in a repo, the stacked `agents.md` context should answer these questions:
+
+1. where am i, conceptually?
+2. what belongs here?
+3. what definitely does not belong here?
+4. what invariants govern this area?
+5. what local patterns are canonical?
+6. what nearby code is misleading legacy bait?
+7. what should i run to verify a change here?
+8. what is special about this layer vs its parent and siblings?
+9. when should this file itself be updated?
+
+those are the universal slots. the section names can vary. the presence of those answers cannot.
+
+## 3. the hierarchy law: highest stable truth, not highest possible truth
+
+your instinct is close, but the naive version is slightly cursed.
+
+not “put every fact at the highest layer where it can be stated.”
+
+instead:
+
+> put a rule at the highest layer where it is simultaneously true, actionable, and stable.
+
+that three-part test matters.
+
+a rule belongs higher only if:
+
+* it is true for that whole subtree
+* it changes decisions at that level
+* it won’t churn constantly because of local implementation details
+
+that avoids a bunch of fake elegance.
+
+examples:
+
+* “routes are thin; business logic lives below the transport layer” is a high-level rule.
+* “for this webhook route, validate signature before deserializing provider-specific payloads” is not root material, even though it’s an instance of the global rule.
+* “run `cargo test`” at every leaf is noise unless that leaf adds something materially more specific.
+
+so the real heuristic is:
+
+* global truths live high
+* local tactics live low
+* volatile details live low
+* shared sibling truth gets promoted
+* sibling-specific truth gets pushed down
+
+call this the **truth altitude test**.
+
+## 4. what each location in the tree is for
+
+this is where people usually fail the spec. they treat every `agents.md` as the same kind of file. it isn’t.
+
+every `agents.md` should declare its role, implicitly or explicitly.
+
+### root
+
+root is not “where the commands live.” that would be a profoundly mid reading.
+
+root is the repo constitution and the wide-angle map. it should encode:
+
+* the repo’s worldview
+* top-level topology: what the major directories are for
+* concept-to-location routing: “if you’re looking for x, start in y”
+* cross-cutting architectural boundaries
+* global invariants and bans
+* migration status / source-of-truth statements
+* default verification tiers
+* how child `agents.md` files are supposed to refine root
+
+root should answer: “how does this repo think?”
+
+### subsystem / domain root
+
+this is domain doctrine.
+
+it should encode:
+
+* what this subsystem owns
+* what sibling subsystems own instead
+* domain-specific invariants
+* common local task families
+* shared exemplars for the subtree
+* domain-level test and debug strategy
+* domain hazards and known bad precedent
+
+it should answer: “how does this part of the repo interpret the global law?”
+
+### seam / boundary directory
+
+this is for places where systems meet: api edges, adapters, persistence boundaries, ingestion, translation layers, etc.
+
+it should encode:
+
+* ingress/egress contracts
+* dependency direction
+* allowed leakage and forbidden leakage
+* mapping / translation invariants
+* failure semantics
+* replay / debug loops
+* examples of correct boundary handling
+
+it should answer: “what must remain true when information crosses this boundary?”
+
+### leaf / tactical directory
+
+this is the local playbook.
+
+it should encode:
+
+* exact local tasks
+* one or two canonical examples
+* local gotchas
+* local verification deltas
+* anti-patterns nearby that will tempt naive copying
+
+it should answer: “how do i safely make the common change here?”
+
+### tests directory
+
+this is a different beast. do not treat it like app code.
+
+it should encode:
+
+* what kinds of tests live here
+* what they are intended to prove
+* fixture / harness rules
+* determinism rules
+* naming / selection patterns
+* what not to test here because it belongs elsewhere
+
+it should answer: “what is the proof model in this zone?”
+
+### tooling / scripts / ops
+
+it should encode:
+
+* side effects
+* dry-run expectations
+* required env / credentials
+* idempotence expectations
+* rollback or recovery path
+* what is safe to run locally vs only in controlled contexts
+
+it should answer: “what can this script do to the world?”
+
+### legacy / quarantine
+
+this one is hugely useful and almost never written well.
+
+it should encode:
+
+* touch policy
+* what edits are allowed
+* what expansions are forbidden
+* modernization direction
+* where new work should go instead
+
+it should answer: “how do i survive touching this without making the future worse?”
+
+### generated / vendor / third-party
+
+it should mostly say:
+
+* do not hand-edit
+* source of generation
+* regeneration command
+* what sanity check to run after regeneration
+
+absence of a child `agents.md` is also meaningful: it means the parent context is sufficient.
+
+## 5. the core unit should be a decision card, not a paragraph
+
+this is the part i’d make universal.
+
+the most useful atom inside an `agents.md` is not “a section.” it’s a **decision card**.
+
+a decision card answers:
+
+* when does this apply?
+* what should i do?
+* what property must i preserve?
+* what nearby thing should i avoid copying?
+* how do i verify it?
+
+that gives you a shape like this:
+
+```md
+- when: adding a new webhook handler
+  do: copy `server/routes/vapi/webhooks.rs`
+  preserve: thin route, validate at edge, map to canonical event before service call
+  avoid: `server/routes/vapi/legacy_handler.rs`
+  verify: run `just server-fast` plus `cargo test -p server vapi_roundtrip`
+```
+
+that one card is worth more than ten paragraphs of vibes.
+
+same rule everywhere:
+
+* no naked commands
+* no naked examples
+* no naked prohibitions
+
+every command should say **when** to run it and **what it proves**.
+every example should say **why** it is canonical.
+every prohibition should say **what to do instead**.
+
+otherwise you get technically complete files that are useless in practice.
+
+## 6. redundancy avoidance: delta, not duplication
+
+this is subtle, and yeah, it’s where naive specs go to die.
+
+the right rule is:
+
+> a child `agents.md` should mostly contain the marginal signal that becomes true because you are now here.
+
+not “repeat the parent in smaller letters.”
+
+three concrete rules:
+
+### a. one truth, one altitude
+
+a fact should live at one primary layer.
+
+if the same thing is true for multiple siblings, promote it.
+if it is false for even one sibling, push it down.
+
+### b. child files should be mostly delta
+
+for a leaf file, most non-metadata lines should be genuinely local.
+if a leaf is mostly parent restatement, delete it.
+
+a decent target:
+
+* root: no delta target
+* subsystem: at least ~50% local-to-subtree signal
+* leaf: at least ~70% local-only signal
+
+not mathematically exact, but the smell test is good.
+
+### c. repetition is allowed only when it buys safety
+
+some things may be repeated on purpose because agents overweight nearby text.
+
+that is fine for:
+
+* safety-critical invariants
+* frequently violated rules
+* high-cost failure modes
+
+but mark it as re-emphasis, not new information.
+
+## 7. verification should be layered, not spammed
+
+you were right to push back on “put `cargo test` everywhere.” that’s fake utility.
+
+the model that actually works is:
+
+### root defines verification policy and tiers
+
+not just commands. policy.
+
+for example:
+
+* what “fast” means
+* what “standard” means
+* what “full” means
+* what kinds of changes should escalate between tiers
+* what global checks are expected before merge
+
+### lower layers add verification deltas
+
+they do not restate the whole world.
+they add local checks tied to local change types.
+
+so instead of this at a leaf:
+
+* run `cargo test`
+* run `cargo clippy`
+* run formatting
+
+you want this:
+
+* for mapping changes here, append `cargo test -p ingest stripe_roundtrip`
+* for contract changes here, append `just server-contracts`
+* for perf-sensitive code here, append the local benchmark or profile command
+
+in other words:
+
+* root owns baseline verification semantics
+* children own change-triggered verification deltas
+* agents run the inherited baseline plus applicable local deltas, deduped
+
+that’s way less noisy and way more operational.
+
+## 8. how agents should actually consume the hierarchy
+
+this should be part of the spec, bc otherwise people write for humans and agents misread it.
+
+the consumption model should be:
+
+1. load `agents.md` from root to current directory
+2. treat higher levels as defaults and lower levels as refinements
+3. prefer the most specific matching decision card
+4. inherit baseline checks from above
+5. append applicable local verification deltas
+6. dedupe repeated commands and rules
+7. treat explicit exception blocks as stronger than generic parent guidance
+8. ignore non-actionable filler
+
+which means authors should write with that in mind:
+
+* nearest text gets overweighted
+* concrete file paths get copied
+* vague rules get ignored
+* repeated commands get treated as important even if they’re just duplication
+* nearby legacy code will be copied unless explicitly called out as bait
+
+that last one matters a lot. code teaches by precedent. `agents.md` exists partly to veto bad precedent.
+
+## 9. what makes a child `agents.md` worth creating at all
+
+not every directory deserves one.
+
+a child file should exist only if it adds at least one of these:
+
+* a distinct local boundary
+* a distinct invariant
+* a recurring local task pattern
+* a local hazard / gotcha
+* a local verification delta
+* a local exception to parent norms
+* a local routing function for “new work goes here, not there”
+
+if it can’t do any of that, don’t create it. let inheritance work.
+
+## 10. a protocol for keeping them up to date
+
+treat them like code, not like ornamental docs.
+
+the protocol i’d use:
+
+### on-touch rule
+
+if a change alters any of these, update the nearest relevant `agents.md` in the same pr:
+
+* boundary
+* invariant
+* canonical pattern
+* verification delta
+* anti-pattern
+* routing guidance
+* exception status
+
+### promotion / demotion rule
+
+during review, ask:
+
+* is this true for siblings too? promote it.
+* is this only true here? demote it.
+
+### incident capture rule
+
+if a bug, outage, or nasty review comment would have been prevented by a better `agents.md`, add the missing rule at the lowest stable layer that would have stopped it.
+
+### churn review rule
+
+high-churn or high-incident directories should get periodic review. low-churn stable ones can age more quietly.
+
+### ownership rule
+
+every file should have an owner, team, or at least a review affinity. otherwise nobody feels the entropy.
+
+### lint rule
+
+the repo should eventually validate at least:
+
+* referenced paths exist
+* referenced commands still parse/run
+* duplicated exact text is flagged
+* `last_reviewed` is not fossilized
+* forbidden sections are not empty placeholders
+
+## 11. the scoring model
+
+here’s a scoring rubric that is actually about utility, not box-ticking.
+
+call it the **context yield score**. 100 points.
+
+### 1. orientation — 15
+
+can an agent tell where it is in the conceptual map?
+does the file define the territory, not just the folder name?
+
+### 2. routing power — 15
+
+can an agent tell where new work should go and where it should not go?
+
+### 3. landmarks — 15
+
+are there canonical examples with reasons, not just paths?
+
+### 4. hazards — 10
+
+does it explicitly mark bad precedent, traps, and forbidden moves?
+
+### 5. proof closure — 15
+
+does it provide the cheapest sufficient verification strategy tied to change types?
+
+### 6. zoom fit — 15
+
+is the information at the right layer of abstraction for this directory?
+
+### 7. delta efficiency — 10
+
+is most of the file genuinely local signal rather than inherited duplication?
+
+### 8. freshness — 5
+
+is there a visible mechanism for keeping it true?
+
+penalties:
+
+* `-20` silent contradiction with parent
+* `-15` dead command or dead path
+* `-10` generic filler that changes no decision
+* `-10` naked command / naked example / naked prohibition
+* `-10` child file that should not exist because it adds no real delta
+
+score bands:
+
+* `90–100`: god-tier
+* `75–89`: strong
+* `60–74`: useful but leaky
+* `<60`: decorative repo cosplay
+
+## 12. the acceptance tests matter more than the score
+
+before you bless an `agents.md`, run these thought experiments:
+
+### blind placement test
+
+give a contributor a plausible feature. can they tell where it belongs?
+
+### blind refusal test
+
+give them a change that should **not** be made here. can they say no?
+
+### blind imitation test
+
+give them a local task. can they find the right exemplar and preserve the right properties?
+
+### blind verification test
+
+can they choose the right checks without either under-testing or carpet-bombing the whole repo?
+
+### blind exception test
+
+can they tell what is weird or special about this subtree?
+
+if the file passes those, it’s doing real work.
+
+## 13. a practical universal shape
+
+not mandatory headings. just a strong rendering.
+
+```md
+---
+role: root | subsystem | seam | leaf | tests | tooling | legacy | generated
+scope: /path/to/directory
+owners: [team-or-person]
+last_reviewed: yyyy-mm-dd
+change_triggers:
+  - boundary changed
+  - new recurring task appeared
+  - verification flow changed
+  - incident exposed missing guidance
+---
+
+## purpose / boundary
+what this area is for, what it is not for, allowed deps, forbidden leakage
+
+## map / routing
+where related concepts live, what siblings own instead
+
+## invariants
+truths that must continue to hold here
+
+## decision cards
+- when:
+  do:
+  preserve:
+  avoid:
+  verify:
+
+## hazards / exceptions
+legacy bait, local gotchas, explicit exceptions to parent guidance
+
+## references
+deeper docs only when needed
+```
+
+for root, expand `map / routing` and `invariants`.
+for subsystems, expand `decision cards`.
+for leaves, keep it tiny and sharp.
+for tests/tooling/legacy/generated, swap in the role-specific semantics.
+
+## 14. the actual universal principle
+
+if i had to compress the whole thing to one governing law, it’d be this:
+
+> every `agents.md` should provide the maximum additional peripheral vision for its location at the minimum possible duplication cost.
+
+that’s the whole game.
+
+or even tighter:
+
+> root gives horizon, children add resolution, leaves add handholds.
+
+that’s the bar.
+
+
+===
+
 ## What an AGENTS.md is
 
 An `AGENTS.md` file is **executable context that makes a limited-visibility contributor behave correctly**.

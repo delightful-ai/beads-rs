@@ -13,6 +13,8 @@ use beads_surface::ipc::{
     CreatePayload, IpcClient, IpcError, MutationCtx, MutationMeta, Request, Response,
 };
 
+use super::timing;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Autostart {
     Enabled,
@@ -93,6 +95,15 @@ impl LoadGenerator {
     }
 
     pub fn run(&self) -> LoadReport {
+        let _phase = timing::scoped_phase_with_context(
+            "fixture.load_gen.run",
+            format!(
+                "repo={} workers={} total={}",
+                self.repo.display(),
+                self.config.workers.max(1),
+                self.config.total_requests.max(1)
+            ),
+        );
         let workers = self.config.workers.max(1);
         let total = self.config.total_requests.max(1);
         let started = Instant::now();

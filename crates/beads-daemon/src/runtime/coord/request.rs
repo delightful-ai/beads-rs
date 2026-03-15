@@ -258,6 +258,9 @@ impl Daemon {
                 AdminOp::ReloadReplication { ctx, .. } => {
                     self.admin_reload_replication(&ctx.path, git_tx).into()
                 }
+                AdminOp::ReloadReplicationPeers { ctx, .. } => self
+                    .admin_reload_replication_peers(&ctx.path, git_tx)
+                    .into(),
                 AdminOp::RotateReplicaId { ctx, .. } => {
                     self.admin_rotate_replica_id(&ctx.path, git_tx).into()
                 }
@@ -359,6 +362,7 @@ impl Daemon {
                     version: env!("CARGO_PKG_VERSION").to_string(),
                     protocol_version: crate::runtime::ipc::IPC_PROTOCOL_VERSION,
                     pid: std::process::id(),
+                    started_at_ms: self.started_at_ms(),
                 },
             )))
             .into(),

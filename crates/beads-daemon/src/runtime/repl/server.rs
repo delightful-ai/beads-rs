@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -66,6 +66,20 @@ pub enum ReplicationServerError {
     MissingConnectionLimit,
 }
 
+impl ReplicationServerConfig {
+    pub(crate) fn resolved_max_connections(&self) -> Result<NonZeroUsize, ReplicationServerError> {
+        if let Some(limit) = self.max_connections {
+            return Ok(limit);
+        }
+        if let Some(roster) = &self.roster
+            && let Some(limit) = NonZeroUsize::new(roster.replicas.len())
+        {
+            return Ok(limit);
+        }
+        Err(ReplicationServerError::MissingConnectionLimit)
+    }
+}
+
 pub struct ReplicationServer<S> {
     store: SharedSessionStore<S>,
     config: ReplicationServerConfig,
@@ -75,11 +89,22 @@ pub struct ReplicationServerHandle {
     shutdown: Arc<AtomicBool>,
     join: JoinHandle<()>,
     local_addr: SocketAddr,
+    roster: Arc<RwLock<Option<ReplicaRoster>>>,
+    max_connections: Arc<AtomicUsize>,
 }
 
 impl ReplicationServerHandle {
     pub fn local_addr(&self) -> SocketAddr {
         self.local_addr
+    }
+
+    pub fn update_peer_gate(&self, roster: Option<ReplicaRoster>, max_connections: NonZeroUsize) {
+        *self
+            .roster
+            .write()
+            .expect("replication roster lock poisoned") = roster;
+        self.max_connections
+            .store(max_connections.get(), Ordering::Release);
     }
 
     pub fn shutdown(self) {
@@ -97,12 +122,14 @@ where
     }
 
     pub fn start(self) -> Result<ReplicationServerHandle, ReplicationServerError> {
-        let max_connections = resolve_max_connections(&self.config)?;
+        let max_connections = self.config.resolved_max_connections()?;
         let listener = TcpListener::bind(&self.config.listen_addr)?;
         let local_addr = listener.local_addr()?;
 
         let shutdown = Arc::new(AtomicBool::new(false));
         let active_connections = Arc::new(AtomicUsize::new(0));
+        let roster = Arc::new(RwLock::new(self.config.roster));
+        let max_connections_slot = Arc::new(AtomicUsize::new(max_connections.get()));
 
         let runtime = ServerRuntime {
             local_store: self.config.local_store,
@@ -112,10 +139,10 @@ where
             broadcaster: self.config.broadcaster,
             peer_acks: self.config.peer_acks,
             policies: self.config.policies,
-            roster: self.config.roster,
             wal_reader: self.config.wal_reader,
             limits: self.config.limits,
-            max_connections,
+            roster: Arc::clone(&roster),
+            max_connections: Arc::clone(&max_connections_slot),
             shutdown: Arc::clone(&shutdown),
             active_connections,
         };
@@ -129,6 +156,8 @@ where
             shutdown,
             join,
             local_addr,
+            roster,
+            max_connections: max_connections_slot,
         })
     }
 }
@@ -141,10 +170,10 @@ struct ServerRuntime<S> {
     broadcaster: EventBroadcaster,
     peer_acks: Arc<Mutex<PeerAckTable>>,
     policies: BTreeMap<NamespaceId, NamespacePolicy>,
-    roster: Option<ReplicaRoster>,
     wal_reader: Option<WalRangeReader>,
     limits: Limits,
-    max_connections: NonZeroUsize,
+    roster: Arc<RwLock<Option<ReplicaRoster>>>,
+    max_connections: Arc<AtomicUsize>,
     shutdown: Arc<AtomicBool>,
     active_connections: Arc<AtomicUsize>,
 }
@@ -159,10 +188,10 @@ impl<S> Clone for ServerRuntime<S> {
             broadcaster: self.broadcaster.clone(),
             peer_acks: Arc::clone(&self.peer_acks),
             policies: self.policies.clone(),
-            roster: self.roster.clone(),
             wal_reader: self.wal_reader.clone(),
             limits: self.limits.clone(),
-            max_connections: self.max_connections,
+            roster: Arc::clone(&self.roster),
+            max_connections: Arc::clone(&self.max_connections),
             shutdown: Arc::clone(&self.shutdown),
             active_connections: Arc::clone(&self.active_connections),
         }
@@ -223,20 +252,6 @@ impl Drop for ConnectionGuard {
     }
 }
 
-fn resolve_max_connections(
-    config: &ReplicationServerConfig,
-) -> Result<NonZeroUsize, ReplicationServerError> {
-    if let Some(limit) = config.max_connections {
-        return Ok(limit);
-    }
-    if let Some(roster) = &config.roster
-        && let Some(limit) = NonZeroUsize::new(roster.replicas.len())
-    {
-        return Ok(limit);
-    }
-    Err(ReplicationServerError::MissingConnectionLimit)
-}
-
 fn run_accept_loop<S>(listener: TcpListener, runtime: ServerRuntime<S>)
 where
     S: SessionStore + Send + 'static,
@@ -261,16 +276,17 @@ where
         if runtime.shutdown.load(Ordering::Relaxed) {
             break;
         }
+        let max_connections = NonZeroUsize::new(runtime.max_connections.load(Ordering::Acquire))
+            .expect("replication max_connections should stay configured");
 
         match listener.accept() {
             Ok((stream, _)) => {
                 if let Err(err) = stream.set_nonblocking(false) {
                     tracing::warn!("replication inbound stream failed to set blocking: {err}");
                 }
-                if let Some(guard) = ConnectionGuard::try_acquire(
-                    &runtime.active_connections,
-                    runtime.max_connections,
-                ) {
+                if let Some(guard) =
+                    ConnectionGuard::try_acquire(&runtime.active_connections, max_connections)
+                {
                     let runtime = runtime.clone();
                     let session_span = tracing::Span::current();
                     thread::spawn(move || {
@@ -367,11 +383,20 @@ where
         }
     };
 
-    let roster_entry = runtime
-        .roster
-        .as_ref()
-        .and_then(|roster| roster.replica(&hello.sender_replica_id));
-    if runtime.roster.is_some() && roster_entry.is_none() {
+    let (roster_present, roster_entry) = {
+        let roster = runtime
+            .roster
+            .read()
+            .expect("replication roster lock poisoned");
+        (
+            roster.is_some(),
+            roster
+                .as_ref()
+                .and_then(|roster| roster.replica(&hello.sender_replica_id))
+                .cloned(),
+        )
+    };
+    if roster_present && roster_entry.is_none() {
         let payload = ErrorPayload::new(
             ProtocolErrorCode::UnknownReplica.into(),
             "unknown replica",
@@ -386,9 +411,11 @@ where
     }
 
     let role = roster_entry
+        .as_ref()
         .map(|entry| entry.role())
         .unwrap_or(ReplicaRole::Peer);
     let durability_eligible = roster_entry
+        .as_ref()
         .map(|entry| entry.durability_eligible())
         .unwrap_or(role != ReplicaRole::Observer);
     let durability_role = match ReplicaDurabilityRole::try_from((role, durability_eligible)) {
@@ -409,7 +436,7 @@ where
             return Ok(());
         }
     };
-    let allowed_namespaces = roster_entry.and_then(|entry| entry.allowed_namespaces.clone());
+    let allowed_namespaces = roster_entry.and_then(|entry| entry.allowed_namespaces);
     let eligible = eligible_namespaces(&runtime.policies, role, allowed_namespaces.as_ref());
 
     let mut config = SessionConfig::new(runtime.local_store, runtime.local_replica_id, &limits);

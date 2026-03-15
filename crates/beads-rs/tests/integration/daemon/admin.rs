@@ -4,14 +4,9 @@
 //! but avoid time-based sleeps to keep coverage fast and deterministic.
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command as StdCommand, Stdio};
-use std::time::{Duration, Instant};
+use std::path::Path;
 
-use tempfile::TempDir;
-
-use crate::fixtures::daemon_runtime::shutdown_daemon;
-use crate::fixtures::git::{init_bare_repo, init_repo_with_origin};
+use crate::fixtures::bd_runtime::{BdCommandProfile, BdRuntimeRepo, CheckpointMode};
 use beads_api::{
     AdminClockAnomaly, AdminClockAnomalyKind, AdminHealthReport, AdminHealthRisk, AdminHealthStats,
     AdminHealthSummary, AdminMetricsOutput, AdminReloadPoliciesOutput, AdminScrubOutput,
@@ -31,30 +26,8 @@ use beads_surface::ipc::{
 use beads_surface::ops::OpResult;
 use uuid::Uuid;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum CheckpointMode {
-    Enabled,
-    Disabled,
-}
-
-impl CheckpointMode {
-    fn apply_env(self, cmd: &mut StdCommand) {
-        match self {
-            CheckpointMode::Enabled => {
-                cmd.env_remove("BD_TEST_DISABLE_CHECKPOINTS");
-            }
-            CheckpointMode::Disabled => {
-                cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");
-            }
-        }
-    }
-}
-
 struct AdminFixture {
-    runtime_dir: TempDir,
-    repo_dir: TempDir,
-    #[allow(dead_code)]
-    remote_dir: TempDir,
+    runtime: BdRuntimeRepo,
     checkpoint_mode: CheckpointMode,
 }
 
@@ -64,73 +37,32 @@ impl AdminFixture {
     }
 
     fn with_checkpoints(checkpoints_enabled: CheckpointMode) -> Self {
-        let runtime_dir = TempDir::new().expect("create runtime dir");
-        let repo_dir = TempDir::new().expect("create repo dir");
-        let remote_dir = TempDir::new().expect("create remote dir");
-
-        init_git_repo(repo_dir.path(), remote_dir.path());
-
         Self {
-            runtime_dir,
-            repo_dir,
-            remote_dir,
+            runtime: BdRuntimeRepo::new_with_origin(),
             checkpoint_mode: checkpoints_enabled,
         }
     }
 
-    fn data_dir(&self) -> PathBuf {
-        let dir = self.runtime_dir.path().join("data");
-        fs::create_dir_all(&dir).expect("create test data dir");
-        dir
+    fn repo_path(&self) -> &Path {
+        self.runtime.path()
+    }
+
+    fn data_dir(&self) -> &Path {
+        self.runtime.data_dir()
     }
 
     fn ipc_client(&self) -> IpcClient {
-        IpcClient::for_runtime_dir(self.runtime_dir.path()).with_autostart(false)
+        self.runtime.ipc_client_no_autostart()
     }
 
     fn start_daemon(&self) {
-        let client = self.ipc_client();
-        if !ping_daemon(&client) {
-            let data_dir = self.data_dir();
-            let mut cmd = StdCommand::new(assert_cmd::cargo::cargo_bin!("bd"));
-            cmd.current_dir(self.repo_dir.path());
-            cmd.env("XDG_RUNTIME_DIR", self.runtime_dir.path());
-            cmd.env("BD_WAL_DIR", self.runtime_dir.path());
-            cmd.env("BD_DATA_DIR", &data_dir);
-            cmd.env("BD_NO_AUTO_UPGRADE", "1");
-            cmd.env("BD_TESTING", "1");
-            cmd.env("BD_TEST_FAST", "1");
-            cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
-            self.checkpoint_mode.apply_env(&mut cmd);
-            cmd.env("BD_WAL_SYNC_MODE", "none");
-            cmd.args(["daemon", "run"]);
-            cmd.stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            cmd.spawn().expect("spawn daemon");
-
-            let ok = poll_until(Duration::from_secs(5), || ping_daemon(&client));
-            assert!(ok, "daemon failed to start");
-        }
-
-        let request = Request::Init {
-            ctx: RepoCtx::new(self.repo_dir.path().to_path_buf()),
-            payload: EmptyPayload {},
-        };
-        let response = client
-            .send_request_no_autostart(&request)
-            .expect("init response");
-        match response {
-            Response::Ok {
-                ok: ResponsePayload::Initialized(_),
-            } => {}
-            other => panic!("unexpected init response: {other:?}"),
-        }
+        let profile = BdCommandProfile::fast_daemon().with_checkpoints(self.checkpoint_mode);
+        self.runtime.start_daemon(profile);
     }
 
     fn create_issue(&self, title: &str) {
         let request = Request::Create {
-            ctx: MutationCtx::new(self.repo_dir.path().to_path_buf(), MutationMeta::default()),
+            ctx: MutationCtx::new(self.repo_path().to_path_buf(), MutationMeta::default()),
             payload: CreatePayload {
                 id: None,
                 parent: None,
@@ -162,7 +94,7 @@ impl AdminFixture {
 
     fn create_issue_result(&self, title: &str) -> Response {
         let request = Request::Create {
-            ctx: MutationCtx::new(self.repo_dir.path().to_path_buf(), MutationMeta::default()),
+            ctx: MutationCtx::new(self.repo_path().to_path_buf(), MutationMeta::default()),
             payload: CreatePayload {
                 id: None,
                 parent: None,
@@ -184,10 +116,7 @@ impl AdminFixture {
 
     fn admin_status(&self) -> AdminStatusOutput {
         match self.send_query(Request::Admin(AdminOp::Status {
-            ctx: ReadCtx::new(
-                self.repo_dir.path().to_path_buf(),
-                ReadConsistency::default(),
-            ),
+            ctx: ReadCtx::new(self.repo_path().to_path_buf(), ReadConsistency::default()),
             payload: EmptyPayload {},
         })) {
             beads_api::QueryResult::AdminStatus(status) => status,
@@ -197,10 +126,7 @@ impl AdminFixture {
 
     fn admin_metrics(&self) -> AdminMetricsOutput {
         match self.send_query(Request::Admin(AdminOp::Metrics {
-            ctx: ReadCtx::new(
-                self.repo_dir.path().to_path_buf(),
-                ReadConsistency::default(),
-            ),
+            ctx: ReadCtx::new(self.repo_path().to_path_buf(), ReadConsistency::default()),
             payload: EmptyPayload {},
         })) {
             beads_api::QueryResult::AdminMetrics(metrics) => metrics,
@@ -210,10 +136,7 @@ impl AdminFixture {
 
     fn admin_doctor(&self) -> beads_api::AdminDoctorOutput {
         match self.send_query(Request::Admin(AdminOp::Doctor {
-            ctx: ReadCtx::new(
-                self.repo_dir.path().to_path_buf(),
-                ReadConsistency::default(),
-            ),
+            ctx: ReadCtx::new(self.repo_path().to_path_buf(), ReadConsistency::default()),
             payload: AdminDoctorPayload {
                 max_records_per_namespace: None,
                 verify_checkpoint_cache: false,
@@ -226,10 +149,7 @@ impl AdminFixture {
 
     fn admin_scrub(&self, max_records_per_namespace: Option<u64>) -> AdminScrubOutput {
         match self.send_query(Request::Admin(AdminOp::Scrub {
-            ctx: ReadCtx::new(
-                self.repo_dir.path().to_path_buf(),
-                ReadConsistency::default(),
-            ),
+            ctx: ReadCtx::new(self.repo_path().to_path_buf(), ReadConsistency::default()),
             payload: AdminScrubPayload {
                 max_records_per_namespace,
                 verify_checkpoint_cache: false,
@@ -242,7 +162,7 @@ impl AdminFixture {
 
     fn admin_reload_policies(&self) -> AdminReloadPoliciesOutput {
         match self.send_query(Request::Admin(AdminOp::ReloadPolicies {
-            ctx: RepoCtx::new(self.repo_dir.path().to_path_buf()),
+            ctx: RepoCtx::new(self.repo_path().to_path_buf()),
             payload: EmptyPayload {},
         })) {
             beads_api::QueryResult::AdminReloadPolicies(output) => output,
@@ -256,10 +176,7 @@ impl AdminFixture {
         sample: Option<AdminFingerprintSample>,
     ) -> AdminFingerprintOutput {
         match self.send_query(Request::Admin(AdminOp::Fingerprint {
-            ctx: ReadCtx::new(
-                self.repo_dir.path().to_path_buf(),
-                ReadConsistency::default(),
-            ),
+            ctx: ReadCtx::new(self.repo_path().to_path_buf(), ReadConsistency::default()),
             payload: AdminFingerprintPayload { mode, sample },
         })) {
             beads_api::QueryResult::AdminFingerprint(output) => output,
@@ -269,14 +186,14 @@ impl AdminFixture {
 
     fn admin_maintenance(&self, enabled: bool) -> Response {
         self.send_request(&Request::Admin(AdminOp::MaintenanceMode {
-            ctx: RepoCtx::new(self.repo_dir.path().to_path_buf()),
+            ctx: RepoCtx::new(self.repo_path().to_path_buf()),
             payload: AdminMaintenanceModePayload { enabled },
         }))
     }
 
     fn admin_rebuild_index(&self) -> Response {
         self.send_request(&Request::Admin(AdminOp::RebuildIndex {
-            ctx: RepoCtx::new(self.repo_dir.path().to_path_buf()),
+            ctx: RepoCtx::new(self.repo_path().to_path_buf()),
             payload: EmptyPayload {},
         }))
     }
@@ -297,17 +214,6 @@ impl AdminFixture {
             .send_request_no_autostart(request)
             .expect("ipc request")
     }
-}
-
-impl Drop for AdminFixture {
-    fn drop(&mut self) {
-        shutdown_daemon(self.runtime_dir.path());
-    }
-}
-
-fn init_git_repo(repo_dir: &Path, remote_dir: &Path) {
-    init_bare_repo(remote_dir).expect("git init --bare");
-    init_repo_with_origin(repo_dir, remote_dir).expect("git init with origin");
 }
 
 #[test]
@@ -509,6 +415,7 @@ fn admin_clock_anomaly_serializes_in_status_and_doctor() {
     let status = AdminStatusOutput {
         store_id: StoreId::new(Uuid::from_bytes([1u8; 16])),
         replica_id: ReplicaId::new(Uuid::from_bytes([2u8; 16])),
+        replication_listen_addr: None,
         namespaces: Vec::new(),
         watermarks_applied: Watermarks::<Applied>::new(),
         watermarks_durable: Watermarks::<Durable>::new(),
@@ -594,29 +501,4 @@ fn admin_rebuild_index_requires_maintenance() {
         } => {}
         other => panic!("unexpected rebuild-index response: {other:?}"),
     }
-}
-
-fn ping_daemon(client: &IpcClient) -> bool {
-    matches!(
-        client.send_request_no_autostart(&Request::Ping),
-        Ok(Response::Ok {
-            ok: ResponsePayload::Query(beads_api::QueryResult::DaemonInfo(_)),
-        })
-    )
-}
-
-fn poll_until<F>(timeout: Duration, mut condition: F) -> bool
-where
-    F: FnMut() -> bool,
-{
-    let deadline = Instant::now() + timeout;
-    let mut backoff = Duration::from_millis(10);
-    while Instant::now() < deadline {
-        if condition() {
-            return true;
-        }
-        std::thread::sleep(backoff);
-        backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(100));
-    }
-    condition()
 }

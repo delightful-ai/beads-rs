@@ -6,7 +6,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use beads_api::QueryResult;
@@ -20,11 +20,36 @@ use crate::ipc::{IPC_PROTOCOL_VERSION, Request, Response, ResponsePayload};
 // =============================================================================
 
 static RUNTIME_DIR_OVERRIDE: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+static RUNTIME_DIR_OVERRIDE_TEST_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 /// Set or clear the runtime directory override. Can be called multiple times; latest value wins.
 pub fn set_runtime_dir_override(dir: Option<PathBuf>) {
     let lock = RUNTIME_DIR_OVERRIDE.get_or_init(|| Mutex::new(None));
     *lock.lock().expect("runtime dir lock poisoned") = dir;
+}
+
+#[doc(hidden)]
+pub struct RuntimeDirOverrideGuard {
+    prev: Option<PathBuf>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+impl Drop for RuntimeDirOverrideGuard {
+    fn drop(&mut self) {
+        set_runtime_dir_override(self.prev.take());
+    }
+}
+
+#[doc(hidden)]
+pub fn override_runtime_dir_for_tests(dir: Option<PathBuf>) -> RuntimeDirOverrideGuard {
+    let lock = RUNTIME_DIR_OVERRIDE_TEST_LOCK.get_or_init(|| Mutex::new(()));
+    let test_lock = lock.lock().expect("runtime dir test lock poisoned");
+    let prev = runtime_dir_override();
+    set_runtime_dir_override(dir);
+    RuntimeDirOverrideGuard {
+        prev,
+        _lock: test_lock,
+    }
 }
 
 fn runtime_dir_override() -> Option<PathBuf> {
@@ -1029,6 +1054,7 @@ mod tests {
             version: env!("CARGO_PKG_VERSION").to_string(),
             protocol_version: IPC_PROTOCOL_VERSION,
             pid: std::process::id(),
+            started_at_ms: None,
         };
         let meta_path = socket.with_file_name("daemon.meta.json");
         std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
@@ -1048,6 +1074,7 @@ mod tests {
             version: "0.0.0-fake".to_string(),
             protocol_version: IPC_PROTOCOL_VERSION,
             pid: std::process::id(),
+            started_at_ms: None,
         };
         let meta_path = socket.with_file_name("daemon.meta.json");
         std::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap()).unwrap();
@@ -1069,12 +1096,8 @@ mod tests {
     #[test]
     fn socket_dir_candidates_prefers_runtime_override() {
         let temp = TempDir::new().expect("temp dir");
-        if runtime_dir_override().is_none() {
-            set_runtime_dir_override(Some(temp.path().to_path_buf()));
-        }
-
-        let runtime_dir = runtime_dir_override().expect("runtime override");
-        let expected = runtime_dir.join("beads");
+        let _override = override_runtime_dir_for_tests(Some(temp.path().to_path_buf()));
+        let expected = temp.path().join("beads");
         let dirs = socket_dir_candidates();
         assert_eq!(dirs.first(), Some(&expected));
     }
@@ -1082,6 +1105,7 @@ mod tests {
     #[test]
     fn socket_dir_candidates_prefers_runtime_env() {
         let temp = TempDir::new().expect("temp dir");
+        let _override = override_runtime_dir_for_tests(None);
         let dirs = socket_dir_candidates_with(|key| match key {
             "BD_RUNTIME_DIR" => Some(
                 temp.path()
@@ -1092,10 +1116,6 @@ mod tests {
             _ => None,
         });
         let expected = temp.path().join("beads");
-        if runtime_dir_override().is_some() {
-            assert!(dirs.contains(&expected));
-        } else {
-            assert_eq!(dirs.first(), Some(&expected));
-        }
+        assert_eq!(dirs.first(), Some(&expected));
     }
 }

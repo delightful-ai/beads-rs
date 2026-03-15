@@ -138,9 +138,12 @@ impl Profile {
         Self {
             base_latency_ms: 20,
             jitter_ms: 30,
-            loss_rate: 0.01,
-            duplicate_rate: 0.002,
-            reorder_rate: 0.01,
+            // Keep the default "tailnet" profile deterministic: latency and jitter
+            // exercise steady-state link tolerance, while packet/frame loss lives in
+            // the pathological profile where tests explicitly budget for retries.
+            loss_rate: 0.0,
+            duplicate_rate: 0.0,
+            reorder_rate: 0.0,
             blackhole_after_frames: None,
             blackhole_after_bytes: None,
             blackhole_for_ms: None,
@@ -417,8 +420,9 @@ fn main() {
 
     let listener = TcpListener::bind(&args.listen)
         .unwrap_or_else(|err| panic!("listen {} failed: {err}", args.listen));
+    let local_addr = listener.local_addr().expect("tailnet proxy local addr");
     if let Some(path) = args.ready_file.as_ref()
-        && let Err(err) = write_ready_file(path)
+        && let Err(err) = write_ready_file(path, &local_addr.to_string())
     {
         eprintln!("ready file {} failed: {err}", path.display());
         std::process::exit(2);
@@ -486,11 +490,11 @@ fn main() {
     }
 }
 
-fn write_ready_file(path: &Path) -> std::io::Result<()> {
+fn write_ready_file(path: &Path, listen_addr: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let contents = format!("pid={}\n", std::process::id());
+    let contents = format!("pid={}\nlisten_addr={listen_addr}\n", std::process::id());
     fs::write(path, contents.as_bytes())
 }
 
@@ -916,5 +920,32 @@ fn frame_error_desc(err: &FrameError) -> String {
         FrameError::FrameCrcMismatch { expected, got } => {
             format!("crc mismatch expected {expected} got {got}")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Profile;
+
+    #[test]
+    fn tailnet_profile_is_latency_only() {
+        let profile = Profile::tailnet();
+        assert_eq!(profile.base_latency_ms, 20);
+        assert_eq!(profile.jitter_ms, 30);
+        assert_eq!(profile.loss_rate, 0.0);
+        assert_eq!(profile.duplicate_rate, 0.0);
+        assert_eq!(profile.reorder_rate, 0.0);
+        assert_eq!(profile.blackhole_after_frames, None);
+        assert_eq!(profile.reset_after_frames, None);
+    }
+
+    #[test]
+    fn pathological_profile_keeps_packet_faults_explicit() {
+        let profile = Profile::pathological();
+        assert!(profile.loss_rate > 0.0);
+        assert!(profile.reorder_rate > 0.0);
+        assert_eq!(profile.duplicate_rate, 0.0);
+        assert!(profile.blackhole_after_frames.is_some());
+        assert!(profile.reset_after_frames.is_some());
     }
 }

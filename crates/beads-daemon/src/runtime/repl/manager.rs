@@ -437,6 +437,7 @@ where
 
     let mut sent_hot_cache = false;
     let mut handshake_at_ms = None;
+    let mut last_hello_replay_at_ms = None;
     let mut pending_events =
         PendingEvents::new(limits.max_event_batch_events, limits.max_event_batch_bytes);
 
@@ -600,6 +601,7 @@ where
                 expected_version.store(streaming_session.peer().protocol_version, Ordering::SeqCst);
                 let now_ms = now_ms();
                 handshake_at_ms = Some(now_ms);
+                last_hello_replay_at_ms = Some(now_ms);
                 last_hello_at_ms = None;
                 if let Err(err) = store.update_replica_liveness(
                     plan.replica_id,
@@ -672,6 +674,7 @@ where
             expected_version.store(streaming_session.peer().protocol_version, Ordering::SeqCst);
             let now_ms = now_ms();
             handshake_at_ms = Some(now_ms);
+            last_hello_replay_at_ms = Some(now_ms);
             last_hello_at_ms = None;
             if let Err(err) =
                 store.update_replica_liveness(plan.replica_id, now_ms, now_ms, plan.durability_role)
@@ -713,6 +716,25 @@ where
             SessionState::StreamingLive(_) | SessionState::StreamingSnapshot(_)
         ) {
             let now_ms = now_ms();
+            if let Some(replay_after_ms) = hello_replay_interval_ms(&limits) {
+                let should_replay = last_hello_replay_at_ms
+                    .map(|last| now_ms.saturating_sub(last) >= replay_after_ms)
+                    .unwrap_or(true);
+                if should_replay {
+                    match &mut session {
+                        SessionState::StreamingLive(streaming_session) => {
+                            let action = streaming_session.replay_hello(&store, now_ms);
+                            apply_action(&mut writer, streaming_session, action, &mut keepalive)?;
+                        }
+                        SessionState::StreamingSnapshot(streaming_session) => {
+                            let action = streaming_session.replay_hello(&store, now_ms);
+                            apply_action(&mut writer, streaming_session, action, &mut keepalive)?;
+                        }
+                        _ => unreachable!("hello replay only runs for streaming sessions"),
+                    }
+                    last_hello_replay_at_ms = Some(now_ms);
+                }
+            }
             if let Some(decision) = keepalive.poll(now_ms) {
                 match decision {
                     KeepaliveDecision::SendPing(ping) => {
@@ -744,6 +766,16 @@ where
     }
 
     Ok(())
+}
+
+fn hello_replay_interval_ms(limits: &crate::core::Limits) -> Option<u64> {
+    if limits.dead_ms > 0 {
+        return Some(limits.dead_ms);
+    }
+    if limits.keepalive_ms > 0 {
+        return Some(limits.keepalive_ms.saturating_mul(6));
+    }
+    None
 }
 
 fn run_reader_loop(
@@ -1199,7 +1231,7 @@ mod tests {
     };
     use crate::runtime::repl::keepalive::KeepaliveTracker;
     use crate::runtime::repl::{ContiguousBatch, IngestOutcome, ReplError, WatermarkSnapshot};
-    use beads_daemon_core::repl::proto::Welcome;
+    use beads_daemon_core::repl::proto::{Pong, Welcome};
 
     #[derive(Default)]
     struct TestStore;
@@ -1301,7 +1333,7 @@ mod tests {
 
                     if respond_with_welcome
                         && !welcome_sent
-                        && let WireReplMessage::Hello(hello) = envelope.message
+                        && let WireReplMessage::Hello(hello) = &envelope.message
                     {
                         let mut config = SessionConfig::new(
                             peer_store,
@@ -1319,7 +1351,7 @@ mod tests {
                         let (_session, actions) =
                             crate::runtime::repl::session::handle_inbound_message(
                                 SessionState::Connecting(session),
-                                WireReplMessage::Hello(hello),
+                                WireReplMessage::Hello(hello.clone()),
                                 &mut store,
                                 now_ms(),
                             );
@@ -1345,6 +1377,15 @@ mod tests {
                             }
                         }
                         welcome_sent = true;
+                    }
+
+                    if let WireReplMessage::Ping(ping) = &envelope.message {
+                        let envelope = ReplEnvelope {
+                            version: PROTOCOL_VERSION_V1,
+                            message: ReplMessage::Pong(Pong { nonce: ping.nonce }),
+                        };
+                        let bytes = encode_envelope(&envelope).expect("encode pong");
+                        writer.write_frame(&bytes).expect("write pong");
                     }
                 }
             }
@@ -1532,6 +1573,77 @@ mod tests {
                 }
             }
         }
+
+        handle.shutdown();
+    }
+
+    #[test]
+    fn manager_keepalive_pings_before_replaying_hello_while_streaming() {
+        let local_store = StoreIdentity::new(
+            crate::core::StoreId::new(Uuid::from_bytes([33u8; 16])),
+            crate::core::StoreEpoch::ZERO,
+        );
+        let local_replica = ReplicaId::new(Uuid::from_bytes([34u8; 16]));
+        let peer_replica = ReplicaId::new(Uuid::from_bytes([35u8; 16]));
+        let (addr, rx) = spawn_peer_listener(local_store, peer_replica, true, None, None);
+        let addr = addr.to_string();
+
+        let mut limits = test_limits();
+        limits.keepalive_ms = 20;
+        limits.dead_ms = 200;
+
+        let config = ReplicationManagerConfig {
+            local_store,
+            local_replica_id: local_replica,
+            admission: AdmissionController::new(&limits),
+            broadcaster: EventBroadcaster::new(crate::broadcast::BroadcasterLimits {
+                max_subscribers: 4,
+                hot_cache_max_events: 16,
+                hot_cache_max_bytes: 1024,
+            }),
+            peer_acks: Arc::new(Mutex::new(crate::runtime::repl::PeerAckTable::new())),
+            policies: test_policy(),
+            roster: None,
+            peers: vec![test_peer_config(peer_replica, addr)],
+            wal_reader: None,
+            limits,
+            backoff: BackoffPolicy {
+                base: Duration::from_millis(5),
+                max: Duration::from_millis(10),
+            },
+        };
+        let manager = ReplicationManager::new(SharedSessionStore::new(TestStore), config);
+
+        let handle = manager.start();
+        let first = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("initial hello");
+        assert!(matches!(first, WireReplMessage::Hello(_)));
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let mut saw_ping = false;
+        let mut saw_replay_hello = false;
+        while Instant::now() < deadline && (!saw_ping || !saw_replay_hello) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let message = rx
+                .recv_timeout(remaining)
+                .expect("manager keepalive message");
+            match message {
+                WireReplMessage::Ping(_) => saw_ping = true,
+                WireReplMessage::Hello(_) => {
+                    if saw_ping {
+                        saw_replay_hello = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_ping, "manager should use ping for transport keepalive");
+        assert!(
+            saw_replay_hello,
+            "manager should still replay hello on the slower reconciliation cadence"
+        );
 
         handle.shutdown();
     }

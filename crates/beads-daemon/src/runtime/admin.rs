@@ -20,7 +20,7 @@ use crate::git::checkpoint::layout::SHARD_COUNT;
 use crate::runtime::fingerprint::{FingerprintError, FingerprintMode, fingerprint_namespaces};
 use crate::runtime::metrics::{MetricHistogram, MetricLabel, MetricSample, MetricsSnapshot};
 use crate::runtime::scrubber::{ScrubOptions, scrub_store};
-use crate::runtime::store::runtime::{StoreRuntimeError, load_replica_roster};
+use crate::runtime::store::runtime::StoreRuntimeError;
 use crate::runtime::wal::{ReplayStats, rebuild_index};
 use beads_api::{
     AdminCheckpointGroup, AdminClockAnomaly, AdminClockAnomalyKind, AdminDoctorOutput,

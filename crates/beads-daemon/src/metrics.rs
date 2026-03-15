@@ -15,6 +15,8 @@
 //! These helpers emit structured metrics via tracing by default. A test sink can
 //! be installed to capture emissions in unit tests.
 
+#[cfg(test)]
+use std::cell::RefCell;
 use std::collections::{BTreeMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
@@ -123,6 +125,27 @@ impl MetricSink for TracingSink {
 static METRIC_SINK: std::sync::OnceLock<RwLock<Arc<dyn MetricSink>>> = std::sync::OnceLock::new();
 static METRIC_STATE: std::sync::OnceLock<Mutex<MetricsState>> = std::sync::OnceLock::new();
 
+#[cfg(test)]
+struct TestMetricsContext {
+    sink: Arc<dyn MetricSink>,
+    state: MetricsState,
+}
+
+#[cfg(test)]
+impl TestMetricsContext {
+    fn new() -> Self {
+        Self {
+            sink: Arc::new(TracingSink),
+            state: MetricsState::default(),
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_METRICS_CONTEXT: RefCell<Option<TestMetricsContext>> = const { RefCell::new(None) };
+}
+
 fn sink() -> Arc<dyn MetricSink> {
     METRIC_SINK
         .get_or_init(|| RwLock::new(Arc::new(TracingSink)))
@@ -132,9 +155,35 @@ fn sink() -> Arc<dyn MetricSink> {
 }
 
 #[cfg(test)]
-fn set_sink(sink: Arc<dyn MetricSink>) {
-    let lock = METRIC_SINK.get_or_init(|| RwLock::new(Arc::new(TracingSink)));
-    *lock.write().expect("metrics sink lock poisoned") = sink;
+pub(crate) struct TestMetricsScope {
+    prev: Option<TestMetricsContext>,
+}
+
+#[cfg(test)]
+impl TestMetricsScope {
+    pub(crate) fn new() -> Self {
+        let prev =
+            TEST_METRICS_CONTEXT.with(|slot| slot.borrow_mut().replace(TestMetricsContext::new()));
+        Self { prev }
+    }
+
+    pub(crate) fn set_sink(&self, sink: Arc<dyn MetricSink>) {
+        TEST_METRICS_CONTEXT.with(|slot| {
+            slot.borrow_mut()
+                .as_mut()
+                .expect("test metrics scope missing context")
+                .sink = sink;
+        });
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestMetricsScope {
+    fn drop(&mut self) {
+        TEST_METRICS_CONTEXT.with(|slot| {
+            *slot.borrow_mut() = self.prev.take();
+        });
+    }
 }
 
 fn state() -> &'static Mutex<MetricsState> {
@@ -142,6 +191,10 @@ fn state() -> &'static Mutex<MetricsState> {
 }
 
 fn emit(name: &'static str, value: MetricValue, labels: Vec<MetricLabel>) {
+    #[cfg(test)]
+    if emit_test_context(name, &value, &labels) {
+        return;
+    }
     record_state(name, &value, &labels);
     sink().record(MetricEvent {
         name,
@@ -528,28 +581,67 @@ pub fn scrub_records_checked(count: u64) {
 }
 
 pub fn snapshot() -> MetricsSnapshot {
+    #[cfg(test)]
+    if let Some(snapshot) = snapshot_test_context() {
+        return snapshot;
+    }
     let guard = state().lock().expect("metrics state lock poisoned");
     guard.snapshot()
 }
 
 fn record_state(name: &'static str, value: &MetricValue, labels: &[MetricLabel]) {
     let mut guard = state().lock().expect("metrics state lock poisoned");
+    record_state_in(&mut guard, name, value, labels);
+}
+
+fn record_state_in(
+    state: &mut MetricsState,
+    name: &'static str,
+    value: &MetricValue,
+    labels: &[MetricLabel],
+) {
     let key = MetricKey::new(name, labels.to_vec());
     match value {
         MetricValue::Counter(delta) => {
-            let entry = guard.counters.entry(key).or_insert(0);
+            let entry = state.counters.entry(key).or_insert(0);
             *entry = entry.saturating_add(*delta);
         }
         MetricValue::Gauge(value) => {
-            guard.gauges.insert(key, *value);
+            state.gauges.insert(key, *value);
         }
         MetricValue::Histogram(value) => {
-            guard.histograms.entry(key).or_default().record(*value);
+            state.histograms.entry(key).or_default().record(*value);
         }
     }
 }
 
-#[derive(Default)]
+#[cfg(test)]
+fn emit_test_context(name: &'static str, value: &MetricValue, labels: &[MetricLabel]) -> bool {
+    TEST_METRICS_CONTEXT.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        let Some(context) = slot.as_mut() else {
+            return false;
+        };
+        record_state_in(&mut context.state, name, value, labels);
+        context.sink.record(MetricEvent {
+            name,
+            value: value.clone(),
+            labels: labels.to_vec(),
+        });
+        true
+    })
+}
+
+#[cfg(test)]
+fn snapshot_test_context() -> Option<MetricsSnapshot> {
+    TEST_METRICS_CONTEXT.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .map(|context| context.state.snapshot())
+    })
+}
+
+#[derive(Clone, Default)]
 struct MetricsState {
     counters: BTreeMap<MetricKey, u64>,
     gauges: BTreeMap<MetricKey, u64>,
@@ -608,7 +700,7 @@ impl MetricsState {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct HistogramState {
     samples: VecDeque<u64>,
     count: u64,
@@ -651,8 +743,9 @@ mod tests {
 
     #[test]
     fn emits_counters_and_histograms() {
+        let scope = TestMetricsScope::new();
         let sink = Arc::new(TestSink::default());
-        set_sink(sink.clone());
+        scope.set_sink(sink.clone());
 
         wal_append_ok(Duration::from_millis(12));
         wal_fsync_err(Duration::from_millis(7));
@@ -707,6 +800,7 @@ mod tests {
 
     #[test]
     fn snapshot_collects_metrics() {
+        let _scope = TestMetricsScope::new();
         wal_append_ok(Duration::from_millis(4));
         wal_fsync_ok(Duration::from_millis(2));
         set_ipc_inflight(3);
@@ -746,5 +840,31 @@ mod tests {
                     .any(|l| l.key == "request_type" && l.value == "ready")
         }));
         assert!(snapshot.gauges.iter().any(|m| m.name == "ipc_inflight"));
+    }
+
+    #[test]
+    fn test_metrics_scope_resets_state_between_tests() {
+        let _scope = TestMetricsScope::new();
+        assert!(snapshot().counters.is_empty());
+        wal_append_ok(Duration::from_millis(1));
+        assert!(
+            snapshot()
+                .counters
+                .iter()
+                .any(|m| m.name == "wal_append_ok")
+        );
+    }
+
+    #[test]
+    fn test_metrics_scope_ignores_external_global_writes() {
+        let _scope = TestMetricsScope::new();
+
+        std::thread::spawn(|| {
+            wal_append_ok(Duration::from_millis(1));
+        })
+        .join()
+        .expect("metrics writer thread joins");
+
+        assert!(snapshot().counters.is_empty());
     }
 }

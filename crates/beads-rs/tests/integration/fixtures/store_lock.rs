@@ -4,8 +4,8 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use beads_bootstrap::paths as moved;
 use beads_core::StoreId;
-use beads_rs::paths::{override_data_dir_for_tests, store_lock_path};
 use thiserror::Error;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,8 +27,7 @@ pub enum UnlockStoreError {
 }
 
 pub fn unlock_store(data_dir: &Path, store_id: StoreId) -> Result<UnlockOutcome, UnlockStoreError> {
-    let _override = override_data_dir_for_tests(Some(data_dir.to_path_buf()));
-    let path = store_lock_path(store_id);
+    let path = moved::store_lock_path(data_dir, store_id);
     let removed = match fs::symlink_metadata(&path) {
         Ok(meta) if meta.file_type().is_symlink() => {
             return Err(UnlockStoreError::Symlink { path });

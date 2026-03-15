@@ -50,7 +50,7 @@ use super::metrics;
 use super::ops::OpError;
 use super::repl::{
     BackoffPolicy, ContiguousBatch, IngestOutcome, ReplError, ReplErrorDetails, ReplIngestRequest,
-    ReplicationManagerHandle, ReplicationServerHandle,
+    ReplSessionStore, ReplicationManagerHandle, ReplicationServerHandle, SharedSessionStore,
 };
 #[cfg(any(test, feature = "test-harness"))]
 use super::store::discovery::{StoreIdResolution, StoreIdSource};
@@ -144,6 +144,8 @@ pub struct Daemon {
 
     /// HLC clock for generating timestamps.
     clock: Clock,
+    /// Daemon process start time, propagated to `Request::Ping` and metadata consumers.
+    started_at_ms: Option<u64>,
     /// Per-actor clocks for non-daemon actors.
     actor_clocks: BTreeMap<ActorId, Clock>,
 
@@ -182,6 +184,7 @@ pub struct Daemon {
 
 pub(crate) struct ReplicationHandles {
     runtime_version: ReplicationRuntimeVersion,
+    session_store: SharedSessionStore<ReplSessionStore>,
     manager: Option<ReplicationManagerHandle>,
     server: Option<ReplicationServerHandle>,
 }
@@ -189,6 +192,12 @@ pub(crate) struct ReplicationHandles {
 impl ReplicationHandles {
     fn runtime_version(&self) -> ReplicationRuntimeVersion {
         self.runtime_version
+    }
+
+    fn server_local_addr(&self) -> Option<String> {
+        self.server
+            .as_ref()
+            .map(|handle| handle.local_addr().to_string())
     }
 
     fn shutdown(self) {
@@ -204,6 +213,13 @@ impl ReplicationHandles {
 impl Daemon {
     pub(crate) fn layout(&self) -> &DaemonLayout {
         &self.layout
+    }
+
+    pub(crate) fn replication_server_local_addr(&self, store_id: StoreId) -> Option<String> {
+        self.store_sessions
+            .get(&store_id)
+            .and_then(StoreSession::repl_handles)
+            .and_then(ReplicationHandles::server_local_addr)
     }
 
     /// Create a daemon with default runtime config and current layout wiring.
@@ -244,6 +260,7 @@ impl Daemon {
             next_store_generation: 1,
             store_caches: StoreCaches::new(),
             clock: Clock::new_with_max_forward_drift(limits.hlc_max_forward_drift_ms),
+            started_at_ms: None,
             actor_clocks: BTreeMap::new(),
             actor,
             scheduler: SyncScheduler::new(),
@@ -272,6 +289,14 @@ impl Daemon {
     /// Get the clock (for creating stamps) for the daemon actor.
     pub fn clock(&self) -> &Clock {
         &self.clock
+    }
+
+    pub(crate) fn started_at_ms(&self) -> Option<u64> {
+        self.started_at_ms
+    }
+
+    pub(crate) fn set_started_at_ms(&mut self, started_at_ms: Option<u64>) {
+        self.started_at_ms = started_at_ms;
     }
 
     /// Get the safety limits.
@@ -417,12 +442,14 @@ mod tests {
     use crate::runtime::store::discovery::store_id_from_remote;
     use beads_api::QueryResult;
     use std::collections::BTreeMap;
+    use std::net::TcpStream;
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
     use std::path::{Path, PathBuf};
     use std::sync::{Mutex, MutexGuard};
     use std::time::{Duration, Instant};
 
+    use beads_daemon_core::repl::proto::{Capabilities, Hello, PROTOCOL_VERSION_V1};
     use git2::{Oid, Repository, Signature};
     use uuid::Uuid;
 
@@ -444,6 +471,10 @@ mod tests {
         shard_for_bead, shard_name, store_state_from_legacy,
     };
     use crate::runtime::git_worker::LoadResult;
+    use crate::runtime::repl::{
+        FrameLimitState, FrameReader, FrameWriter, ReplEnvelope, ReplMessage, WireReplMessage,
+        decode_envelope, encode_envelope,
+    };
     use crate::runtime::store::lock::read_lock_meta;
     use crate::runtime::store::runtime::StoreRuntime;
     use crate::runtime::wal::frame::encode_frame;
@@ -453,6 +484,24 @@ mod tests {
 
     fn test_actor() -> ActorId {
         ActorId::new("test@host".to_string()).unwrap()
+    }
+
+    fn write_repo_replication_config_with_max_connections(
+        repo_path: &Path,
+        listen_addr: &str,
+        max_connections: Option<usize>,
+    ) {
+        let mut config = crate::config::Config::default();
+        config.replication.listen_addr = listen_addr.to_string();
+        config.replication.backoff_base_ms = 50;
+        config.replication.backoff_max_ms = 500;
+        config.replication.max_connections = max_connections;
+        crate::config::write_config(&crate::config::repo_config_path(repo_path), &config)
+            .expect("write beads.toml");
+    }
+
+    fn write_repo_replication_config(repo_path: &Path, listen_addr: &str) {
+        write_repo_replication_config_with_max_connections(repo_path, listen_addr, Some(8));
     }
 
     fn test_remote() -> RemoteUrl {
@@ -529,6 +578,28 @@ mod tests {
         store_id
     }
 
+    fn prime_store_resolution_for_strict_load(
+        daemon: &mut Daemon,
+        repo_path: &Path,
+        remote: RemoteUrl,
+    ) -> StoreId {
+        let store_id = store_id_from_remote(&remote);
+        let resolution = StoreIdResolution::verified(store_id, StoreIdSource::PathMap);
+        daemon
+            .store_caches
+            .path_to_remote
+            .insert(repo_path.to_owned(), remote.clone());
+        daemon
+            .store_caches
+            .path_to_store
+            .insert(repo_path.to_owned(), resolution);
+        daemon
+            .store_caches
+            .remote_to_store
+            .insert(remote, resolution);
+        store_id
+    }
+
     fn session_token(daemon: &Daemon, store_id: StoreId) -> StoreSessionToken {
         daemon
             .session_token_for_store(store_id)
@@ -542,6 +613,68 @@ mod tests {
             .and_then(StoreSession::repl_handles)
             .map(ReplicationHandles::runtime_version)
             .expect("replication runtime handles")
+    }
+
+    fn write_replica_roster(path: &Path, roster: &ReplicaRoster) {
+        let toml = toml::to_string(roster).expect("encode roster");
+        std::fs::write(path, toml).expect("write replicas.toml");
+    }
+
+    fn build_repl_hello(
+        identity: StoreIdentity,
+        replica_id: ReplicaId,
+        limits: &Limits,
+    ) -> ReplMessage {
+        ReplMessage::Hello(Hello {
+            protocol_version: PROTOCOL_VERSION_V1,
+            min_protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            sender_replica_id: replica_id,
+            hello_nonce: 1,
+            max_frame_bytes: limits.max_frame_bytes as u32,
+            requested_namespaces: vec![NamespaceId::core()].into(),
+            offered_namespaces: vec![NamespaceId::core()].into(),
+            seen_durable: BTreeMap::new(),
+            seen_applied: Some(BTreeMap::new()),
+            capabilities: Capabilities {
+                supports_snapshots: false,
+                supports_live_stream: true,
+                supports_compression: false,
+            },
+        })
+    }
+
+    fn send_repl_message(writer: &mut FrameWriter<TcpStream>, message: ReplMessage) {
+        let envelope = ReplEnvelope {
+            version: PROTOCOL_VERSION_V1,
+            message,
+        };
+        let bytes = encode_envelope(&envelope).expect("encode");
+        writer.write_frame(&bytes).expect("write");
+    }
+
+    fn read_repl_message(reader: &mut FrameReader<TcpStream>, limits: &Limits) -> WireReplMessage {
+        let bytes = reader.read_next().expect("read").expect("frame");
+        let envelope = decode_envelope(&bytes, limits).expect("decode");
+        envelope.message
+    }
+
+    fn inbound_handshake_response(
+        listen_addr: &str,
+        identity: StoreIdentity,
+        replica_id: ReplicaId,
+        limits: &Limits,
+    ) -> WireReplMessage {
+        let stream = TcpStream::connect(listen_addr).expect("connect replication server");
+        let mut writer =
+            FrameWriter::new(stream.try_clone().expect("clone"), limits.max_frame_bytes);
+        let mut reader = FrameReader::new(
+            stream,
+            FrameLimitState::unnegotiated(limits.max_frame_bytes),
+        );
+        send_repl_message(&mut writer, build_repl_hello(identity, replica_id, limits));
+        read_repl_message(&mut reader, limits)
     }
 
     #[test]
@@ -630,13 +763,7 @@ mod tests {
         let requested_listen_addr = "127.0.0.1:40111";
         assert_ne!(original_listen_addr, requested_listen_addr);
 
-        std::fs::write(
-            repo_path.join("beads.toml"),
-            format!(
-                "[replication]\nlisten_addr = \"{requested_listen_addr}\"\nbackoff_base_ms = 50\nbackoff_max_ms = 500\nmax_connections = 8\n"
-            ),
-        )
-        .expect("write beads.toml");
+        write_repo_replication_config(&repo_path, requested_listen_addr);
 
         let remote = test_remote();
         let store_id = store_id_from_remote(&remote);
@@ -669,6 +796,223 @@ mod tests {
         assert_eq!(daemon.replication.listen_addr, original_listen_addr);
         assert_ne!(daemon.replication.listen_addr, requested_listen_addr);
         assert!(!daemon.store_sessions.contains_key(&store_id));
+    }
+
+    #[test]
+    fn admin_reload_replication_restores_config_when_runtime_reload_fails() {
+        let tmp = TempStoreDir::new();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("initial bind");
+        let runtime_version = bound_repl_runtime_version(&daemon, store_id);
+        let server_addr_before = daemon.replication_server_local_addr(store_id);
+
+        let original_listen_addr = daemon.replication.listen_addr.clone();
+        let requested_listen_addr = "127.0.0.1:40112";
+        assert_ne!(original_listen_addr, requested_listen_addr);
+        write_repo_replication_config(&repo_path, requested_listen_addr);
+
+        let roster_path = daemon.layout.replicas_path(&store_id);
+        std::fs::write(&roster_path, "not valid toml = [").expect("write invalid roster");
+
+        let (git_tx, _git_rx) = crossbeam::channel::bounded(1);
+        let response = daemon.admin_reload_replication(&repo_path, &git_tx);
+
+        assert!(matches!(response, Response::Err { .. }));
+        assert_eq!(daemon.replication.listen_addr, original_listen_addr);
+        assert_ne!(daemon.replication.listen_addr, requested_listen_addr);
+        assert_eq!(
+            bound_repl_runtime_version(&daemon, store_id),
+            runtime_version
+        );
+        assert_eq!(
+            daemon.replication_server_local_addr(store_id),
+            server_addr_before
+        );
+    }
+
+    #[test]
+    fn admin_reload_replication_peers_restores_config_when_peer_reload_fails() {
+        let tmp = TempStoreDir::new();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("initial bind");
+        let runtime_version = bound_repl_runtime_version(&daemon, store_id);
+        let server_addr_before = daemon.replication_server_local_addr(store_id);
+
+        let original_listen_addr = daemon.replication.listen_addr.clone();
+        let requested_listen_addr = "127.0.0.1:40113";
+        assert_ne!(original_listen_addr, requested_listen_addr);
+        write_repo_replication_config(&repo_path, requested_listen_addr);
+
+        let roster_path = daemon.layout.replicas_path(&store_id);
+        std::fs::write(&roster_path, "not valid toml = [").expect("write invalid roster");
+
+        let (git_tx, _git_rx) = crossbeam::channel::bounded(1);
+        let response = daemon.admin_reload_replication_peers(&repo_path, &git_tx);
+
+        assert!(matches!(response, Response::Err { .. }));
+        assert_eq!(daemon.replication.listen_addr, original_listen_addr);
+        assert_ne!(daemon.replication.listen_addr, requested_listen_addr);
+        assert_eq!(
+            bound_repl_runtime_version(&daemon, store_id),
+            runtime_version
+        );
+        assert_eq!(
+            daemon.replication_server_local_addr(store_id),
+            server_addr_before
+        );
+    }
+
+    #[test]
+    fn admin_reload_replication_rejects_invalid_roster_on_fresh_load() {
+        let tmp = TempStoreDir::new();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+
+        let mut daemon = Daemon::new(test_actor());
+        let original_listen_addr = daemon.replication.listen_addr.clone();
+        let requested_listen_addr = "127.0.0.1:40114";
+        assert_ne!(original_listen_addr, requested_listen_addr);
+        write_repo_replication_config(&repo_path, requested_listen_addr);
+
+        let remote = test_remote();
+        let store_id = prime_store_resolution_for_strict_load(&mut daemon, &repo_path, remote);
+        let roster_path = daemon.layout.replicas_path(&store_id);
+        std::fs::create_dir_all(roster_path.parent().expect("roster parent"))
+            .expect("create roster dir");
+        std::fs::write(&roster_path, "not valid toml = [").expect("write invalid roster");
+
+        let (git_tx, git_rx) = crossbeam::channel::bounded(1);
+        let worker = std::thread::spawn(move || match git_rx.recv().expect("load op") {
+            GitOp::Load { respond, .. } => {
+                respond.send(Ok(empty_load_result())).expect("respond load")
+            }
+            _ => panic!("expected load op"),
+        });
+
+        let response = daemon.admin_reload_replication(&repo_path, &git_tx);
+        worker.join().expect("worker join");
+
+        assert!(matches!(response, Response::Err { .. }));
+        assert_eq!(daemon.replication.listen_addr, original_listen_addr);
+        assert_ne!(daemon.replication.listen_addr, requested_listen_addr);
+        assert!(daemon.store_sessions.contains_key(&store_id));
+    }
+
+    #[test]
+    fn admin_reload_replication_peers_rejects_invalid_roster_on_fresh_load() {
+        let tmp = TempStoreDir::new();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+
+        let mut daemon = Daemon::new(test_actor());
+        let original_listen_addr = daemon.replication.listen_addr.clone();
+        let requested_listen_addr = "127.0.0.1:40115";
+        assert_ne!(original_listen_addr, requested_listen_addr);
+        write_repo_replication_config(&repo_path, requested_listen_addr);
+
+        let remote = test_remote();
+        let store_id = prime_store_resolution_for_strict_load(&mut daemon, &repo_path, remote);
+        let roster_path = daemon.layout.replicas_path(&store_id);
+        std::fs::create_dir_all(roster_path.parent().expect("roster parent"))
+            .expect("create roster dir");
+        std::fs::write(&roster_path, "not valid toml = [").expect("write invalid roster");
+
+        let (git_tx, git_rx) = crossbeam::channel::bounded(1);
+        let worker = std::thread::spawn(move || match git_rx.recv().expect("load op") {
+            GitOp::Load { respond, .. } => {
+                respond.send(Ok(empty_load_result())).expect("respond load")
+            }
+            _ => panic!("expected load op"),
+        });
+
+        let response = daemon.admin_reload_replication_peers(&repo_path, &git_tx);
+        worker.join().expect("worker join");
+
+        assert!(matches!(response, Response::Err { .. }));
+        assert_eq!(daemon.replication.listen_addr, original_listen_addr);
+        assert_ne!(daemon.replication.listen_addr, requested_listen_addr);
+        assert!(daemon.store_sessions.contains_key(&store_id));
+    }
+
+    #[test]
+    fn admin_reload_replication_peers_rejects_invalid_connection_limit_on_live_reload() {
+        let tmp = TempStoreDir::new();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let roster_path = daemon.layout.replicas_path(&store_id);
+        write_replica_roster(
+            &roster_path,
+            &ReplicaRoster {
+                replicas: vec![ReplicaEntry {
+                    replica_id: ReplicaId::new(Uuid::from_bytes([55u8; 16])),
+                    name: "alpha".to_string(),
+                    role: ReplicaDurabilityRole::peer(false),
+                    allowed_namespaces: None,
+                    expire_after_ms: None,
+                }],
+            },
+        );
+
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("initial bind");
+        let runtime_version = bound_repl_runtime_version(&daemon, store_id);
+        let server_addr_before = daemon.replication_server_local_addr(store_id);
+
+        let original_listen_addr = daemon.replication.listen_addr.clone();
+        let requested_listen_addr = "127.0.0.1:40116";
+        assert_ne!(original_listen_addr, requested_listen_addr);
+        write_repo_replication_config_with_max_connections(
+            &repo_path,
+            requested_listen_addr,
+            Some(0),
+        );
+        std::fs::remove_file(&roster_path).expect("remove roster");
+
+        let (git_tx, _git_rx) = crossbeam::channel::bounded(1);
+        let response = daemon.admin_reload_replication_peers(&repo_path, &git_tx);
+
+        assert!(matches!(response, Response::Err { .. }));
+        assert_eq!(daemon.replication.listen_addr, original_listen_addr);
+        assert_ne!(daemon.replication.listen_addr, requested_listen_addr);
+        assert_eq!(
+            bound_repl_runtime_version(&daemon, store_id),
+            runtime_version
+        );
+        assert_eq!(
+            daemon.replication_server_local_addr(store_id),
+            server_addr_before
+        );
     }
 
     #[test]
@@ -1396,6 +1740,263 @@ mod tests {
             .expect("rebind replication runtime");
         let runtime_version_v2 = bound_repl_runtime_version(&daemon, store_id);
         assert_eq!(runtime_version_v2, rotation.runtime_version);
+    }
+
+    #[test]
+    fn reload_replication_peers_rebinds_when_binding_version_changes() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("initial bind");
+        let runtime_version_v1 = bound_repl_runtime_version(&daemon, store_id);
+
+        let rotation = daemon
+            .store_sessions
+            .get_mut(&store_id)
+            .expect("store session")
+            .runtime_mut()
+            .rotate_replica_id()
+            .expect("rotate replica id");
+        assert!(rotation.runtime_version > runtime_version_v1);
+
+        daemon
+            .reload_replication_peers(store_id)
+            .expect("peer reload should rebind stale runtime");
+
+        let runtime_version_v2 = bound_repl_runtime_version(&daemon, store_id);
+        assert_eq!(runtime_version_v2, rotation.runtime_version);
+    }
+
+    #[test]
+    fn reload_replication_peers_keeps_existing_handles_when_roster_reload_fails() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("initial bind");
+
+        let runtime_version = bound_repl_runtime_version(&daemon, store_id);
+        let server_addr_before = daemon.replication_server_local_addr(store_id);
+
+        let roster_path = daemon.layout.replicas_path(&store_id);
+        std::fs::write(&roster_path, "not valid toml = [").expect("write invalid roster");
+
+        let err = daemon
+            .reload_replication_peers(store_id)
+            .expect_err("invalid roster should fail");
+        assert!(matches!(err, OpError::StoreRuntime(_)));
+        assert_eq!(
+            bound_repl_runtime_version(&daemon, store_id),
+            runtime_version
+        );
+        assert_eq!(
+            daemon.replication_server_local_addr(store_id),
+            server_addr_before
+        );
+    }
+
+    #[test]
+    fn reload_replication_runtime_keeps_existing_handles_when_roster_reload_fails() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("initial bind");
+
+        let runtime_version = bound_repl_runtime_version(&daemon, store_id);
+        let server_addr_before = daemon.replication_server_local_addr(store_id);
+
+        let roster_path = daemon.layout.replicas_path(&store_id);
+        std::fs::write(&roster_path, "not valid toml = [").expect("write invalid roster");
+
+        let err = daemon
+            .reload_replication_runtime(store_id)
+            .expect_err("invalid roster should fail");
+        assert!(matches!(err, OpError::StoreRuntime(_)));
+        assert_eq!(
+            bound_repl_runtime_version(&daemon, store_id),
+            runtime_version
+        );
+        assert_eq!(
+            daemon.replication_server_local_addr(store_id),
+            server_addr_before
+        );
+    }
+
+    #[test]
+    fn reload_replication_peers_refreshes_inbound_roster_gate() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let local_identity = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store session")
+            .runtime()
+            .meta
+            .identity;
+        let limits = daemon.limits().clone();
+        let original_peer = ReplicaId::new(Uuid::from_bytes([71u8; 16]));
+        let replacement_peer = ReplicaId::new(Uuid::from_bytes([72u8; 16]));
+        let shared_peer_a = ReplicaId::new(Uuid::from_bytes([73u8; 16]));
+        let shared_peer_b = ReplicaId::new(Uuid::from_bytes([74u8; 16]));
+        let roster_path = daemon.layout.replicas_path(&store_id);
+        write_replica_roster(
+            &roster_path,
+            &ReplicaRoster {
+                replicas: vec![
+                    ReplicaEntry {
+                        replica_id: original_peer,
+                        name: "alpha".to_string(),
+                        role: ReplicaDurabilityRole::peer(false),
+                        allowed_namespaces: None,
+                        expire_after_ms: None,
+                    },
+                    ReplicaEntry {
+                        replica_id: shared_peer_a,
+                        name: "shared-a".to_string(),
+                        role: ReplicaDurabilityRole::peer(false),
+                        allowed_namespaces: None,
+                        expire_after_ms: None,
+                    },
+                    ReplicaEntry {
+                        replica_id: shared_peer_b,
+                        name: "shared-b".to_string(),
+                        role: ReplicaDurabilityRole::peer(false),
+                        allowed_namespaces: None,
+                        expire_after_ms: None,
+                    },
+                ],
+            },
+        );
+
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("initial bind");
+
+        let runtime_version = bound_repl_runtime_version(&daemon, store_id);
+        let server_addr_before = daemon
+            .replication_server_local_addr(store_id)
+            .expect("server addr before reload");
+        match inbound_handshake_response(
+            &server_addr_before,
+            local_identity,
+            original_peer,
+            &limits,
+        ) {
+            WireReplMessage::Welcome(_) => {}
+            other => panic!("original roster peer should be admitted: {other:?}"),
+        }
+
+        write_replica_roster(
+            &roster_path,
+            &ReplicaRoster {
+                replicas: vec![
+                    ReplicaEntry {
+                        replica_id: replacement_peer,
+                        name: "beta".to_string(),
+                        role: ReplicaDurabilityRole::peer(false),
+                        allowed_namespaces: None,
+                        expire_after_ms: None,
+                    },
+                    ReplicaEntry {
+                        replica_id: shared_peer_a,
+                        name: "shared-a".to_string(),
+                        role: ReplicaDurabilityRole::peer(false),
+                        allowed_namespaces: None,
+                        expire_after_ms: None,
+                    },
+                    ReplicaEntry {
+                        replica_id: shared_peer_b,
+                        name: "shared-b".to_string(),
+                        role: ReplicaDurabilityRole::peer(false),
+                        allowed_namespaces: None,
+                        expire_after_ms: None,
+                    },
+                ],
+            },
+        );
+
+        daemon
+            .reload_replication_peers(store_id)
+            .expect("peer reload should succeed");
+
+        assert_eq!(
+            bound_repl_runtime_version(&daemon, store_id),
+            runtime_version
+        );
+        let server_addr_after = daemon
+            .replication_server_local_addr(store_id)
+            .expect("server addr after reload");
+        assert_eq!(server_addr_after, server_addr_before);
+        match inbound_handshake_response(&server_addr_after, local_identity, original_peer, &limits)
+        {
+            WireReplMessage::Error(payload) => {
+                assert_eq!(payload.code, ProtocolErrorCode::UnknownReplica.into());
+            }
+            other => panic!("revoked roster peer should be rejected: {other:?}"),
+        }
+        match inbound_handshake_response(
+            &server_addr_after,
+            local_identity,
+            replacement_peer,
+            &limits,
+        ) {
+            WireReplMessage::Welcome(_) => {}
+            other => panic!("replacement roster peer should be admitted: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn ping_reports_daemon_started_at_ms() {
+        let mut daemon = Daemon::new(test_actor());
+        daemon.set_started_at_ms(Some(1));
+        let (git_tx, _git_rx) = crossbeam::channel::bounded(1);
+
+        let HandleOutcome::Response(Response::Ok { ok }) =
+            daemon.handle_request(Request::Ping, &git_tx)
+        else {
+            panic!("ping should return a response");
+        };
+        let ResponsePayload::Query(QueryResult::DaemonInfo(info)) = ok else {
+            panic!("ping should return daemon info");
+        };
+        assert!(
+            info.started_at_ms.is_some(),
+            "ping should report daemon start time"
+        );
     }
 
     #[test]
