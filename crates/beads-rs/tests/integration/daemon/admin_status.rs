@@ -21,7 +21,7 @@ fn admin_status_monotonic_under_load() {
 
     let namespace = NamespaceId::core();
     let repo = fixture.repo_path().to_path_buf();
-    let client = fixture.ipc_client().with_autostart(false);
+    let client = fixture.ipc_client();
 
     let mut generator = LoadGenerator::with_client(repo.clone(), client.clone());
     let config = generator.config_mut();
@@ -54,7 +54,7 @@ fn admin_status_segment_stats_match_files() {
 
     let namespace = NamespaceId::core();
     let repo = fixture.repo_path().to_path_buf();
-    let client = fixture.ipc_client().with_autostart(false);
+    let client = fixture.ipc_client();
 
     let report = run_load(repo.clone(), 6, &namespace, client.clone());
     assert_eq!(report.failures, 0, "load failures: {:?}", report.errors);

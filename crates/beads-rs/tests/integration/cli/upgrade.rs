@@ -1,5 +1,6 @@
 //! Integration tests for `bd upgrade`.
 
+use crate::fixtures::bd_runtime::scrub_assert_test_env;
 use assert_cmd::Command;
 use flate2::Compression;
 use flate2::write::GzEncoder;
@@ -13,6 +14,7 @@ use tempfile::TempDir;
 
 fn bd_cmd() -> Command {
     let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
+    scrub_assert_test_env(&mut cmd);
     cmd.env("BD_TESTING", "1");
     cmd.env("BD_TEST_FAST", "1");
     cmd.env("BD_TEST_DISABLE_CHECKPOINTS", "1");

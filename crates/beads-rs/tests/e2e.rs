@@ -47,9 +47,10 @@ fn e2e_replication_converges_with_network_faults() {
     let start_ms = rig.clock().now_ms();
 
     rig.pump(10);
-    rig.set_network_profile_all(NetworkProfile::tailnet(), 42);
+    rig.set_network_profile_all(NetworkProfile::default(), 42);
 
     if let Some(net) = rig.link_network(0, 1) {
+        net.drop_next(Direction::AtoB);
         net.delay_next(Direction::AtoB, 10);
         net.reorder_next(Direction::AtoB);
         net.duplicate_next(Direction::AtoB);

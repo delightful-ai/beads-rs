@@ -37,11 +37,35 @@ cargo check                      # typecheck (run compulsively)
 cargo fmt --all                  # format
 just dylint                      # required boundary gate (CLI/daemon layering)
 cargo clippy --all-features -- -D warnings  # lint (CI uses --all-features)
-cargo test                       # unit tests
-cargo test --features slow-tests # slow tests (CI runs these separately)
+cargo xtest                      # canonical fast tier (nextest fast profile)
+cargo nextest run --profile slow --workspace --all-features --features slow-tests
 ```
 
 Logging: `LOG=debug` or `LOG=beads_rs=trace`, or `-v/-vv` on `bd`.
+
+## Test Infrastructure
+
+- Default to `cargo xtest` for the warm fast tier. It intentionally runs the workspace fast profile plus `beads-rs/e2e-tests`, not `--all-features`, so `slow-tests` stay out of the fast tier. Use `cargo nextest run --profile slow --workspace --all-features --features slow-tests` for the slow tier.
+- The shared nextest runner is intentionally capped in `.config/nextest.toml` (`test-threads = 4`). Do not raise it blindly; prove any change with repeated whole-suite burn-in receipts.
+- Tailnet fault-injection `daemon::repl_e2e` tests run in the `tailnet-fault-injection` nextest group (`max-threads = 1`). If you add another tailnet/proxy stress test, fence it into the same group instead of letting it silently contend with the rest of the fast tier.
+- Profile the suite with `./scripts/profile-tests.sh`. It captures per-test nextest timing plus env-gated fixture timing under `tmp/perf/tests-*`.
+- `./scripts/profile-tests.sh` defaults to `PROFILE_TEST_THREADS=2` so profiling artifacts stay reproducible under load. Override only when you are deliberately measuring a different concurrency level.
+- Reuse shared helpers under `crates/beads-rs/tests/integration/fixtures/`. If a test needs new repo/runtime/daemon setup behavior, add or extend a shared fixture instead of creating another one-off local `TestRepo`.
+- Reuse `fixtures::temp` for integration temp roots. Do not derive test temp dirs from `current_dir()/tmp`; keep Unix socket paths short and deterministic instead. Use `BD_TEST_TMP_ROOT` only when you need an explicit override, and `BD_TEST_KEEP_TMP=1` when you need to retain fixture dirs for debugging.
+- Shared fixture timing lives in `crates/beads-rs/tests/integration/fixtures/timing.rs` and is activated with `BD_TEST_TIMING_DIR`.
+- Avoid fixed sleeps in tests. Prefer shared condition-based wait helpers and explicit readiness barriers.
+- Reuse `fixtures::bd_runtime` and `fixtures::wait` for daemon socket/meta/store discovery and process-exit polling instead of open-coding JSON/socket probes in individual tests.
+- If a test can autostart or restart a daemon, allocate its runtime through `BdRuntimeRepo` or another shared fixture with an owned `Drop` cleanup path. Do not spin up git-sync-enabled daemons against ad hoc `TempDir` runtimes.
+- If a fixture intends to own a daemon process, spawn `bd daemon run` explicitly from the fixture before `Init` and drive bootstrap/status over `IpcClient::for_runtime_dir(...).with_autostart(false)`. Do not bootstrap owned daemons through helper CLI autostart paths like `bd init` or `bd status`, or you will lose process ownership before teardown.
+- If a fixture owns a `std::process::Child`, wait for shutdown by polling `Child::try_wait()` and reap it through the handle. If graceful daemon shutdown misses its deadline, force-kill the owned child and reap it through the same handle instead of hoping PID/lock discovery finds it later.
+- For replicated-fsync integration tests, gate writes on `ReplRig::assert_replication_durability_ready()` rather than handshake-only helpers. `dead_ms` is also the daemon-side durability wait budget, so a write started before peers become `durability_eligible` can stall until nextest kills the test.
+- For namespace convergence polling, prefer `AdminFingerprint` over full `AdminStatus`. Reserve `AdminStatus` for liveness/WAL assertions that actually need the heavier payload.
+- If you add a read-based admin helper, thread its `ctx.read.wait_timeout_ms` through the fixture IPC timeout mapping. Do not let read-heavy helpers like `AdminFingerprint` fall back to the 7-second floor, or convergence loops will spin until nextest kills the test under load.
+- For crash/restart replication tests, snapshot readiness first and then require fresh post-restart handshakes with `replication_ready_snapshot()` and `assert_replication_ready_since(...)`. Do not treat persisted pre-crash liveness rows as proof of recovery.
+- Do not call `reload_replication()` after ordinary replicated writes when the roster/config has not changed; wait on the existing readiness/convergence helpers instead.
+- The default tailnet smoke profile should stay deterministic (latency/jitter only). Put loss, duplication, blackholes, and reorder stress in the explicit pathological tailnet tests instead of the default roundtrip smoke.
+- Fault-injection tests should use test-local liveness budgets when the assertion is about eventual recovery under packet loss or resets. Do not inherit production `keepalive_ms` / `dead_ms` into pathological CI tests unless the test is explicitly about those production budgets.
+- External daemon + proxy fault-injection tests must declare their isolation boundary in both runners. Fence them into the `tailnet-fault-injection` nextest group, and if they live in the same libtest binary, guard the conflicting cases with a shared single-flight lock so plain `cargo test` does not hang on the same OS-level harness contention. Fast/default profiles can share the runner with non-tailnet tests once the convergence helper stays lightweight; the slow profile still reserves full runner ownership for these tests.
 
 ## Coding Style
 

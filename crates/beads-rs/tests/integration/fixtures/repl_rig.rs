@@ -3,18 +3,16 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::process::Command as StdCommand;
+use std::process::Child;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use assert_cmd::Command;
 use rusqlite::Connection;
 use tempfile::TempDir;
 use uuid::Uuid;
 
-use beads_api::{AdminStatusOutput, QueryResult};
+use beads_api::{AdminFingerprintMode, AdminFingerprintOutput, AdminStatusOutput, QueryResult};
 use beads_core::StoreId;
 use beads_core::error::CliErrorCode;
 use beads_core::{
@@ -24,16 +22,24 @@ use beads_core::{
 };
 use beads_rs::config::{Config, ReplicationPeerConfig};
 use beads_surface::ipc::{
-    AdminOp, CreatePayload, EmptyPayload, IdPayload, IpcClient, IpcConnection, IpcError,
-    MutationCtx, MutationMeta, ReadConsistency, ReadCtx, RepoCtx, Request, Response,
-    ResponsePayload,
+    AdminFingerprintPayload, AdminOp, CreatePayload, EmptyPayload, IdPayload, IpcClient,
+    IpcConnection, IpcError, MutationCtx, MutationMeta, ReadConsistency, ReadCtx, RepoCtx, Request,
+    Response, ResponsePayload,
 };
 use beads_surface::ops::OpResult;
 
+use super::bd_runtime::{
+    BdCommandProfile, daemon_socket_path, initialize_repo_with_client, spawn_daemon_with_paths,
+    wait_for_daemon_ready,
+};
 use super::daemon_boundary::wal::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 use super::daemon_runtime::{crash_daemon, shutdown_daemon};
+use super::git::{init_bare_repo, init_repo_with_origin};
 use super::store_lock::unlock_store;
 use super::tailnet_proxy::{TailnetProfile, TailnetProxy, TailnetTrace, TailnetTraceMode};
+use super::temp;
+use super::timing;
+use super::wait;
 
 pub type FaultProfile = TailnetProfile;
 
@@ -92,6 +98,23 @@ const IPC_IO_TIMEOUT_SLACK: Duration = Duration::from_secs(2);
 const IPC_IO_TIMEOUT_CEILING: Duration = Duration::from_secs(600);
 const IPC_RELOAD_REPLICATION_TIMEOUT: Duration = Duration::from_secs(30);
 const IPC_SEND_RETRY_ATTEMPTS: usize = 3;
+const EPHEMERAL_LOOPBACK_LISTEN_ADDR: &str = "127.0.0.1:0";
+const STATUS_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(10);
+const STATUS_RETRY_MAX_BACKOFF: Duration = Duration::from_millis(100);
+const IPC_RETRY_INITIAL_BACKOFF: Duration = Duration::from_millis(20);
+const IPC_RETRY_MAX_BACKOFF: Duration = Duration::from_millis(250);
+
+fn debug_step(step: &str) {
+    if std::env::var_os("BD_TEST_STEP_LOG").is_some() {
+        eprintln!("STEP {step}");
+    }
+}
+
+fn debug_detail(label: &str, detail: impl std::fmt::Display) {
+    if std::env::var_os("BD_TEST_STEP_LOG").is_some() {
+        eprintln!("STEP {label}: {detail}");
+    }
+}
 
 pub struct ReplRig {
     _root: Option<TempDir>,
@@ -101,13 +124,43 @@ pub struct ReplRig {
     _proxies: Vec<TailnetProxy>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ReplicationReadySnapshot {
+    handshakes: Vec<BTreeMap<ReplicaId, u64>>,
+}
+
+enum StatusWaitRetry {
+    Pending,
+    Retryable(ErrorPayload),
+    Fatal(ErrorPayload),
+}
+
+enum StatusWaitFailure {
+    TimedOut {
+        last_statuses: Vec<AdminStatusOutput>,
+        last_error: Option<ErrorPayload>,
+    },
+    Fatal(ErrorPayload),
+}
+
+enum FingerprintWaitFailure {
+    TimedOut {
+        last_fingerprints: Vec<AdminFingerprintOutput>,
+        last_error: Option<ErrorPayload>,
+    },
+    Fatal(ErrorPayload),
+}
+
 impl ReplRig {
     pub fn new(node_count: usize, options: ReplRigOptions) -> Self {
         assert!(node_count > 0, "node_count must be > 0");
+        let _phase = timing::scoped_phase_with_context(
+            "fixture.repl_rig.new",
+            format!("nodes={node_count}"),
+        );
 
-        let tmp_root = ensure_tmp_root();
-        let root = TempDir::new_in(&tmp_root).expect("temp root");
-        let keep_tmp = std::env::var("BD_TEST_KEEP_TMP").is_ok();
+        let root = temp::fixture_tempdir("repl-rig");
+        let keep_tmp = temp::keep_tmp_enabled();
         let (root_path, root_guard): (PathBuf, Option<TempDir>) = if keep_tmp {
             let path = root.keep();
             (path, None)
@@ -116,7 +169,10 @@ impl ReplRig {
         };
         let remote_dir = root_path.join("remote.git");
         fs::create_dir_all(&remote_dir).expect("create remote dir");
-        run_git(&["init", "--bare"], &remote_dir).expect("git init --bare");
+        {
+            let _phase = timing::scoped_phase("fixture.repl_rig.init_bare_remote");
+            init_bare_repo(&remote_dir).expect("git init --bare");
+        }
 
         let store_id_override = if options.use_store_id_override {
             Some(StoreId::new(Uuid::new_v4()))
@@ -127,7 +183,13 @@ impl ReplRig {
         let issue_min_seen = Arc::new(Mutex::new(BTreeMap::new()));
         let mut seeds = Vec::with_capacity(node_count);
         for idx in 0..node_count {
-            let seed = build_node(&root_path, idx, &remote_dir);
+            let seed = {
+                let _phase = timing::scoped_phase_with_context(
+                    "fixture.repl_rig.build_node",
+                    idx.to_string(),
+                );
+                build_node(&root_path, idx, &remote_dir)
+            };
             // Write user config before init so the daemon boots with WAL limits.
             write_replication_user_config(
                 &seed.config_dir,
@@ -143,7 +205,13 @@ impl ReplRig {
 
         let mut nodes = Vec::with_capacity(node_count);
         for seed in seeds {
-            let (store_id, replica_id) = bootstrap_replica(&seed, store_id_override);
+            let (store_id, replica_id, daemon_child) = {
+                let _phase = timing::scoped_phase_with_context(
+                    "fixture.repl_rig.bootstrap_replica",
+                    seed.repo_dir.display(),
+                );
+                bootstrap_replica(&seed, store_id_override)
+            };
             if let Some(existing) = resolved_store_id {
                 assert_eq!(
                     existing, store_id,
@@ -156,6 +224,7 @@ impl ReplRig {
                 seed,
                 store_id_override,
                 replica_id,
+                daemon_child,
                 issue_min_seen.clone(),
             ));
         }
@@ -167,7 +236,23 @@ impl ReplRig {
                 .expect("write replica roster");
         }
 
+        for node in &mut nodes {
+            {
+                let _phase = timing::scoped_phase_with_context(
+                    "fixture.repl_rig.start_daemon",
+                    node.runtime_dir.display(),
+                );
+                node.start_daemon();
+            }
+        }
+
         let (link_addrs, proxy_specs) = plan_links(&nodes, &options);
+        // Start proxies before publishing peer addresses so every proxied link points at a
+        // listener the kernel has already bound.
+        let (link_addrs, proxies) = {
+            let _phase = timing::scoped_phase("fixture.repl_rig.spawn_proxies");
+            spawn_proxies(link_addrs, proxy_specs)
+        };
         for (idx, node) in nodes.iter().enumerate() {
             let mut peers = Vec::new();
             for (peer_idx, peer) in nodes.iter().enumerate() {
@@ -180,8 +265,15 @@ impl ReplRig {
                     .clone();
                 peers.push((peer.replica_id, addr));
             }
-            write_replication_config(&node.repo_dir, &node.listen_addr, &peers)
-                .expect("write replication config");
+            write_replication_config(
+                &node.repo_dir,
+                &node.listen_addr,
+                &peers,
+                options.dead_ms,
+                options.keepalive_ms,
+                options.wal_segment_max_bytes,
+            )
+            .expect("write replication config");
             write_replication_user_config(
                 &node.config_dir,
                 &node.listen_addr,
@@ -192,13 +284,14 @@ impl ReplRig {
             )
             .expect("write user replication config");
         }
-
-        // Start proxies before daemons so configured peer addresses are already listening
-        // when replication managers come up and config-triggered reloads run.
-        let proxies = spawn_proxies(proxy_specs);
         for node in &nodes {
-            node.start_daemon();
-            node.reload_replication();
+            {
+                let _phase = timing::scoped_phase_with_context(
+                    "fixture.repl_rig.reload_replication_peers",
+                    node.runtime_dir.display(),
+                );
+                node.reload_replication_peers();
+            }
         }
 
         Self {
@@ -235,11 +328,11 @@ impl ReplRig {
     }
 
     pub fn crash_node(&self, idx: usize) {
-        crash_daemon(&self.nodes[idx].runtime_dir);
+        self.nodes[idx].crash_owned_daemon();
         self.nodes[idx].reset_ipc_connections();
     }
 
-    pub fn restart_node(&self, idx: usize) {
+    pub fn restart_node(&mut self, idx: usize) {
         self.nodes[idx].unlock_store(self.store_id);
         self.nodes[idx].reset_ipc_connections();
         self.nodes[idx].start_daemon();
@@ -250,7 +343,7 @@ impl ReplRig {
     }
 
     pub fn shutdown_node(&self, idx: usize) {
-        shutdown_daemon(&self.nodes[idx].runtime_dir);
+        self.nodes[idx].shutdown_owned_daemon();
         self.nodes[idx].reset_ipc_connections();
     }
 
@@ -290,15 +383,20 @@ impl ReplRig {
         expected: DurabilityEligibility,
         timeout: Duration,
     ) {
-        let ok = poll_until(timeout, || {
-            let status = self.nodes[idx].admin_status();
-            status
-                .replica_liveness
-                .iter()
-                .find(|row| row.replica_id == peer)
-                .map(|row| expected.matches(row.durability_eligible))
-                .unwrap_or(false)
-        });
+        let ok = wait::poll_until_with_phase(
+            "fixture.repl_rig.wait_for_durability_eligible",
+            format!("node={idx} peer={peer} expected={expected:?}"),
+            timeout,
+            || {
+                let status = self.nodes[idx].admin_status();
+                status
+                    .replica_liveness
+                    .iter()
+                    .find(|row| row.replica_id == peer)
+                    .map(|row| expected.matches(row.durability_eligible))
+                    .unwrap_or(false)
+            },
+        );
         if ok {
             return;
         }
@@ -309,81 +407,214 @@ impl ReplRig {
     }
 
     pub fn assert_converged(&self, namespaces: &[NamespaceId], timeout: Duration) {
-        let deadline = Instant::now() + timeout;
-        let mut retry_backoff = Duration::from_millis(10);
-        let statuses = loop {
-            let statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline)
-            {
-                Ok(statuses) => statuses,
-                Err(err) if err.retryable && Instant::now() < deadline => {
-                    std::thread::sleep(retry_backoff);
-                    retry_backoff =
-                        std::cmp::min(retry_backoff.saturating_mul(2), Duration::from_millis(100));
-                    continue;
-                }
-                Err(err) => panic!("admin status error: {err:?}"),
-            };
-            retry_backoff = Duration::from_millis(10);
-            if self.converged_with_statuses(&statuses, namespaces) {
-                return;
-            }
-            if Instant::now() >= deadline {
-                break statuses;
-            }
-        };
-        panic!("replication did not converge: {statuses:?}");
-    }
-
-    pub fn assert_peers_seen(&self, timeout: Duration) {
-        let deadline = Instant::now() + timeout;
-        let mut retry_backoff = Duration::from_millis(10);
-        let statuses = loop {
-            let statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline)
-            {
-                Ok(statuses) => statuses,
-                Err(err) if err.retryable && Instant::now() < deadline => {
-                    std::thread::sleep(retry_backoff);
-                    retry_backoff =
-                        std::cmp::min(retry_backoff.saturating_mul(2), Duration::from_millis(100));
-                    continue;
-                }
-                Err(err) => panic!("admin status error: {err:?}"),
-            };
-            retry_backoff = Duration::from_millis(10);
-            if self.peers_seen_with_statuses(&statuses) {
-                return;
-            }
-            if Instant::now() >= deadline {
-                break statuses;
-            }
-        };
-        panic!("replication peers not observed: {statuses:?}");
+        match self.wait_for_fingerprints(
+            "fixture.repl_rig.assert_converged",
+            format!("namespaces={namespaces:?}"),
+            timeout,
+            |fingerprints| self.converged_with_fingerprints(fingerprints, namespaces),
+        ) {
+            Ok(_) => {}
+            Err(FingerprintWaitFailure::Fatal(err)) => panic!("admin fingerprint error: {err:?}"),
+            Err(FingerprintWaitFailure::TimedOut {
+                last_fingerprints,
+                last_error,
+            }) => match last_error {
+                Some(err) => panic!(
+                    "replication did not converge: last_error={err:?} last_fingerprints={last_fingerprints:?}"
+                ),
+                None => panic!("replication did not converge: {last_fingerprints:?}"),
+            },
+        }
     }
 
     pub fn assert_replication_ready(&self, timeout: Duration) {
+        match self.wait_for_statuses(
+            "fixture.repl_rig.assert_replication_ready",
+            "replication-ready",
+            timeout,
+            |statuses| self.replication_ready_with_statuses(statuses),
+        ) {
+            Ok(_) => {}
+            Err(StatusWaitFailure::Fatal(err)) => panic!("admin status error: {err:?}"),
+            Err(StatusWaitFailure::TimedOut {
+                last_statuses,
+                last_error,
+            }) => match last_error {
+                Some(err) => panic!(
+                    "replication not ready: last_error={err:?} last_statuses={last_statuses:?}"
+                ),
+                None => panic!("replication not ready: {last_statuses:?}"),
+            },
+        }
+    }
+
+    pub fn assert_replication_durability_ready(&self, timeout: Duration) {
+        match self.wait_for_statuses(
+            "fixture.repl_rig.assert_replication_durability_ready",
+            "replication-durability-ready",
+            timeout,
+            |statuses| self.replication_durability_ready_with_statuses(statuses),
+        ) {
+            Ok(_) => {}
+            Err(StatusWaitFailure::Fatal(err)) => panic!("admin status error: {err:?}"),
+            Err(StatusWaitFailure::TimedOut {
+                last_statuses,
+                last_error,
+            }) => match last_error {
+                Some(err) => panic!(
+                    "replication durability not ready: last_error={err:?} last_statuses={last_statuses:?}"
+                ),
+                None => panic!("replication durability not ready: {last_statuses:?}"),
+            },
+        }
+    }
+
+    pub fn replication_ready_snapshot(&self) -> ReplicationReadySnapshot {
+        let handshakes = self
+            .nodes
+            .iter()
+            .map(|node| handshake_rows(&node.admin_status()))
+            .collect();
+        ReplicationReadySnapshot { handshakes }
+    }
+
+    pub fn assert_replication_ready_since(
+        &self,
+        snapshot: &ReplicationReadySnapshot,
+        timeout: Duration,
+    ) {
+        match self.wait_for_statuses(
+            "fixture.repl_rig.assert_replication_ready_since",
+            "replication-ready-since",
+            timeout,
+            |statuses| self.replication_ready_since_with_statuses(snapshot, statuses),
+        ) {
+            Ok(_) => {}
+            Err(StatusWaitFailure::Fatal(err)) => panic!("admin status error: {err:?}"),
+            Err(StatusWaitFailure::TimedOut {
+                last_statuses,
+                last_error,
+            }) => match last_error {
+                Some(err) => panic!(
+                    "replication not freshly ready: last_error={err:?} last_statuses={last_statuses:?}"
+                ),
+                None => panic!("replication not freshly ready: {last_statuses:?}"),
+            },
+        }
+    }
+
+    fn wait_for_statuses<F>(
+        &self,
+        phase: &'static str,
+        context: impl std::fmt::Display,
+        timeout: Duration,
+        mut predicate: F,
+    ) -> Result<Vec<AdminStatusOutput>, StatusWaitFailure>
+    where
+        F: FnMut(&[AdminStatusOutput]) -> bool,
+    {
         let deadline = Instant::now() + timeout;
-        let mut retry_backoff = Duration::from_millis(10);
-        let statuses = loop {
-            let statuses = match self.admin_statuses_with_read(ReadConsistency::default(), deadline)
-            {
-                Ok(statuses) => statuses,
-                Err(err) if err.retryable && Instant::now() < deadline => {
-                    std::thread::sleep(retry_backoff);
-                    retry_backoff =
-                        std::cmp::min(retry_backoff.saturating_mul(2), Duration::from_millis(100));
-                    continue;
+        let mut last_statuses = Vec::new();
+        let result = wait::retry_with_backoff(
+            phase,
+            context,
+            timeout,
+            STATUS_RETRY_INITIAL_BACKOFF,
+            STATUS_RETRY_MAX_BACKOFF,
+            || match self.admin_statuses_with_read(ReadConsistency::default(), deadline) {
+                Ok(statuses) => {
+                    if predicate(&statuses) {
+                        Ok(statuses)
+                    } else {
+                        last_statuses = statuses;
+                        Err(StatusWaitRetry::Pending)
+                    }
                 }
-                Err(err) => panic!("admin status error: {err:?}"),
-            };
-            retry_backoff = Duration::from_millis(10);
-            if self.replication_ready_with_statuses(&statuses) {
-                return;
-            }
-            if Instant::now() >= deadline {
-                break statuses;
-            }
-        };
-        panic!("replication not ready: {statuses:?}");
+                Err(err) if err.retryable => Err(StatusWaitRetry::Retryable(err)),
+                Err(err) => Err(StatusWaitRetry::Fatal(err)),
+            },
+            |err| {
+                matches!(
+                    err,
+                    StatusWaitRetry::Pending | StatusWaitRetry::Retryable(_)
+                )
+            },
+        );
+        match result {
+            Ok(statuses) => Ok(statuses),
+            Err(StatusWaitRetry::Fatal(err)) => Err(StatusWaitFailure::Fatal(err)),
+            Err(StatusWaitRetry::Pending) => Err(StatusWaitFailure::TimedOut {
+                last_statuses,
+                last_error: None,
+            }),
+            Err(StatusWaitRetry::Retryable(err)) => Err(StatusWaitFailure::TimedOut {
+                last_statuses,
+                last_error: Some(err),
+            }),
+        }
+    }
+
+    fn wait_for_fingerprints<F>(
+        &self,
+        phase: &'static str,
+        context: impl std::fmt::Display,
+        timeout: Duration,
+        mut predicate: F,
+    ) -> Result<Vec<AdminFingerprintOutput>, FingerprintWaitFailure>
+    where
+        F: FnMut(&[AdminFingerprintOutput]) -> bool,
+    {
+        let deadline = Instant::now() + timeout;
+        let mut last_fingerprints = Vec::new();
+        let mut last_debug_summary: Option<String> = None;
+        let result = wait::retry_with_backoff(
+            phase,
+            context,
+            timeout,
+            STATUS_RETRY_INITIAL_BACKOFF,
+            STATUS_RETRY_MAX_BACKOFF,
+            || match self.admin_fingerprints_with_read(ReadConsistency::default(), deadline) {
+                Ok(fingerprints) => {
+                    if predicate(&fingerprints) {
+                        Ok(fingerprints)
+                    } else {
+                        let summary = summarize_fingerprints(&fingerprints);
+                        if last_debug_summary.as_deref() != Some(summary.as_str()) {
+                            debug_detail("fingerprint-pending", &summary);
+                            last_debug_summary = Some(summary);
+                        }
+                        last_fingerprints = fingerprints;
+                        Err(StatusWaitRetry::Pending)
+                    }
+                }
+                Err(err) if err.retryable => {
+                    debug_detail("fingerprint-retryable-error", format!("{err:?}"));
+                    Err(StatusWaitRetry::Retryable(err))
+                }
+                Err(err) => {
+                    debug_detail("fingerprint-fatal-error", format!("{err:?}"));
+                    Err(StatusWaitRetry::Fatal(err))
+                }
+            },
+            |err| {
+                matches!(
+                    err,
+                    StatusWaitRetry::Pending | StatusWaitRetry::Retryable(_)
+                )
+            },
+        );
+        match result {
+            Ok(fingerprints) => Ok(fingerprints),
+            Err(StatusWaitRetry::Fatal(err)) => Err(FingerprintWaitFailure::Fatal(err)),
+            Err(StatusWaitRetry::Pending) => Err(FingerprintWaitFailure::TimedOut {
+                last_fingerprints,
+                last_error: None,
+            }),
+            Err(StatusWaitRetry::Retryable(err)) => Err(FingerprintWaitFailure::TimedOut {
+                last_fingerprints,
+                last_error: Some(err),
+            }),
+        }
     }
 
     fn admin_statuses_with_read(
@@ -400,6 +631,23 @@ impl ReplRig {
         self.nodes
             .iter()
             .map(|node| node.admin_status_with_read(read.clone()))
+            .collect()
+    }
+
+    fn admin_fingerprints_with_read(
+        &self,
+        mut read: ReadConsistency,
+        deadline: Instant,
+    ) -> Result<Vec<AdminFingerprintOutput>, ErrorPayload> {
+        let wait_timeout_ms = deadline
+            .saturating_duration_since(Instant::now())
+            .as_millis()
+            .try_into()
+            .unwrap_or(u64::MAX);
+        read.wait_timeout_ms = Some(wait_timeout_ms);
+        self.nodes
+            .iter()
+            .map(|node| node.admin_fingerprint_with_read(read.clone()))
             .collect()
     }
 
@@ -439,22 +687,48 @@ impl ReplRig {
         true
     }
 
-    fn peers_seen_with_statuses(&self, statuses: &[AdminStatusOutput]) -> bool {
+    fn converged_with_fingerprints(
+        &self,
+        fingerprints: &[AdminFingerprintOutput],
+        namespaces: &[NamespaceId],
+    ) -> bool {
         if self.nodes.len() < 2 {
             return true;
         }
-        let expected: BTreeSet<ReplicaId> = self.nodes.iter().map(|node| node.replica_id).collect();
-        for status in statuses {
-            let seen: BTreeSet<ReplicaId> = status
-                .replica_liveness
-                .iter()
-                .map(|row| row.replica_id)
-                .collect();
-            for peer in &expected {
-                if *peer == status.replica_id {
-                    continue;
+        let Some(base) = fingerprints.first() else {
+            return false;
+        };
+        for fingerprint in &fingerprints[1..] {
+            for namespace in namespaces {
+                if !watermarks_equal_for_namespace(
+                    &base.watermarks_applied,
+                    &fingerprint.watermarks_applied,
+                    namespace,
+                ) {
+                    return false;
                 }
-                if !seen.contains(peer) {
+                if !watermarks_equal_for_namespace(
+                    &base.watermarks_durable,
+                    &fingerprint.watermarks_durable,
+                    namespace,
+                ) {
+                    return false;
+                }
+                let Some(base_namespace) = base
+                    .namespaces
+                    .iter()
+                    .find(|row| row.namespace == *namespace)
+                else {
+                    return false;
+                };
+                let Some(namespace_fingerprint) = fingerprint
+                    .namespaces
+                    .iter()
+                    .find(|row| row.namespace == *namespace)
+                else {
+                    return false;
+                };
+                if namespace_fingerprint.namespace_root != base_namespace.namespace_root {
                     return false;
                 }
             }
@@ -486,12 +760,74 @@ impl ReplRig {
         }
         true
     }
+
+    fn replication_durability_ready_with_statuses(&self, statuses: &[AdminStatusOutput]) -> bool {
+        if self.nodes.len() < 2 {
+            return true;
+        }
+        let expected: BTreeSet<ReplicaId> = self.nodes.iter().map(|node| node.replica_id).collect();
+        for status in statuses {
+            for peer in &expected {
+                if *peer == status.replica_id {
+                    continue;
+                }
+                let Some(row) = status
+                    .replica_liveness
+                    .iter()
+                    .find(|row| row.replica_id == *peer)
+                else {
+                    return false;
+                };
+                if row.last_handshake_ms == 0 || !row.durability_eligible {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    fn replication_ready_since_with_statuses(
+        &self,
+        snapshot: &ReplicationReadySnapshot,
+        statuses: &[AdminStatusOutput],
+    ) -> bool {
+        if self.nodes.len() < 2 {
+            return true;
+        }
+        if snapshot.handshakes.len() != self.nodes.len() || statuses.len() != self.nodes.len() {
+            return false;
+        }
+        let expected: BTreeSet<ReplicaId> = self.nodes.iter().map(|node| node.replica_id).collect();
+        for ((status, node), previous) in statuses
+            .iter()
+            .zip(self.nodes.iter())
+            .zip(snapshot.handshakes.iter())
+        {
+            for peer in &expected {
+                if *peer == node.replica_id {
+                    continue;
+                }
+                let Some(row) = status
+                    .replica_liveness
+                    .iter()
+                    .find(|row| row.replica_id == *peer)
+                else {
+                    return false;
+                };
+                let baseline = previous.get(peer).copied().unwrap_or(0);
+                if row.last_handshake_ms == 0 || row.last_handshake_ms <= baseline {
+                    return false;
+                }
+            }
+        }
+        true
+    }
 }
 
 impl Drop for ReplRig {
     fn drop(&mut self) {
         for node in &self.nodes {
-            shutdown_daemon(&node.runtime_dir);
+            node.shutdown_owned_daemon();
         }
     }
 }
@@ -504,6 +840,7 @@ pub struct Node {
     listen_addr: String,
     store_id_override: Option<StoreId>,
     replica_id: ReplicaId,
+    daemon_child: Mutex<Option<Child>>,
     admin_conn: Mutex<Option<IpcConnection>>,
     ipc_conn: Mutex<Option<IpcConnection>>,
     issue_min_seen: Arc<Mutex<BTreeMap<String, Watermarks<Applied>>>>,
@@ -514,6 +851,7 @@ impl Node {
         seed: NodeSeed,
         store_id_override: Option<StoreId>,
         replica_id: ReplicaId,
+        daemon_child: Child,
         issue_min_seen: Arc<Mutex<BTreeMap<String, Watermarks<Applied>>>>,
     ) -> Self {
         Self {
@@ -524,6 +862,7 @@ impl Node {
             listen_addr: seed.listen_addr,
             store_id_override,
             replica_id,
+            daemon_child: Mutex::new(Some(daemon_child)),
             admin_conn: Mutex::new(None),
             ipc_conn: Mutex::new(None),
             issue_min_seen,
@@ -554,27 +893,75 @@ impl Node {
         &self.listen_addr
     }
 
-    fn bd_cmd(&self) -> Command {
-        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
-        cmd.current_dir(&self.repo_dir);
-        cmd.env("XDG_RUNTIME_DIR", &self.runtime_dir);
-        cmd.env("BD_DATA_DIR", &self.data_dir);
-        if let Some(store_id) = self.store_id_override {
-            cmd.env("BD_STORE_ID", store_id.to_string());
-        }
-        cmd.env("BD_NO_AUTO_UPGRADE", "1");
-        cmd.env("XDG_CONFIG_HOME", &self.config_dir);
-        cmd.env("BD_TESTING", "1");
-        cmd
-    }
-
     fn unlock_store(&self, store_id: StoreId) {
         unlock_store(&self.data_dir, store_id).expect("unlock store");
     }
 
-    fn start_daemon(&self) {
-        self.bd_cmd().args(["status"]).assert().success();
+    fn start_daemon(&mut self) {
+        self.ensure_daemon_child_running();
         self.wait_for_admin_ready(IPC_RELOAD_REPLICATION_TIMEOUT);
+        let status = self.admin_status();
+        let listen_addr = status.replication_listen_addr.unwrap_or_else(|| {
+            panic!(
+                "admin status missing replication listen addr for {}",
+                self.repo_dir.display()
+            )
+        });
+        self.listen_addr = listen_addr;
+    }
+
+    fn ensure_daemon_child_running(&self) {
+        let mut guard = self.daemon_child.lock().expect("daemon child lock");
+        let needs_spawn = match guard.as_mut() {
+            Some(child) => child.try_wait().expect("poll daemon child").is_some(),
+            None => true,
+        };
+        if !needs_spawn {
+            return;
+        }
+
+        let child = spawn_node_daemon(
+            &self.repo_dir,
+            &self.runtime_dir,
+            &self.data_dir,
+            &self.config_dir,
+            self.store_id_override,
+        );
+        *guard = Some(child);
+    }
+
+    fn sync_daemon_child_exit(&self, timeout: Duration) -> bool {
+        let mut guard = self.daemon_child.lock().expect("daemon child lock");
+        let Some(child) = guard.as_mut() else {
+            return true;
+        };
+        if wait::wait_for_child_exit(child, timeout) {
+            let _ = guard.take();
+            return true;
+        }
+        false
+    }
+
+    fn kill_owned_daemon_child(&self, timeout: Duration) {
+        let mut guard = self.daemon_child.lock().expect("daemon child lock");
+        let Some(child) = guard.as_mut() else {
+            return;
+        };
+        if wait::kill_child_and_wait(child, timeout) {
+            let _ = guard.take();
+        }
+    }
+
+    fn crash_owned_daemon(&self) {
+        crash_daemon(&self.runtime_dir);
+        self.sync_daemon_child_exit(Duration::from_secs(1));
+    }
+
+    fn shutdown_owned_daemon(&self) {
+        shutdown_daemon(&self.runtime_dir);
+        if !self.sync_daemon_child_exit(Duration::from_secs(2)) {
+            self.kill_owned_daemon_child(Duration::from_secs(1));
+        }
     }
 
     pub fn create_issue(&self, title: &str) -> String {
@@ -616,84 +1003,124 @@ impl Node {
     }
 
     pub fn wait_for_show(&self, issue_id: &str, timeout: Duration) {
+        let _phase = timing::scoped_phase_with_context(
+            "fixture.repl_rig.wait_for_show",
+            format!("repo={} issue={issue_id}", self.repo_dir.display()),
+        );
         let deadline = Instant::now() + timeout;
-        let mut backoff = Duration::from_millis(10);
-        loop {
-            let wait_timeout_ms = deadline
-                .saturating_duration_since(Instant::now())
-                .as_millis()
-                .try_into()
-                .unwrap_or(u64::MAX);
-            let read = ReadConsistency {
-                require_min_seen: self.min_seen_for(issue_id),
-                wait_timeout_ms: Some(wait_timeout_ms),
-                ..ReadConsistency::default()
-            };
-            let request = Request::Show {
-                ctx: ReadCtx::new(self.repo_dir.clone(), read),
-                payload: IdPayload {
-                    id: BeadId::parse(issue_id).expect("bead id"),
-                },
-            };
-            let response = match self.send_request(&request) {
-                Ok(response) => response,
-                Err(err) if err.transience().is_retryable() && Instant::now() < deadline => {
-                    std::thread::sleep(backoff);
-                    backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(100));
-                    continue;
+        let mut last_error: Option<String> = None;
+        let ok = wait::poll_until_with_backoff(
+            timeout,
+            STATUS_RETRY_INITIAL_BACKOFF,
+            STATUS_RETRY_MAX_BACKOFF,
+            || {
+                if Instant::now() >= deadline {
+                    return false;
                 }
-                Err(err) => panic!("bd show transport error for {issue_id}: {err:?}"),
-            };
-            match response {
-                Response::Ok { ok } => match ok {
-                    ResponsePayload::Query(QueryResult::Issue(issue)) => {
-                        assert_eq!(issue.id, issue_id);
-                        return;
+                last_error = None;
+                let wait_timeout_ms = deadline
+                    .saturating_duration_since(Instant::now())
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX);
+                let read = ReadConsistency {
+                    require_min_seen: self.min_seen_for(issue_id),
+                    wait_timeout_ms: Some(wait_timeout_ms),
+                    ..ReadConsistency::default()
+                };
+                let request = Request::Show {
+                    ctx: ReadCtx::new(self.repo_dir.clone(), read),
+                    payload: IdPayload {
+                        id: BeadId::parse(issue_id).expect("bead id"),
+                    },
+                };
+                let response = match self.send_request(&request) {
+                    Ok(response) => response,
+                    Err(err) if err.transience().is_retryable() => {
+                        last_error = Some(format!("transport error: {err:?}"));
+                        return false;
                     }
-                    other => panic!("unexpected show payload: {other:?}"),
-                },
-                Response::Err { err } => {
-                    let retry = err.code == CliErrorCode::NotFound.into()
-                        || err.code == ProtocolErrorCode::RequireMinSeenUnsatisfied.into()
-                        || err.code == ProtocolErrorCode::RequireMinSeenTimeout.into();
-                    if retry && Instant::now() < deadline {
-                        std::thread::sleep(backoff);
-                        backoff =
-                            std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(100));
-                        continue;
+                    Err(err) => panic!("bd show transport error for {issue_id}: {err:?}"),
+                };
+                match response {
+                    Response::Ok { ok } => match ok {
+                        ResponsePayload::Query(QueryResult::Issue(issue)) => {
+                            assert_eq!(issue.id, issue_id);
+                            true
+                        }
+                        other => panic!("unexpected show payload: {other:?}"),
+                    },
+                    Response::Err { err } => {
+                        let retry = err.code == CliErrorCode::NotFound.into()
+                            || err.code == ProtocolErrorCode::RequireMinSeenUnsatisfied.into()
+                            || err.code == ProtocolErrorCode::RequireMinSeenTimeout.into();
+                        if retry {
+                            last_error = Some(format!("replication pending: {err:?}"));
+                            false
+                        } else {
+                            panic!("issue {issue_id} failed to replicate: {err:?}");
+                        }
                     }
-                    panic!("issue {issue_id} failed to replicate: {err:?}");
                 }
-            }
+            },
+        );
+        if ok {
+            return;
+        }
+        match last_error {
+            Some(err) => panic!("issue {issue_id} failed to replicate within {timeout:?}: {err}"),
+            None => panic!("issue {issue_id} failed to replicate within {timeout:?}"),
         }
     }
 
     fn wait_for_admin_ready(&self, timeout: Duration) {
+        let _phase = timing::scoped_phase_with_context(
+            "fixture.repl_rig.wait_for_admin_ready",
+            self.repo_dir.display(),
+        );
         let deadline = Instant::now() + timeout;
-        let mut backoff = Duration::from_millis(10);
-        loop {
-            let now = Instant::now();
-            if now >= deadline {
-                panic!(
-                    "admin status did not become ready under {} within {timeout:?}",
-                    self.repo_dir.display()
-                );
-            }
-            let remaining = deadline.saturating_duration_since(now);
-            let read = ReadConsistency {
-                wait_timeout_ms: Some(wait_timeout_ms(std::cmp::min(
-                    remaining,
-                    ADMIN_READY_POLL_TIMEOUT,
-                ))),
-                ..ReadConsistency::default()
-            };
-            match self.admin_status_with_read(read) {
-                Ok(_) => return,
-                Err(_) => {
-                    std::thread::sleep(backoff);
-                    backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(100));
+        let mut last_error = None;
+        let ready = wait::poll_until_with_backoff(
+            timeout,
+            STATUS_RETRY_INITIAL_BACKOFF,
+            STATUS_RETRY_MAX_BACKOFF,
+            || {
+                let now = Instant::now();
+                if now >= deadline {
+                    return false;
                 }
-            }
+                let remaining = deadline.saturating_duration_since(now);
+                let read = ReadConsistency {
+                    wait_timeout_ms: Some(wait_timeout_ms(std::cmp::min(
+                        remaining,
+                        ADMIN_READY_POLL_TIMEOUT,
+                    ))),
+                    ..ReadConsistency::default()
+                };
+                match self.admin_status_with_read(read) {
+                    Ok(_) => {
+                        last_error = None;
+                        true
+                    }
+                    Err(err) => {
+                        last_error = Some(err);
+                        false
+                    }
+                }
+            },
+        );
+        if ready {
+            return;
+        }
+        match last_error {
+            Some(err) => panic!(
+                "admin status did not become ready under {} within {timeout:?}: {err:?}",
+                self.repo_dir.display()
+            ),
+            None => panic!(
+                "admin status did not become ready under {} within {timeout:?}",
+                self.repo_dir.display()
+            ),
         }
     }
 
@@ -705,20 +1132,42 @@ impl Node {
     }
 
     pub fn reload_replication(&self) {
+        debug_step("node-reload-replication-wait-ready-start");
         self.wait_for_admin_ready(IPC_RELOAD_REPLICATION_TIMEOUT);
+        debug_step("node-reload-replication-wait-ready-done");
         let request = Request::Admin(AdminOp::ReloadReplication {
             ctx: RepoCtx::new(self.repo_dir.clone()),
             payload: EmptyPayload {},
         });
+        debug_step("node-reload-replication-send-start");
         let response = self
-            .send_admin_request(&request)
+            .send_admin_request_fresh(&request)
             .expect("admin reload replication");
+        debug_step("node-reload-replication-send-done");
         match response {
             Response::Ok {
                 ok: ResponsePayload::Query(QueryResult::AdminReloadReplication(_)),
             } => {}
             Response::Err { err } => panic!("admin reload replication failed: {err:?}"),
             other => panic!("unexpected admin reload replication response: {other:?}"),
+        }
+    }
+
+    pub fn reload_replication_peers(&self) {
+        self.wait_for_admin_ready(IPC_RELOAD_REPLICATION_TIMEOUT);
+        let request = Request::Admin(AdminOp::ReloadReplicationPeers {
+            ctx: RepoCtx::new(self.repo_dir.clone()),
+            payload: EmptyPayload {},
+        });
+        let response = self
+            .send_admin_request_fresh(&request)
+            .expect("admin reload replication peers");
+        match response {
+            Response::Ok {
+                ok: ResponsePayload::Query(QueryResult::AdminReloadReplication(_)),
+            } => {}
+            Response::Err { err } => panic!("admin reload replication peers failed: {err:?}"),
+            other => panic!("unexpected admin reload replication peers response: {other:?}"),
         }
     }
 
@@ -751,6 +1200,33 @@ impl Node {
         }
     }
 
+    fn admin_fingerprint_with_read(
+        &self,
+        read: ReadConsistency,
+    ) -> Result<AdminFingerprintOutput, ErrorPayload> {
+        let request = Request::Admin(AdminOp::Fingerprint {
+            ctx: ReadCtx::new(self.repo_dir.clone(), read),
+            payload: AdminFingerprintPayload {
+                mode: AdminFingerprintMode::Full,
+                sample: None,
+            },
+        });
+        let response = self
+            .send_admin_request_resilient(&request)
+            .map_err(IntoErrorPayload::into_error_payload)?;
+        match response {
+            Response::Ok { ok } => match ok {
+                ResponsePayload::Query(QueryResult::AdminFingerprint(output)) => Ok(output),
+                other => Err(ErrorPayload::new(
+                    ProtocolErrorCode::InternalError.into(),
+                    format!("unexpected admin fingerprint payload: {other:?}"),
+                    false,
+                )),
+            },
+            Response::Err { err } => Err(err),
+        }
+    }
+
     fn record_min_seen(&self, issue_id: &str, min_seen: &Watermarks<Applied>) {
         let mut guard = self.issue_min_seen.lock().expect("issue min_seen lock");
         guard.insert(issue_id.to_string(), min_seen.clone());
@@ -765,6 +1241,21 @@ impl Node {
         self.send_with_connection(&self.admin_conn, request)
     }
 
+    fn send_admin_request_fresh(&self, request: &Request) -> Result<Response, IpcError> {
+        self.send_with_fresh_connection(request)
+    }
+
+    fn send_admin_request_resilient(&self, request: &Request) -> Result<Response, IpcError> {
+        match self.send_admin_request(request) {
+            Ok(response) => Ok(response),
+            Err(err) if err.transience().is_retryable() => {
+                *self.admin_conn.lock().expect("admin conn lock") = None;
+                self.send_admin_request_fresh(request)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
     fn send_request(&self, request: &Request) -> Result<Response, IpcError> {
         self.send_with_connection(&self.ipc_conn, request)
     }
@@ -775,37 +1266,51 @@ impl Node {
         request: &Request,
     ) -> Result<Response, IpcError> {
         let timeout = ipc_timeout_for_request(request);
+        self.retry_ipc_send(request, || {
+            let mut guard = conn_slot.lock().expect("ipc conn lock");
+            if guard.is_none() {
+                let client = IpcClient::for_runtime_dir(&self.runtime_dir).with_autostart(false);
+                *guard = Some(client.connect()?);
+            }
+            let conn = guard.as_mut().expect("ipc conn");
+            conn.set_read_timeout(Some(timeout))?;
+            conn.set_write_timeout(Some(timeout))?;
+            conn.send_request(request)
+        })
+    }
+
+    fn send_with_fresh_connection(&self, request: &Request) -> Result<Response, IpcError> {
+        let timeout = ipc_timeout_for_request(request);
+        self.retry_ipc_send(request, || {
+            let client = IpcClient::for_runtime_dir(&self.runtime_dir).with_autostart(false);
+            let mut conn = client.connect()?;
+            conn.set_read_timeout(Some(timeout))?;
+            conn.set_write_timeout(Some(timeout))?;
+            conn.send_request(request)
+        })
+    }
+
+    fn retry_ipc_send<F>(&self, request: &Request, mut send: F) -> Result<Response, IpcError>
+    where
+        F: FnMut() -> Result<Response, IpcError>,
+    {
         let retry_attempts = if request_is_retry_safe(request) {
             IPC_SEND_RETRY_ATTEMPTS
         } else {
             1
         };
-        let mut backoff = Duration::from_millis(20);
+        let mut backoff = IPC_RETRY_INITIAL_BACKOFF;
         let mut final_error: Option<IpcError> = None;
         for attempt in 1..=retry_attempts {
-            let result = (|| -> Result<Response, IpcError> {
-                let mut guard = conn_slot.lock().expect("ipc conn lock");
-                if guard.is_none() {
-                    let client =
-                        IpcClient::for_runtime_dir(&self.runtime_dir).with_autostart(false);
-                    *guard = Some(client.connect()?);
-                }
-                let conn = guard.as_mut().expect("ipc conn");
-                conn.set_read_timeout(Some(timeout))?;
-                conn.set_write_timeout(Some(timeout))?;
-                conn.send_request(request)
-            })();
-            match result {
+            match send() {
                 Ok(response) => return Ok(response),
                 Err(err) if err.transience().is_retryable() => {
-                    let mut guard = conn_slot.lock().expect("ipc conn lock");
-                    *guard = None;
                     if attempt == retry_attempts {
                         final_error = Some(err);
                         break;
                     }
                     std::thread::sleep(backoff);
-                    backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(250));
+                    backoff = std::cmp::min(backoff.saturating_mul(2), IPC_RETRY_MAX_BACKOFF);
                 }
                 Err(err) => return Err(err),
             }
@@ -822,47 +1327,49 @@ struct NodeSeed {
     listen_addr: String,
 }
 
-impl NodeSeed {
-    fn bd_cmd(&self, store_id_override: Option<StoreId>) -> Command {
-        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
-        cmd.current_dir(&self.repo_dir);
-        cmd.env("XDG_RUNTIME_DIR", &self.runtime_dir);
-        cmd.env("BD_DATA_DIR", &self.data_dir);
-        if let Some(store_id) = store_id_override {
-            cmd.env("BD_STORE_ID", store_id.to_string());
-        }
-        cmd.env("BD_NO_AUTO_UPGRADE", "1");
-        cmd.env("XDG_CONFIG_HOME", &self.config_dir);
-        cmd.env("BD_TESTING", "1");
-        cmd
-    }
-}
-
-fn bootstrap_replica(node: &NodeSeed, store_id_override: Option<StoreId>) -> (StoreId, ReplicaId) {
-    node.bd_cmd(store_id_override)
-        .args(["init"])
-        .assert()
-        .success();
+fn bootstrap_replica(
+    node: &NodeSeed,
+    store_id_override: Option<StoreId>,
+) -> (StoreId, ReplicaId, Child) {
+    let child = spawn_node_daemon(
+        &node.repo_dir,
+        &node.runtime_dir,
+        &node.data_dir,
+        &node.config_dir,
+        store_id_override,
+    );
+    let client = IpcClient::for_runtime_dir(&node.runtime_dir).with_autostart(false);
+    assert!(
+        wait_for_daemon_ready(&client, Duration::from_secs(5)),
+        "daemon failed to start for {}",
+        node.repo_dir.display()
+    );
+    initialize_repo_with_client(&client, &node.repo_dir);
     let meta = read_store_meta(&node.data_dir, store_id_override);
-    (meta.store_id(), meta.replica_id)
+    (meta.store_id(), meta.replica_id, child)
 }
 
 fn read_store_meta(data_dir: &Path, store_id_override: Option<StoreId>) -> StoreMeta {
     let stores_dir = data_dir.join("stores");
     let mut meta_path: Option<PathBuf> = None;
-    let ok = poll_until(Duration::from_secs(2), || {
-        if meta_path.is_some() {
-            return true;
-        }
-        meta_path = match store_id_override {
-            Some(store_id) => {
-                let path = stores_dir.join(store_id.to_string()).join("meta.json");
-                path.exists().then_some(path)
+    let ok = wait::poll_until_with_phase(
+        "fixture.repl_rig.wait_for_store_meta",
+        stores_dir.display(),
+        Duration::from_secs(2),
+        || {
+            if meta_path.is_some() {
+                return true;
             }
-            None => discover_store_meta_path(&stores_dir),
-        };
-        meta_path.is_some()
-    });
+            meta_path = match store_id_override {
+                Some(store_id) => {
+                    let path = stores_dir.join(store_id.to_string()).join("meta.json");
+                    path.exists().then_some(path)
+                }
+                None => discover_store_meta_path(&stores_dir),
+            };
+            meta_path.is_some()
+        },
+    );
     assert!(ok, "store meta not written under {stores_dir:?}");
     let meta_path = meta_path.expect("store meta path");
     let raw = fs::read_to_string(&meta_path).expect("read meta");
@@ -894,10 +1401,30 @@ fn discover_store_meta_path(stores_dir: &Path) -> Option<PathBuf> {
     meta_path.exists().then_some(meta_path)
 }
 
+fn spawn_node_daemon(
+    repo_dir: &Path,
+    runtime_dir: &Path,
+    data_dir: &Path,
+    config_dir: &Path,
+    store_id_override: Option<StoreId>,
+) -> Child {
+    spawn_daemon_with_paths(
+        repo_dir,
+        runtime_dir,
+        data_dir,
+        config_dir,
+        store_id_override,
+        BdCommandProfile::cli(),
+    )
+}
+
 fn write_replication_config(
     repo_dir: &Path,
     listen_addr: &str,
     peers: &[(ReplicaId, String)],
+    dead_ms: Option<u64>,
+    keepalive_ms: Option<u64>,
+    wal_segment_max_bytes: Option<usize>,
 ) -> Result<(), String> {
     let mut out = String::new();
     out.push_str("[replication]\n");
@@ -905,6 +1432,21 @@ fn write_replication_config(
     out.push_str("backoff_base_ms = 50\n");
     out.push_str("backoff_max_ms = 500\n");
     out.push_str("max_connections = 8\n\n");
+    if dead_ms.is_some() || keepalive_ms.is_some() || wal_segment_max_bytes.is_some() {
+        out.push_str("[limits]\n");
+        if let Some(dead_ms) = dead_ms {
+            out.push_str(&format!("dead_ms = {dead_ms}\n"));
+        }
+        if let Some(keepalive_ms) = keepalive_ms {
+            out.push_str(&format!("keepalive_ms = {keepalive_ms}\n"));
+        }
+        if let Some(wal_segment_max_bytes) = wal_segment_max_bytes {
+            out.push_str(&format!(
+                "wal_segment_max_bytes = {wal_segment_max_bytes}\n"
+            ));
+        }
+        out.push('\n');
+    }
     for (replica_id, addr) in peers {
         out.push_str("[[replication.peers]]\n");
         out.push_str(&format!("replica_id = \"{}\"\n", replica_id));
@@ -949,7 +1491,7 @@ fn write_replication_user_config(
         config.limits.wal_segment_max_bytes = wal_segment_max_bytes;
     }
 
-    let config_path = config_dir.join("beads-rs").join("config.toml");
+    let config_path = config_dir.join("config.toml");
     beads_rs::config::write_config(&config_path, &config)
         .map_err(|err| format!("write config.toml failed: {err}"))?;
     Ok(())
@@ -1135,13 +1677,14 @@ fn build_node(root: &Path, idx: usize, remote_dir: &Path) -> NodeSeed {
     fs::create_dir_all(&runtime_dir).expect("create runtime dir");
     fs::create_dir_all(&data_dir).expect("create data dir");
     fs::create_dir_all(&config_dir).expect("create config dir");
-    init_git_repo(&repo_dir, remote_dir).expect("init git repo");
+    temp::assert_unix_socket_path_fits(&daemon_socket_path(&runtime_dir));
+    init_repo_with_origin(&repo_dir, remote_dir).expect("init git repo");
     NodeSeed {
         repo_dir,
         runtime_dir,
         data_dir,
         config_dir,
-        listen_addr: format!("127.0.0.1:{}", pick_port()),
+        listen_addr: EPHEMERAL_LOOPBACK_LISTEN_ADDR.to_string(),
     }
 }
 
@@ -1183,21 +1726,19 @@ fn plan_links(
             });
             let needs_proxy = profile.is_some() || trace.is_some();
             let profile = profile.unwrap_or_else(FaultProfile::none);
-            let addr = if needs_proxy {
-                let listen_addr = format!("127.0.0.1:{}", pick_port());
+            if needs_proxy {
                 let seed = link_seed(options.seed, from, to);
                 proxies.push(ProxySpec {
-                    listen_addr: listen_addr.clone(),
+                    from,
+                    to,
                     upstream_addr: target.listen_addr.clone(),
                     seed,
                     profile,
                     trace,
                 });
-                listen_addr
             } else {
-                target.listen_addr.clone()
-            };
-            link_addrs[from][to] = Some(addr);
+                link_addrs[from][to] = Some(target.listen_addr.clone());
+            }
         }
     }
     (link_addrs, proxies)
@@ -1207,23 +1748,28 @@ fn link_seed(seed: u64, from: usize, to: usize) -> u64 {
     seed ^ ((from as u64) << 32) ^ (to as u64) ^ 0x9E37_79B9_7F4A_7C15
 }
 
-fn spawn_proxies(specs: Vec<ProxySpec>) -> Vec<TailnetProxy> {
-    specs
-        .into_iter()
-        .map(|spec| {
-            TailnetProxy::spawn_with_profile_and_trace(
-                spec.listen_addr,
-                spec.upstream_addr,
-                spec.seed,
-                spec.profile,
-                spec.trace,
-            )
-        })
-        .collect()
+fn spawn_proxies(
+    mut link_addrs: Vec<Vec<Option<String>>>,
+    specs: Vec<ProxySpec>,
+) -> (Vec<Vec<Option<String>>>, Vec<TailnetProxy>) {
+    let mut proxies = Vec::with_capacity(specs.len());
+    for spec in specs {
+        let proxy = TailnetProxy::spawn_with_profile_and_trace(
+            EPHEMERAL_LOOPBACK_LISTEN_ADDR.to_string(),
+            spec.upstream_addr,
+            spec.seed,
+            spec.profile,
+            spec.trace,
+        );
+        link_addrs[spec.from][spec.to] = Some(proxy.listen_addr().to_string());
+        proxies.push(proxy);
+    }
+    (link_addrs, proxies)
 }
 
 struct ProxySpec {
-    listen_addr: String,
+    from: usize,
+    to: usize,
     upstream_addr: String,
     seed: u64,
     profile: FaultProfile,
@@ -1243,43 +1789,29 @@ fn watermarks_equal_for_namespace<K: PartialEq>(
         .all(|origin| left.get(namespace, &origin) == right.get(namespace, &origin))
 }
 
-fn ensure_tmp_root() -> PathBuf {
-    let root = std::env::current_dir().expect("cwd").join("tmp");
-    fs::create_dir_all(&root).expect("create tmp root");
-    root
+fn handshake_rows(status: &AdminStatusOutput) -> BTreeMap<ReplicaId, u64> {
+    status
+        .replica_liveness
+        .iter()
+        .map(|row| (row.replica_id, row.last_handshake_ms))
+        .collect()
 }
 
-fn pick_port() -> u16 {
-    let listener = TcpListener::bind("127.0.0.1:0").expect("bind port");
-    listener.local_addr().expect("local addr").port()
-}
-
-fn init_git_repo(repo_dir: &Path, remote_dir: &Path) -> Result<(), String> {
-    run_git(&["init"], repo_dir)?;
-    run_git(&["config", "user.email", "test@test.com"], repo_dir)?;
-    run_git(&["config", "user.name", "Test"], repo_dir)?;
-    let remote = remote_dir
-        .to_str()
-        .ok_or_else(|| format!("remote dir path invalid: {remote_dir:?}"))?;
-    run_git(&["remote", "add", "origin", remote], repo_dir)?;
-    Ok(())
-}
-
-fn run_git(args: &[&str], cwd: &Path) -> Result<(), String> {
-    let output = StdCommand::new("git")
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .map_err(|err| format!("git {:?} failed to start: {err}", args))?;
-    if output.status.success() {
-        return Ok(());
+fn summarize_fingerprints(fingerprints: &[AdminFingerprintOutput]) -> String {
+    let mut parts = Vec::with_capacity(fingerprints.len());
+    for (idx, fingerprint) in fingerprints.iter().enumerate() {
+        let namespaces = fingerprint
+            .namespaces
+            .iter()
+            .map(|row| format!("{}={}", row.namespace, row.namespace_root))
+            .collect::<Vec<_>>()
+            .join(",");
+        parts.push(format!(
+            "node={idx} applied={:?} durable={:?} namespaces=[{namespaces}]",
+            fingerprint.watermarks_applied, fingerprint.watermarks_durable
+        ));
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(format!(
-        "git {:?} failed (status {}): stdout: {stdout} stderr: {stderr}",
-        args, output.status
-    ))
+    parts.join(" | ")
 }
 
 fn wait_timeout_ms(timeout: Duration) -> u64 {
@@ -1287,7 +1819,10 @@ fn wait_timeout_ms(timeout: Duration) -> u64 {
 }
 
 fn ipc_timeout_for_request(request: &Request) -> Duration {
-    if matches!(request, Request::Admin(AdminOp::ReloadReplication { .. })) {
+    if matches!(
+        request,
+        Request::Admin(AdminOp::ReloadReplication { .. } | AdminOp::ReloadReplicationPeers { .. })
+    ) {
         return IPC_RELOAD_REPLICATION_TIMEOUT;
     }
     request_read_wait_timeout(request)
@@ -1307,6 +1842,7 @@ fn request_read_wait_timeout(request: &Request) -> Option<u64> {
     match request {
         Request::Show { ctx, .. } => ctx.read.wait_timeout_ms,
         Request::Admin(AdminOp::Status { ctx, .. }) => ctx.read.wait_timeout_ms,
+        Request::Admin(AdminOp::Fingerprint { ctx, .. }) => ctx.read.wait_timeout_ms,
         _ => None,
     }
 }
@@ -1315,22 +1851,30 @@ fn request_is_retry_safe(request: &Request) -> bool {
     match request {
         Request::Show { .. } => true,
         Request::Admin(AdminOp::Status { .. }) => true,
+        Request::Admin(AdminOp::Fingerprint { .. }) => true,
+        Request::Admin(
+            AdminOp::ReloadReplication { .. } | AdminOp::ReloadReplicationPeers { .. },
+        ) => true,
         _ => false,
     }
 }
 
-fn poll_until<F>(timeout: Duration, mut condition: F) -> bool
-where
-    F: FnMut() -> bool,
-{
-    let deadline = Instant::now() + timeout;
-    let mut backoff = Duration::from_millis(10);
-    while Instant::now() < deadline {
-        if condition() {
-            return true;
-        }
-        std::thread::sleep(backoff);
-        backoff = std::cmp::min(backoff.saturating_mul(2), Duration::from_millis(100));
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::*;
+
+    #[test]
+    fn admin_fingerprint_requests_are_retry_safe() {
+        let request = Request::Admin(AdminOp::Fingerprint {
+            ctx: ReadCtx::new(PathBuf::from("/test"), ReadConsistency::default()),
+            payload: AdminFingerprintPayload {
+                mode: AdminFingerprintMode::Full,
+                sample: None,
+            },
+        });
+
+        assert!(request_is_retry_safe(&request));
     }
-    condition()
 }

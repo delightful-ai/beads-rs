@@ -153,6 +153,13 @@ pub enum AdminOp {
         #[serde(flatten)]
         payload: EmptyPayload,
     },
+    /// Admin reload outbound replication peers while preserving the current inbound listener.
+    ReloadReplicationPeers {
+        #[serde(flatten)]
+        ctx: RepoCtx,
+        #[serde(flatten)]
+        payload: EmptyPayload,
+    },
     /// Admin rotate replica id.
     RotateReplicaId {
         #[serde(flatten)]
@@ -551,6 +558,9 @@ impl Request {
                 AdminOp::ReloadLimits { ctx, .. } => info_from_repo("admin_reload_limits", ctx),
                 AdminOp::ReloadReplication { ctx, .. } => {
                     info_from_repo("admin_reload_replication", ctx)
+                }
+                AdminOp::ReloadReplicationPeers { ctx, .. } => {
+                    info_from_repo("admin_reload_replication_peers", ctx)
                 }
                 AdminOp::RotateReplicaId { ctx, .. } => {
                     info_from_repo("admin_rotate_replica_id", ctx)
@@ -1025,6 +1035,7 @@ mod tests {
             version: "0.0.0-test".to_string(),
             protocol_version: IPC_PROTOCOL_VERSION,
             pid: 123,
+            started_at_ms: None,
         };
         let resp = Response::ok(ResponsePayload::Query(QueryResult::DaemonInfo(info)));
         let json = serde_json::to_string(&resp).unwrap();

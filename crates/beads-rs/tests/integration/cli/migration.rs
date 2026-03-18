@@ -7,93 +7,24 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::fixtures::daemon_runtime::shutdown_daemon;
-use crate::fixtures::git::{init_bare_repo, init_repo, init_repo_with_origin};
-use crate::fixtures::legacy_store::{fetch_remote_store_ref, fixture};
-use assert_cmd::Command;
+use crate::fixtures::bd_runtime::BdRuntimeRepo;
+use crate::fixtures::legacy_store::{
+    backup_ref_oid, backup_ref_targets, create_backup_ref, create_detached_store_commit,
+    fetch_remote_store_ref, fixture, push_store_ref, read_store_blob, read_store_meta_json,
+    read_store_state, rewrite_store_meta, rewrite_store_ref_commit, set_ref_target,
+    store_first_parent_oid, store_ref_oid, wait_for_fetched_remote_store_ref,
+    write_store_commit_bytes,
+};
 use beads_core::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey, DepKind,
     Lww, Priority, Stamp, Workflow, WriteStamp,
 };
 use beads_git::sync::migrate_store_ref_to_v1_with_before_push_for_testing;
 use beads_git::wire::{StoreChecksums, serialize_meta};
-use git2::{ObjectType, Oid, Repository, Signature, Time};
+use git2::{ObjectType, Repository};
 use predicates::prelude::*;
-use tempfile::TempDir;
 
-fn data_dir_for_runtime(runtime_dir: &std::path::Path) -> std::path::PathBuf {
-    let dir = runtime_dir.join("data");
-    fs::create_dir_all(&dir).expect("failed to create test data dir");
-    dir
-}
-
-/// Test fixture: working repo + bare remote.
-struct TestRepo {
-    work_dir: TempDir,
-    #[allow(dead_code)]
-    remote_dir: TempDir,
-    runtime_dir: TempDir,
-    data_dir: std::path::PathBuf,
-}
-
-impl TestRepo {
-    fn new() -> Self {
-        let remote_dir = TempDir::new().expect("failed to create remote dir");
-        init_bare_repo(remote_dir.path()).expect("failed to init bare repo");
-
-        let work_dir = TempDir::new().expect("failed to create work dir");
-
-        init_repo_with_origin(work_dir.path(), remote_dir.path())
-            .expect("failed to init repo with origin");
-
-        let runtime_dir = TempDir::new().expect("failed to create runtime dir");
-        let data_dir = data_dir_for_runtime(runtime_dir.path());
-
-        Self {
-            work_dir,
-            remote_dir,
-            runtime_dir,
-            data_dir,
-        }
-    }
-
-    fn new_local_only() -> Self {
-        let remote_dir = TempDir::new().expect("failed to create remote dir");
-        let work_dir = TempDir::new().expect("failed to create work dir");
-        init_repo(work_dir.path()).expect("failed to init local-only repo");
-
-        let runtime_dir = TempDir::new().expect("failed to create runtime dir");
-        let data_dir = data_dir_for_runtime(runtime_dir.path());
-
-        Self {
-            work_dir,
-            remote_dir,
-            runtime_dir,
-            data_dir,
-        }
-    }
-
-    fn path(&self) -> &std::path::Path {
-        self.work_dir.path()
-    }
-
-    fn bd(&self) -> Command {
-        let mut cmd = assert_cmd::cargo::cargo_bin_cmd!("bd");
-        cmd.current_dir(self.path());
-        cmd.env("XDG_RUNTIME_DIR", self.runtime_dir.path());
-        cmd.env("BD_DATA_DIR", &self.data_dir);
-        cmd.env("BD_NO_AUTO_UPGRADE", "1");
-        cmd.env("BD_TESTING", "1");
-        cmd.env("BD_TEST_DISABLE_GIT_SYNC", "1");
-        cmd
-    }
-}
-
-impl Drop for TestRepo {
-    fn drop(&mut self) {
-        shutdown_daemon(self.runtime_dir.path());
-    }
-}
+type TestRepo = BdRuntimeRepo;
 
 /// Sample Go beads JSONL export with various issue types.
 fn sample_go_export() -> &'static str {
@@ -109,7 +40,6 @@ fn write_store_commit(
     include_notes: bool,
     include_meta: bool,
 ) {
-    let repo = Repository::open(repo_path).expect("open repo");
     let state_bytes = b"";
     let tombs_bytes = b"";
     let notes_bytes = include_notes.then_some(b"" as &[u8]);
@@ -120,17 +50,17 @@ fn write_store_commit(
         None
     };
     write_store_commit_bytes(
-        &repo,
+        repo_path,
         state_bytes,
         tombs_bytes,
         deps_bytes,
         notes_bytes,
         meta_bytes.as_deref(),
+        "test store commit",
     );
 }
 
 fn write_strict_store_commit(repo_path: &Path) {
-    let repo = Repository::open(repo_path).expect("open repo");
     let state = CanonicalState::new();
     let state_bytes = beads_git::wire::serialize_state(&state).expect("state bytes");
     let tombs_bytes = beads_git::wire::serialize_tombstones(&state).expect("tombstones bytes");
@@ -140,12 +70,13 @@ fn write_strict_store_commit(repo_path: &Path) {
         StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes, Some(&notes_bytes));
     let meta_bytes = serialize_meta(Some("bd"), None, &checksums).expect("meta bytes");
     write_store_commit_bytes(
-        &repo,
+        repo_path,
         &state_bytes,
         &tombs_bytes,
         &deps_bytes,
         Some(&notes_bytes),
         Some(&meta_bytes),
+        "test store commit",
     );
 }
 
@@ -175,7 +106,6 @@ fn make_bead(id: &str, stamp: &Stamp) -> Bead {
 }
 
 fn write_nonempty_strict_store_commit(repo_path: &Path) {
-    let repo = Repository::open(repo_path).expect("open repo");
     let mut state = CanonicalState::new();
     let stamp = make_stamp(1_765_500_000_000, "migration-test");
     state.insert_live(make_bead("bd-nonempty", &stamp));
@@ -187,169 +117,13 @@ fn write_nonempty_strict_store_commit(repo_path: &Path) {
         StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes, Some(&notes_bytes));
     let meta_bytes = serialize_meta(Some("bd"), None, &checksums).expect("meta bytes");
     write_store_commit_bytes(
-        &repo,
+        repo_path,
         &state_bytes,
         &tombs_bytes,
         &deps_bytes,
         Some(&notes_bytes),
         Some(&meta_bytes),
-    );
-}
-
-fn write_store_commit_bytes(
-    repo: &Repository,
-    state_bytes: &[u8],
-    tombs_bytes: &[u8],
-    deps_bytes: &[u8],
-    notes_bytes: Option<&[u8]>,
-    meta_bytes: Option<&[u8]>,
-) {
-    let state_oid = repo.blob(state_bytes).expect("state blob");
-    let tombs_oid = repo.blob(tombs_bytes).expect("tombs blob");
-    let deps_oid = repo.blob(deps_bytes).expect("deps blob");
-    let notes_oid = notes_bytes.map(|bytes| repo.blob(bytes).expect("notes blob"));
-    let meta_oid = meta_bytes.map(|bytes| repo.blob(bytes).expect("meta blob"));
-
-    let mut builder = repo.treebuilder(None).expect("treebuilder");
-    builder
-        .insert("state.jsonl", state_oid, 0o100644)
-        .expect("state insert");
-    builder
-        .insert("tombstones.jsonl", tombs_oid, 0o100644)
-        .expect("tombs insert");
-    builder
-        .insert("deps.jsonl", deps_oid, 0o100644)
-        .expect("deps insert");
-    if let Some(notes_oid) = notes_oid {
-        builder
-            .insert("notes.jsonl", notes_oid, 0o100644)
-            .expect("notes insert");
-    }
-    if let Some(meta_oid) = meta_oid {
-        builder
-            .insert("meta.json", meta_oid, 0o100644)
-            .expect("meta insert");
-    }
-
-    let tree_oid = builder.write().expect("tree write");
-    let tree = repo.find_tree(tree_oid).expect("find tree");
-    let sig = Signature::now("test", "test@example.com").expect("signature");
-    let parent = repo
-        .refname_to_id("refs/heads/beads/store")
-        .ok()
-        .and_then(|oid| repo.find_commit(oid).ok());
-    let parent_refs: Vec<_> = parent.iter().collect();
-    let commit_oid = repo
-        .commit(None, &sig, &sig, "test store commit", &tree, &parent_refs)
-        .expect("commit");
-    repo.reference(
-        "refs/heads/beads/store",
-        commit_oid,
-        true,
-        "test update store ref",
-    )
-    .expect("update store ref");
-}
-
-fn read_store_state(repo_path: &Path) -> CanonicalState {
-    let repo = Repository::open(repo_path).expect("open repo");
-    let oid = repo
-        .refname_to_id("refs/heads/beads/store")
-        .expect("store ref");
-    beads_git::read_state_at_oid(&repo, oid)
-        .expect("strict store load")
-        .state
-}
-
-fn store_ref_oid(repo_path: &Path, refname: &str) -> Option<Oid> {
-    let repo = Repository::open(repo_path).expect("open repo");
-    repo.refname_to_id(refname).ok()
-}
-
-fn backup_ref_oid(repo_path: &Path, oid: Oid) -> Option<Oid> {
-    store_ref_oid(repo_path, &format!("refs/beads/backup/{oid}"))
-}
-
-fn backup_ref_targets(repo_path: &Path) -> BTreeSet<Oid> {
-    let repo = Repository::open(repo_path).expect("open repo");
-    let refs = repo
-        .references_glob("refs/beads/backup/*")
-        .expect("backup refs");
-    refs.filter_map(|reference| {
-        let reference = reference.expect("backup reference");
-        reference.target()
-    })
-    .collect()
-}
-
-fn create_detached_store_commit(repo_path: &Path, time_secs: i64, message: &str) -> Oid {
-    let repo = Repository::open(repo_path).expect("open repo");
-    let store_oid = repo
-        .refname_to_id("refs/heads/beads/store")
-        .expect("store ref for detached commit");
-    let tree = repo
-        .find_commit(store_oid)
-        .expect("store commit")
-        .tree()
-        .expect("store tree");
-    let sig =
-        Signature::new("test", "test@example.com", &Time::new(time_secs, 0)).expect("signature");
-    repo.commit(None, &sig, &sig, message, &tree, &[])
-        .expect("detached commit")
-}
-
-fn create_backup_ref(repo_path: &Path, oid: Oid) {
-    let repo = Repository::open(repo_path).expect("open repo");
-    repo.reference(
-        &format!("refs/beads/backup/{oid}"),
-        oid,
-        true,
-        "test seed backup ref",
-    )
-    .expect("seed backup ref");
-}
-
-fn store_first_parent_oid(repo_path: &Path, refname: &str) -> Option<Oid> {
-    let repo = Repository::open(repo_path).expect("open repo");
-    let oid = repo.refname_to_id(refname).ok()?;
-    let commit = repo.find_commit(oid).expect("store commit");
-    commit.parent_id(0).ok()
-}
-
-fn read_tree_blob(repo: &Repository, name: &str) -> Option<Vec<u8>> {
-    let oid = repo
-        .refname_to_id("refs/heads/beads/store")
-        .expect("store ref");
-    let commit = repo.find_commit(oid).expect("store commit");
-    let tree = commit.tree().expect("store tree");
-    let entry = tree.get_name(name)?;
-    let blob = repo
-        .find_object(entry.id(), Some(ObjectType::Blob))
-        .expect("blob object")
-        .peel_to_blob()
-        .expect("blob");
-    Some(blob.content().to_vec())
-}
-
-fn read_store_meta_json(repo_path: &Path) -> serde_json::Value {
-    let repo = Repository::open(repo_path).expect("open repo");
-    let meta_bytes = read_tree_blob(&repo, "meta.json").expect("meta.json");
-    serde_json::from_slice(&meta_bytes).expect("meta json")
-}
-
-fn rewrite_store_meta(repo_path: &Path, meta_bytes: Option<&[u8]>) {
-    let repo = Repository::open(repo_path).expect("open repo");
-    let state_bytes = read_tree_blob(&repo, "state.jsonl").expect("state.jsonl");
-    let tombs_bytes = read_tree_blob(&repo, "tombstones.jsonl").expect("tombstones.jsonl");
-    let deps_bytes = read_tree_blob(&repo, "deps.jsonl").expect("deps.jsonl");
-    let notes_bytes = read_tree_blob(&repo, "notes.jsonl");
-    write_store_commit_bytes(
-        &repo,
-        &state_bytes,
-        &tombs_bytes,
-        &deps_bytes,
-        notes_bytes.as_deref(),
-        meta_bytes,
+        "test store commit",
     );
 }
 
@@ -399,11 +173,10 @@ fn assert_note_payload(
 }
 
 fn assert_meta_checksums_match_store(repo_path: &Path) {
-    let repo = Repository::open(repo_path).expect("open repo");
-    let state_bytes = read_tree_blob(&repo, "state.jsonl").expect("state.jsonl");
-    let tombs_bytes = read_tree_blob(&repo, "tombstones.jsonl").expect("tombstones.jsonl");
-    let deps_bytes = read_tree_blob(&repo, "deps.jsonl").expect("deps.jsonl");
-    let notes_bytes = read_tree_blob(&repo, "notes.jsonl").expect("notes.jsonl");
+    let state_bytes = read_store_blob(repo_path, "state.jsonl").expect("state.jsonl");
+    let tombs_bytes = read_store_blob(repo_path, "tombstones.jsonl").expect("tombstones.jsonl");
+    let deps_bytes = read_store_blob(repo_path, "deps.jsonl").expect("deps.jsonl");
+    let notes_bytes = read_store_blob(repo_path, "notes.jsonl").expect("notes.jsonl");
     let checksums =
         StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes, Some(&notes_bytes));
     let meta_json = read_store_meta_json(repo_path);
@@ -439,6 +212,11 @@ fn assert_meta_checksums_match_store(repo_path: &Path) {
         Some(notes_sha.as_str()),
         "meta.json should carry the recomputed notes checksum"
     );
+}
+
+fn read_tree_blob(repo: &Repository, name: &str) -> Option<Vec<u8>> {
+    let repo_path = repo.workdir().unwrap_or(repo.path());
+    read_store_blob(repo_path, name)
 }
 
 fn run_bd_json(repo: &TestRepo, args: &[&str]) -> serde_json::Value {
@@ -524,14 +302,6 @@ fn bead_id(raw: &str) -> BeadId {
 
 fn dep_key(from: &str, to: &str, kind: DepKind) -> DepKey {
     DepKey::new(bead_id(from), bead_id(to), kind).expect("valid dep key")
-}
-
-fn push_store_ref(repo_path: &Path) {
-    let repo = Repository::open(repo_path).expect("open repo");
-    let mut remote = repo.find_remote("origin").expect("origin remote");
-    remote
-        .push(&["refs/heads/beads/store:refs/heads/beads/store"], None)
-        .expect("push store ref");
 }
 
 fn assert_rich_workflow_state(
@@ -2037,6 +1807,12 @@ fn test_migrate_fixture_related_divergence_merges_realistic_fixtures() {
     let remote_oid =
         fixture("rich_workflow_peer").install_with_parent(repo.remote_dir.path(), Some(base_oid));
     let remote_before = store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store");
+    let remote_tracking_oid = fetch_remote_store_ref(repo.path());
+    assert_eq!(
+        remote_tracking_oid,
+        remote_before.expect("remote store ref"),
+        "test setup must seed the remote-tracking ref before exercising no-push divergence"
+    );
 
     repo.bd()
         .args(["migrate", "to", "1", "--no-push", "--json"])
@@ -2089,6 +1865,12 @@ fn test_migrate_fixture_unrelated_divergence_requires_force() {
     let local_before = fixture("rich_workflow_peer").install(repo.path());
     let remote_oid = fixture("tombstone_deleted_dep").install(repo.remote_dir.path());
     let remote_before = store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store");
+    let remote_tracking_oid = fetch_remote_store_ref(repo.path());
+    assert_eq!(
+        remote_tracking_oid,
+        remote_before.expect("remote store ref"),
+        "test setup must seed the remote-tracking ref before exercising no-push divergence"
+    );
 
     repo.bd()
         .args(["migrate", "to", "1", "--dry-run", "--json"])
@@ -2164,7 +1946,7 @@ fn test_migrate_retryable_push_race_recomputes_and_preserves_backup_ref() {
     push_store_ref(repo.path());
 
     let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
-    let winner_oid = beads_git::sync::migrate_store_ref_to_v1(
+    beads_git::sync::migrate_store_ref_to_v1(
         &remote_repo,
         repo.remote_dir.path(),
         false,
@@ -2175,16 +1957,19 @@ fn test_migrate_retryable_push_race_recomputes_and_preserves_backup_ref() {
     .expect("winner migration")
     .commit_oid
     .expect("winner commit oid");
-    remote_repo
-        .reference(
-            "refs/heads/beads/store",
-            base_oid,
-            true,
-            "reset remote to base",
-        )
-        .expect("reset remote store ref");
-    std::thread::sleep(Duration::from_secs(1));
-    fetch_remote_store_ref(repo.path());
+    let winner_oid = rewrite_store_ref_commit(
+        repo.remote_dir.path(),
+        "refs/heads/beads/store",
+        1_900_000_001,
+        "simulate distinct remote winner",
+    );
+    set_ref_target(
+        repo.remote_dir.path(),
+        "refs/heads/beads/store",
+        base_oid,
+        "reset remote to base",
+    );
+    wait_for_fetched_remote_store_ref(repo.path(), base_oid, Duration::from_secs(1));
 
     let local_repo = Repository::open(repo.path()).expect("open local repo");
     let outcome = migrate_store_ref_to_v1_with_before_push_for_testing(
@@ -2196,14 +1981,12 @@ fn test_migrate_retryable_push_race_recomputes_and_preserves_backup_ref() {
         1,
         |retries, _commit_oid| {
             if retries == 0 {
-                remote_repo
-                    .reference(
-                        "refs/heads/beads/store",
-                        winner_oid,
-                        true,
-                        "simulate remote winner before first push",
-                    )
-                    .map_err(beads_git::SyncError::from)?;
+                set_ref_target(
+                    repo.remote_dir.path(),
+                    "refs/heads/beads/store",
+                    winner_oid,
+                    "simulate remote winner before first push",
+                );
             }
             Ok(())
         },
@@ -2244,7 +2027,7 @@ fn test_migrate_retryable_push_race_exhausts_retry_budget() {
     push_store_ref(repo.path());
 
     let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
-    let winner_oid = beads_git::sync::migrate_store_ref_to_v1(
+    beads_git::sync::migrate_store_ref_to_v1(
         &remote_repo,
         repo.remote_dir.path(),
         false,
@@ -2255,16 +2038,19 @@ fn test_migrate_retryable_push_race_exhausts_retry_budget() {
     .expect("winner migration")
     .commit_oid
     .expect("winner commit oid");
-    remote_repo
-        .reference(
-            "refs/heads/beads/store",
-            base_oid,
-            true,
-            "reset remote to base",
-        )
-        .expect("reset remote store ref");
-    std::thread::sleep(Duration::from_secs(1));
-    fetch_remote_store_ref(repo.path());
+    let winner_oid = rewrite_store_ref_commit(
+        repo.remote_dir.path(),
+        "refs/heads/beads/store",
+        1_900_000_002,
+        "simulate distinct remote winner",
+    );
+    set_ref_target(
+        repo.remote_dir.path(),
+        "refs/heads/beads/store",
+        base_oid,
+        "reset remote to base",
+    );
+    wait_for_fetched_remote_store_ref(repo.path(), base_oid, Duration::from_secs(1));
 
     let local_repo = Repository::open(repo.path()).expect("open local repo");
     let err = migrate_store_ref_to_v1_with_before_push_for_testing(
@@ -2276,14 +2062,12 @@ fn test_migrate_retryable_push_race_exhausts_retry_budget() {
         0,
         |retries, _commit_oid| {
             if retries == 0 {
-                remote_repo
-                    .reference(
-                        "refs/heads/beads/store",
-                        winner_oid,
-                        true,
-                        "simulate remote winner before first push",
-                    )
-                    .map_err(beads_git::SyncError::from)?;
+                set_ref_target(
+                    repo.remote_dir.path(),
+                    "refs/heads/beads/store",
+                    winner_oid,
+                    "simulate remote winner before first push",
+                );
             }
             Ok(())
         },
@@ -2323,7 +2107,7 @@ fn test_migrate_cli_retryable_push_race_recomputes_and_preserves_backup_ref() {
     push_store_ref(repo.path());
 
     let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
-    let winner_oid = beads_git::sync::migrate_store_ref_to_v1(
+    beads_git::sync::migrate_store_ref_to_v1(
         &remote_repo,
         repo.remote_dir.path(),
         false,
@@ -2334,15 +2118,19 @@ fn test_migrate_cli_retryable_push_race_recomputes_and_preserves_backup_ref() {
     .expect("winner migration")
     .commit_oid
     .expect("winner commit oid");
-    remote_repo
-        .reference(
-            "refs/heads/beads/store",
-            base_oid,
-            true,
-            "reset remote to base",
-        )
-        .expect("reset remote store ref");
-    std::thread::sleep(Duration::from_secs(1));
+    let winner_oid = rewrite_store_ref_commit(
+        repo.remote_dir.path(),
+        "refs/heads/beads/store",
+        1_900_000_003,
+        "simulate distinct remote winner",
+    );
+    set_ref_target(
+        repo.remote_dir.path(),
+        "refs/heads/beads/store",
+        base_oid,
+        "reset remote to base",
+    );
+    wait_for_fetched_remote_store_ref(repo.path(), base_oid, Duration::from_secs(1));
 
     let output = repo
         .bd()
@@ -2392,7 +2180,7 @@ fn test_migrate_cli_retryable_push_race_exhausts_retry_budget() {
     push_store_ref(repo.path());
 
     let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
-    let winner_oid = beads_git::sync::migrate_store_ref_to_v1(
+    beads_git::sync::migrate_store_ref_to_v1(
         &remote_repo,
         repo.remote_dir.path(),
         false,
@@ -2403,15 +2191,19 @@ fn test_migrate_cli_retryable_push_race_exhausts_retry_budget() {
     .expect("winner migration")
     .commit_oid
     .expect("winner commit oid");
-    remote_repo
-        .reference(
-            "refs/heads/beads/store",
-            base_oid,
-            true,
-            "reset remote to base",
-        )
-        .expect("reset remote store ref");
-    std::thread::sleep(Duration::from_secs(1));
+    let winner_oid = rewrite_store_ref_commit(
+        repo.remote_dir.path(),
+        "refs/heads/beads/store",
+        1_900_000_004,
+        "simulate distinct remote winner",
+    );
+    set_ref_target(
+        repo.remote_dir.path(),
+        "refs/heads/beads/store",
+        base_oid,
+        "reset remote to base",
+    );
+    wait_for_fetched_remote_store_ref(repo.path(), base_oid, Duration::from_secs(1));
 
     repo.bd()
         .env(

@@ -419,6 +419,7 @@ mod tests {
                     version: "0.1.0-test".to_string(),
                     protocol_version: crate::ipc::IPC_PROTOCOL_VERSION,
                     pid: 4242,
+                    started_at_ms: None,
                 })),
             })
         });

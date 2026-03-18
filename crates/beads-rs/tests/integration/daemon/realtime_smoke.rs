@@ -13,7 +13,7 @@ fn realtime_smoke_applies_and_persists() {
 
     let namespace = NamespaceId::core();
     let repo = fixture.repo_path().to_path_buf();
-    let client = fixture.ipc_client().with_autostart(false);
+    let client = fixture.ipc_client();
 
     let mut generator = LoadGenerator::with_client(repo.clone(), client.clone());
     let config = generator.config_mut();

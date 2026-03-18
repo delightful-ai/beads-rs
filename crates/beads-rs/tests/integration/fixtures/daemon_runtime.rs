@@ -76,10 +76,10 @@ struct DaemonCandidate {
 
 fn daemon_candidate_from_meta(runtime_dir: &Path) -> Option<DaemonCandidate> {
     let contents = fs::read_to_string(daemon_meta_path(runtime_dir)).ok()?;
-    let meta: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    let meta: beads_api::DaemonInfo = serde_json::from_str(&contents).ok()?;
     Some(DaemonCandidate {
-        pid: meta["pid"].as_u64()? as u32,
-        started_at_ms: meta["started_at_ms"].as_u64(),
+        pid: meta.pid,
+        started_at_ms: meta.started_at_ms,
     })
 }
 
@@ -103,16 +103,12 @@ fn candidate_daemon_candidates(runtime_dir: &Path) -> Vec<DaemonCandidate> {
 
 fn cleanup_store_locks(runtime_dir: &Path) {
     for entry in store_lock_entries(runtime_dir) {
-        let stale_or_missing = match (entry.pid, entry.started_at_ms) {
-            (None, _) => true,
-            (Some(pid), _) if !process_alive(pid) => true,
-            (Some(pid), Some(started_at_ms)) => {
-                matches!(
-                    pid_matches_started_at(pid, Some(started_at_ms)),
-                    Some(false)
-                )
-            }
-            (Some(pid), None) => matches!(process_looks_like_bd_daemon(pid), Some(false)),
+        let stale_or_missing = match entry.pid {
+            None => true,
+            Some(pid) => !candidate_matches_running_process(&DaemonCandidate {
+                pid,
+                started_at_ms: entry.started_at_ms,
+            }),
         };
         if stale_or_missing {
             let _ = fs::remove_file(entry.path);
@@ -194,11 +190,9 @@ fn candidate_matches_running_process(candidate: &DaemonCandidate) -> bool {
     if !process_alive(candidate.pid) {
         return false;
     }
-
     match pid_matches_started_at(candidate.pid, candidate.started_at_ms) {
-        Some(true) => true,
-        Some(false) => false,
-        None => matches!(process_looks_like_bd_daemon(candidate.pid), Some(true)),
+        Some(matches) => matches,
+        None => process_command_matches_daemon(candidate.pid),
     }
 }
 
@@ -244,7 +238,7 @@ fn process_elapsed_secs(pid: u32) -> Option<u64> {
     parse_etime_to_secs(std::str::from_utf8(&output.stdout).ok()?)
 }
 
-fn process_looks_like_bd_daemon(pid: u32) -> Option<bool> {
+fn process_command(pid: u32) -> Option<String> {
     let output = Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "command="])
         .output()
@@ -252,8 +246,19 @@ fn process_looks_like_bd_daemon(pid: u32) -> Option<bool> {
     if !output.status.success() {
         return None;
     }
-    let command = std::str::from_utf8(&output.stdout).ok()?.trim();
-    Some(command.contains("bd daemon run"))
+    Some(std::str::from_utf8(&output.stdout).ok()?.trim().to_string())
+}
+
+fn process_command_matches_daemon(pid: u32) -> bool {
+    process_command(pid)
+        .map(|command| command_looks_like_daemon(&command))
+        .unwrap_or(false)
+}
+
+fn command_looks_like_daemon(command: &str) -> bool {
+    command.contains("/bd daemon run")
+        || command.ends_with("bd daemon run")
+        || command.contains(" bd daemon run")
 }
 
 fn parse_etime_to_secs(etime: &str) -> Option<u64> {
@@ -286,6 +291,14 @@ fn parse_etime_to_secs(etime: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    use beads_daemon::test_utils::daemon_meta_path;
+    use beads_surface::ipc::IpcClient;
+
+    use crate::fixtures::bd_runtime::{
+        BdCommandProfile, spawn_daemon_with_paths, wait_for_daemon_ready,
+    };
 
     #[test]
     fn shutdown_daemon_removes_stale_store_lock() {
@@ -306,6 +319,61 @@ mod tests {
         shutdown_daemon(runtime_dir.path());
 
         assert!(!lock_path.exists(), "expected stale lock to be removed");
+    }
+
+    #[test]
+    fn shutdown_daemon_terminates_live_daemon_without_started_at_ms() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let cwd = root.path().join("cwd");
+        let runtime_dir = root.path().join("runtime");
+        let data_dir = root.path().join("data");
+        let config_dir = root.path().join("config");
+        for dir in [&cwd, &runtime_dir, &data_dir, &config_dir] {
+            fs::create_dir_all(dir).expect("create fixture dir");
+        }
+
+        let mut child = spawn_daemon_with_paths(
+            &cwd,
+            &runtime_dir,
+            &data_dir,
+            &config_dir,
+            None,
+            BdCommandProfile::daemon(),
+        );
+        let pid = child.id();
+        let client = IpcClient::for_runtime_dir(&runtime_dir).with_autostart(false);
+        assert!(
+            wait_for_daemon_ready(&client, Duration::from_secs(5)),
+            "daemon should become ready"
+        );
+
+        let meta_path = daemon_meta_path(&runtime_dir);
+        let mut meta = serde_json::from_str::<serde_json::Value>(
+            &fs::read_to_string(&meta_path).expect("read daemon meta"),
+        )
+        .expect("parse daemon meta");
+        meta.as_object_mut()
+            .expect("daemon meta object")
+            .remove("started_at_ms");
+        fs::write(
+            &meta_path,
+            serde_json::to_string(&meta).expect("serialize daemon meta"),
+        )
+        .expect("rewrite daemon meta without started_at_ms");
+
+        shutdown_daemon(&runtime_dir);
+        let status = child.wait().expect("wait for daemon child");
+        assert!(status.code().is_some(), "daemon child should exit");
+        assert!(!process_alive(pid), "daemon should be terminated");
+    }
+
+    #[test]
+    fn command_looks_like_daemon_matches_bd_daemon_run_variants() {
+        assert!(command_looks_like_daemon(
+            "/tmp/beads-rs/target/debug/bd daemon run"
+        ));
+        assert!(command_looks_like_daemon("bd daemon run"));
+        assert!(!command_looks_like_daemon("python worker.py"));
     }
 
     #[test]

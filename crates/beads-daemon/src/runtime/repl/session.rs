@@ -497,6 +497,8 @@ pub struct Session<R, P> {
     gap_buffer: GapBufferByNsOrigin,
     durable: WatermarkState<Durable>,
     applied: WatermarkState<Applied>,
+    last_replay_hello_nonce: Option<u64>,
+    last_accepted_welcome_nonce: Option<u64>,
     next_nonce: u64,
 }
 
@@ -511,6 +513,8 @@ impl<R> Session<R, Connecting> {
             admission,
             durable: BTreeMap::new(),
             applied: BTreeMap::new(),
+            last_replay_hello_nonce: None,
+            last_accepted_welcome_nonce: None,
             next_nonce: 1,
         }
     }
@@ -527,6 +531,8 @@ impl<R, P> Session<R, P> {
             gap_buffer: self.gap_buffer,
             durable: self.durable,
             applied: self.applied,
+            last_replay_hello_nonce: self.last_replay_hello_nonce,
+            last_accepted_welcome_nonce: self.last_accepted_welcome_nonce,
             next_nonce: self.next_nonce,
         }
     }
@@ -608,6 +614,14 @@ impl Session<Outbound, Handshaking> {
     }
 }
 
+impl<M> Session<Outbound, Streaming<M>> {
+    pub fn replay_hello(&mut self, store: &impl SessionStore, now_ms: u64) -> SessionAction {
+        let hello = self.build_hello(store, now_ms);
+        self.last_replay_hello_nonce = Some(hello.hello_nonce);
+        SessionAction::Send(ReplMessage::Hello(hello))
+    }
+}
+
 #[allow(private_bounds)]
 impl<R, P: PhaseWrap + PhasePeer + PhasePeerOpt> Session<R, P> {
     fn handle_ack(self, ack: Ack) -> (SessionState<R>, Vec<SessionAction>) {
@@ -649,6 +663,8 @@ impl<R, P: PhasePeerOpt> Session<R, P> {
             gap_buffer,
             durable,
             applied,
+            last_replay_hello_nonce,
+            last_accepted_welcome_nonce,
             next_nonce,
         } = self;
         let next = match phase.into_peer() {
@@ -661,6 +677,8 @@ impl<R, P: PhasePeerOpt> Session<R, P> {
                 gap_buffer,
                 durable,
                 applied,
+                last_replay_hello_nonce,
+                last_accepted_welcome_nonce,
                 next_nonce,
             }),
             None => SessionState::Closed(Session {
@@ -672,6 +690,8 @@ impl<R, P: PhasePeerOpt> Session<R, P> {
                 gap_buffer,
                 durable,
                 applied,
+                last_replay_hello_nonce,
+                last_accepted_welcome_nonce,
                 next_nonce,
             }),
         };
@@ -696,6 +716,8 @@ impl<R, P: PhasePeerOpt> Session<R, P> {
             gap_buffer,
             durable,
             applied,
+            last_replay_hello_nonce,
+            last_accepted_welcome_nonce,
             next_nonce,
         } = self;
         let next = match phase.into_peer() {
@@ -708,6 +730,8 @@ impl<R, P: PhasePeerOpt> Session<R, P> {
                 gap_buffer,
                 durable,
                 applied,
+                last_replay_hello_nonce,
+                last_accepted_welcome_nonce,
                 next_nonce,
             }),
             None => SessionState::Closed(Session {
@@ -719,6 +743,8 @@ impl<R, P: PhasePeerOpt> Session<R, P> {
                 gap_buffer,
                 durable,
                 applied,
+                last_replay_hello_nonce,
+                last_accepted_welcome_nonce,
                 next_nonce,
             }),
         };
@@ -837,13 +863,15 @@ where
 
         let snapshot = store.watermark_snapshot(&accepted_namespaces);
         let welcome = self.build_welcome(negotiated, &hello, snapshot, accepted_namespaces);
+        let wants = self.initial_wants(&hello.seen_durable, &peer.incoming_namespaces);
         if welcome.live_stream_enabled != peer.live_stream_enabled {
             return self.invalid_request("HELLO live_stream changed");
         }
-        (
-            <Streaming<M> as PhaseWrap>::wrap(self),
-            vec![SessionAction::Send(ReplMessage::Welcome(welcome))],
-        )
+        let mut actions = vec![SessionAction::Send(ReplMessage::Welcome(welcome))];
+        if !wants.is_empty() {
+            actions.push(SessionAction::Send(ReplMessage::Want(Want { want: wants })));
+        }
+        (<Streaming<M> as PhaseWrap>::wrap(self), actions)
     }
 }
 
@@ -898,6 +926,7 @@ impl Session<Outbound, Handshaking> {
             accepted_namespaces: welcome.accepted_namespaces.clone(),
             live_stream_enabled: welcome.live_stream_enabled,
         };
+        self.last_accepted_welcome_nonce = Some(welcome.welcome_nonce);
         let session = self.with_streaming(peer);
         let actions = if wants.is_empty() {
             Vec::new()
@@ -914,8 +943,9 @@ where
     Streaming<M>: PhaseWrap,
 {
     fn handle_welcome_replay(
-        self,
+        mut self,
         welcome: beads_daemon_core::repl::proto::Welcome,
+        store: &impl SessionStore,
     ) -> (SessionState<Outbound>, Vec<SessionAction>) {
         let peer = self.peer().clone();
         if let Err(error) = self.validate_peer_store(
@@ -937,8 +967,34 @@ where
         if welcome.live_stream_enabled != peer.live_stream_enabled {
             return self.invalid_request("WELCOME live_stream changed");
         }
+        let Some(last_replay_hello_nonce) = self.last_replay_hello_nonce else {
+            return (<Streaming<M> as PhaseWrap>::wrap(self), Vec::new());
+        };
+        // Multiple replay HELLOs can be in flight at once. Accept any replayed
+        // WELCOME that advances past the last accepted nonce but still echoes a
+        // nonce we have actually sent on this connection.
+        if welcome.welcome_nonce <= self.last_accepted_welcome_nonce.unwrap_or_default()
+            || welcome.welcome_nonce > last_replay_hello_nonce
+        {
+            return (<Streaming<M> as PhaseWrap>::wrap(self), Vec::new());
+        }
+        self.last_accepted_welcome_nonce = Some(welcome.welcome_nonce);
 
-        (<Streaming<M> as PhaseWrap>::wrap(self), Vec::new())
+        let mut actions = Vec::new();
+        let resend = self.peer_missing_wants(
+            store,
+            &welcome.receiver_seen_durable,
+            &peer.accepted_namespaces,
+        );
+        if !resend.is_empty() {
+            actions.push(SessionAction::PeerWant(Want { want: resend }));
+        }
+        let wants = self.initial_wants(&welcome.receiver_seen_durable, &peer.incoming_namespaces);
+        if !wants.is_empty() {
+            actions.push(SessionAction::Send(ReplMessage::Want(Want { want: wants })));
+        }
+
+        (<Streaming<M> as PhaseWrap>::wrap(self), actions)
     }
 }
 
@@ -959,8 +1015,8 @@ pub fn handle_outbound_message(
         },
         WireReplMessage::Welcome(msg) => match session {
             SessionState::Handshaking(session) => session.handle_welcome(msg, store, now_ms),
-            SessionState::StreamingLive(session) => session.handle_welcome_replay(msg),
-            SessionState::StreamingSnapshot(session) => session.handle_welcome_replay(msg),
+            SessionState::StreamingLive(session) => session.handle_welcome_replay(msg, store),
+            SessionState::StreamingSnapshot(session) => session.handle_welcome_replay(msg, store),
             SessionState::Connecting(session) => session.invalid_request("unexpected WELCOME"),
             SessionState::Draining(session) => session.invalid_request("unexpected WELCOME"),
             SessionState::Closed(session) => session.invalid_request("unexpected WELCOME"),
@@ -1369,6 +1425,35 @@ impl<R, P> Session<R, P> {
                         .entry(namespace.clone())
                         .or_default()
                         .insert(*origin, local_seq);
+                }
+            }
+        }
+        wants
+    }
+
+    fn peer_missing_wants(
+        &self,
+        store: &impl SessionStore,
+        peer_seen: &WatermarkState<Durable>,
+        accepted_namespaces: &[NamespaceId],
+    ) -> WatermarkMap {
+        let local = store.watermark_snapshot(accepted_namespaces);
+        let mut wants = WatermarkMap::new();
+        for namespace in accepted_namespaces {
+            let Some(origins) = local.durable.get(namespace) else {
+                continue;
+            };
+            for (origin, local_wm) in origins {
+                let peer_seq = peer_seen
+                    .get(namespace)
+                    .and_then(|map| map.get(origin))
+                    .map(|wm| wm.seq())
+                    .unwrap_or(Seq0::ZERO);
+                if local_wm.seq().get() > peer_seq.get() {
+                    wants
+                        .entry(namespace.clone())
+                        .or_default()
+                        .insert(*origin, peer_seq);
                 }
             }
         }
@@ -2161,6 +2246,160 @@ mod tests {
     }
 
     #[test]
+    fn hello_replay_requests_missing_peer_events() {
+        let namespace = NamespaceId::core();
+        let (session, mut store, identity) = inbound_streaming_session(vec![namespace.clone()]);
+        let session = expect_inbound_streaming(session);
+        let peer = session.peer().clone();
+
+        let local_origin = ReplicaId::new(Uuid::from_bytes([12u8; 16]));
+        let local_head = HeadStatus::Known([4u8; 32]);
+        store.durable.entry(namespace.clone()).or_default().insert(
+            local_origin,
+            Watermark::new(Seq0::new(1), local_head).expect("local durable watermark"),
+        );
+        store.applied.entry(namespace.clone()).or_default().insert(
+            local_origin,
+            Watermark::new(Seq0::new(1), local_head).expect("local applied watermark"),
+        );
+
+        let peer_origin = peer.replica_id;
+        let peer_head = HeadStatus::Known([5u8; 32]);
+        let mut seen_durable = WatermarkState::new();
+        seen_durable.entry(namespace.clone()).or_default().insert(
+            peer_origin,
+            Watermark::new(Seq0::new(1), peer_head).expect("peer durable watermark"),
+        );
+
+        let hello_replay = Hello {
+            protocol_version: PROTOCOL_VERSION_V1,
+            min_protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            sender_replica_id: peer_origin,
+            hello_nonce: 11,
+            max_frame_bytes: 1024,
+            requested_namespaces: vec![namespace.clone()].into(),
+            offered_namespaces: vec![namespace.clone()].into(),
+            seen_durable,
+            seen_applied: None,
+            capabilities: Capabilities {
+                supports_snapshots: false,
+                supports_live_stream: true,
+                supports_compression: false,
+            },
+        };
+
+        let (_session, actions) = handle_inbound_message(
+            SessionState::StreamingLive(session),
+            WireReplMessage::Hello(hello_replay),
+            &mut store,
+            0,
+        );
+        let want = actions
+            .iter()
+            .find_map(|action| match action {
+                SessionAction::Send(ReplMessage::Want(want)) => Some(want),
+                _ => None,
+            })
+            .expect("want");
+        let seq = want
+            .want
+            .get(&namespace)
+            .and_then(|origins| origins.get(&peer_origin))
+            .copied()
+            .unwrap_or(Seq0::ZERO);
+        assert_eq!(seq, Seq0::ZERO);
+    }
+
+    #[test]
+    fn welcome_replay_resends_when_peer_is_behind() {
+        let (mut store, identity, replica) = base_store();
+        let limits = Limits::default();
+        let admission = AdmissionController::new(&limits);
+        let mut config = SessionConfig::new(identity, replica, &limits);
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
+
+        let session = OutboundConnecting::new(config, limits, admission);
+        let (session, action) = session.begin_handshake(&store, 0);
+        let hello_nonce = match action {
+            SessionAction::Send(ReplMessage::Hello(hello)) => hello.hello_nonce,
+            other => panic!("expected hello action, got {other:?}"),
+        };
+        let peer_replica = ReplicaId::new(Uuid::from_bytes([10u8; 16]));
+        let welcome = proto::Welcome {
+            protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            receiver_replica_id: peer_replica,
+            welcome_nonce: hello_nonce,
+            accepted_namespaces: vec![NamespaceId::core()].into(),
+            receiver_seen_durable: BTreeMap::new(),
+            receiver_seen_applied: None,
+            live_stream_enabled: true,
+            max_frame_bytes: 1024,
+        };
+
+        let (session, _actions) = handle_outbound_message(
+            SessionState::Handshaking(session),
+            WireReplMessage::Welcome(welcome.clone()),
+            &mut store,
+            0,
+        );
+        let SessionState::StreamingLive(mut session) = session else {
+            panic!("expected streaming session");
+        };
+
+        let local_head = HeadStatus::Known([7u8; 32]);
+        let local_wm = Watermark::new(Seq0::new(1), local_head).expect("local watermark");
+        store
+            .durable
+            .entry(NamespaceId::core())
+            .or_default()
+            .insert(replica, local_wm);
+        store
+            .applied
+            .entry(NamespaceId::core())
+            .or_default()
+            .insert(
+                replica,
+                Watermark::new(Seq0::new(1), local_head).expect("local watermark"),
+            );
+
+        let replay = session.replay_hello(&store, 1);
+        let replay_nonce = match replay {
+            SessionAction::Send(ReplMessage::Hello(hello)) => hello.hello_nonce,
+            other => panic!("expected hello replay action, got {other:?}"),
+        };
+        let replay_welcome = proto::Welcome {
+            welcome_nonce: replay_nonce,
+            ..welcome
+        };
+
+        let (_session, actions) = handle_outbound_message(
+            SessionState::StreamingLive(session),
+            WireReplMessage::Welcome(replay_welcome),
+            &mut store,
+            1,
+        );
+        let want = actions
+            .iter()
+            .find_map(|action| match action {
+                SessionAction::PeerWant(want) => Some(want),
+                _ => None,
+            })
+            .expect("peer resend want");
+        let seq = want
+            .want
+            .get(&NamespaceId::core())
+            .and_then(|m| m.get(&replica))
+            .copied()
+            .unwrap_or(Seq0::ZERO);
+        assert_eq!(seq, Seq0::ZERO);
+    }
+
+    #[test]
     fn welcome_sends_initial_want_when_peer_ahead() {
         let (mut store, identity, replica) = base_store();
         let limits = Limits::default();
@@ -2314,6 +2553,181 @@ mod tests {
             })
             .expect("error payload");
         assert_eq!(error.code, ProtocolErrorCode::InvalidRequest.into());
+    }
+
+    #[test]
+    fn welcome_replay_rejects_stale_nonce_after_replay_hello() {
+        let (mut store, identity, replica) = base_store();
+        let limits = Limits::default();
+        let admission = AdmissionController::new(&limits);
+        let mut config = SessionConfig::new(identity, replica, &limits);
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
+
+        let session = OutboundConnecting::new(config, limits, admission);
+        let (session, action) = session.begin_handshake(&store, 0);
+        let hello_nonce = match action {
+            SessionAction::Send(ReplMessage::Hello(hello)) => hello.hello_nonce,
+            other => panic!("expected hello action, got {other:?}"),
+        };
+        let peer_replica = ReplicaId::new(Uuid::from_bytes([10u8; 16]));
+        let welcome = proto::Welcome {
+            protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            receiver_replica_id: peer_replica,
+            welcome_nonce: hello_nonce,
+            accepted_namespaces: vec![NamespaceId::core()].into(),
+            receiver_seen_durable: BTreeMap::new(),
+            receiver_seen_applied: None,
+            live_stream_enabled: true,
+            max_frame_bytes: 1024,
+        };
+
+        let (session, _actions) = handle_outbound_message(
+            SessionState::Handshaking(session),
+            WireReplMessage::Welcome(welcome.clone()),
+            &mut store,
+            0,
+        );
+        let SessionState::StreamingLive(mut session) = session else {
+            panic!("expected streaming session");
+        };
+
+        let first_replay = session.replay_hello(&store, 1);
+        let first_nonce = match first_replay {
+            SessionAction::Send(ReplMessage::Hello(hello)) => hello.hello_nonce,
+            other => panic!("expected first hello replay action, got {other:?}"),
+        };
+        let second_replay = session.replay_hello(&store, 2);
+        let second_nonce = match second_replay {
+            SessionAction::Send(ReplMessage::Hello(hello)) => hello.hello_nonce,
+            other => panic!("expected second hello replay action, got {other:?}"),
+        };
+        assert_ne!(first_nonce, second_nonce);
+
+        let replay_welcome = proto::Welcome {
+            welcome_nonce: second_nonce,
+            ..welcome.clone()
+        };
+        let (session, _actions) = handle_outbound_message(
+            SessionState::StreamingLive(session),
+            WireReplMessage::Welcome(replay_welcome),
+            &mut store,
+            2,
+        );
+        let SessionState::StreamingLive(session) = session else {
+            panic!("expected streaming session after fresh replay welcome");
+        };
+
+        let stale_welcome = proto::Welcome {
+            welcome_nonce: first_nonce,
+            ..welcome
+        };
+
+        let (session, actions) = handle_outbound_message(
+            SessionState::StreamingLive(session),
+            WireReplMessage::Welcome(stale_welcome),
+            &mut store,
+            2,
+        );
+
+        assert!(matches!(session, SessionState::StreamingLive(_)));
+        assert!(actions.is_empty(), "stale replay welcome should be ignored");
+    }
+
+    #[test]
+    fn welcome_replay_accepts_in_flight_older_replay_nonce() {
+        let (mut store, identity, replica) = base_store();
+        let limits = Limits::default();
+        let admission = AdmissionController::new(&limits);
+        let mut config = SessionConfig::new(identity, replica, &limits);
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
+
+        let session = OutboundConnecting::new(config, limits, admission);
+        let (session, action) = session.begin_handshake(&store, 0);
+        let hello_nonce = match action {
+            SessionAction::Send(ReplMessage::Hello(hello)) => hello.hello_nonce,
+            other => panic!("expected hello action, got {other:?}"),
+        };
+        let peer_replica = ReplicaId::new(Uuid::from_bytes([10u8; 16]));
+        let welcome = proto::Welcome {
+            protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            receiver_replica_id: peer_replica,
+            welcome_nonce: hello_nonce,
+            accepted_namespaces: vec![NamespaceId::core()].into(),
+            receiver_seen_durable: BTreeMap::new(),
+            receiver_seen_applied: None,
+            live_stream_enabled: true,
+            max_frame_bytes: 1024,
+        };
+
+        let (session, _actions) = handle_outbound_message(
+            SessionState::Handshaking(session),
+            WireReplMessage::Welcome(welcome.clone()),
+            &mut store,
+            0,
+        );
+        let SessionState::StreamingLive(mut session) = session else {
+            panic!("expected streaming session");
+        };
+
+        let first_replay = session.replay_hello(&store, 1);
+        let first_nonce = match first_replay {
+            SessionAction::Send(ReplMessage::Hello(hello)) => hello.hello_nonce,
+            other => panic!("expected first hello replay action, got {other:?}"),
+        };
+        let second_replay = session.replay_hello(&store, 2);
+        let second_nonce = match second_replay {
+            SessionAction::Send(ReplMessage::Hello(hello)) => hello.hello_nonce,
+            other => panic!("expected second hello replay action, got {other:?}"),
+        };
+        assert_ne!(first_nonce, second_nonce);
+
+        let first_replay_welcome = proto::Welcome {
+            welcome_nonce: first_nonce,
+            ..welcome.clone()
+        };
+        let (session, first_actions) = handle_outbound_message(
+            SessionState::StreamingLive(session),
+            WireReplMessage::Welcome(first_replay_welcome),
+            &mut store,
+            2,
+        );
+        assert!(
+            first_actions.iter().all(|action| {
+                !matches!(
+                    action,
+                    SessionAction::Send(ReplMessage::Error(_)) | SessionAction::Close { .. }
+                )
+            }),
+            "older in-flight replay welcome should not be rejected"
+        );
+
+        let second_replay_welcome = proto::Welcome {
+            welcome_nonce: second_nonce,
+            ..welcome
+        };
+        let (session, second_actions) = handle_outbound_message(
+            session,
+            WireReplMessage::Welcome(second_replay_welcome),
+            &mut store,
+            2,
+        );
+
+        assert!(matches!(session, SessionState::StreamingLive(_)));
+        assert!(
+            second_actions.iter().all(|action| {
+                !matches!(
+                    action,
+                    SessionAction::Send(ReplMessage::Error(_)) | SessionAction::Close { .. }
+                )
+            }),
+            "newer replay welcome should still be accepted after the older one"
+        );
     }
 
     #[test]
