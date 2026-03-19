@@ -338,6 +338,19 @@ mod tests {
     }
 
     #[test]
+    fn crash_daemon_removes_stale_store_lock_for_sibling_data_dir() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let runtime_dir = root.path().join("runtime");
+        let data_dir = root.path().join("data");
+        fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        let lock_path = write_stale_store_lock(&data_dir);
+
+        crash_daemon(&runtime_dir, &data_dir);
+
+        assert!(!lock_path.exists(), "expected stale lock to be removed");
+    }
+
+    #[test]
     fn shutdown_daemon_terminates_live_daemon_without_started_at_ms() {
         let root = tempfile::TempDir::new().expect("fixture root");
         let cwd = root.path().join("cwd");

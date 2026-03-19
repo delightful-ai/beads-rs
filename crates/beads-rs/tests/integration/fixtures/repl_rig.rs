@@ -1856,8 +1856,30 @@ fn request_is_retry_safe(request: &Request) -> bool {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use super::*;
+
+    fn node_has_issue(node: &Node, issue_id: &str) -> bool {
+        let request = Request::Show {
+            ctx: ReadCtx::new(node.repo_dir().to_path_buf(), ReadConsistency::default()),
+            payload: IdPayload {
+                id: BeadId::parse(issue_id).expect("bead id"),
+            },
+        };
+        match node.send_request(&request) {
+            Err(err) if err.transience().is_retryable() => false,
+            Err(err) => panic!("show request failed for {issue_id}: {err:?}"),
+            Ok(Response::Ok {
+                ok: ResponsePayload::Query(QueryResult::Issue(issue)),
+            }) => {
+                assert_eq!(issue.id, issue_id);
+                true
+            }
+            Ok(Response::Err { err }) if err.code == CliErrorCode::NotFound.into() => false,
+            Ok(other) => panic!("unexpected show response for {issue_id}: {other:?}"),
+        }
+    }
 
     #[test]
     fn admin_fingerprint_requests_are_retry_safe() {
@@ -1870,5 +1892,53 @@ mod tests {
         });
 
         assert!(request_is_retry_safe(&request));
+    }
+
+    #[test]
+    fn crash_restart_remains_green_for_sibling_runtime_data_layouts() {
+        let mut options = ReplRigOptions::default();
+        options.seed = 61;
+
+        let mut rig = ReplRig::new(2, options);
+        for (idx, node) in rig.nodes().iter().enumerate() {
+            assert_eq!(
+                node.runtime_dir().parent(),
+                node.data_dir().parent(),
+                "node {idx} should keep runtime/ and data/ as sibling fixture dirs",
+            );
+        }
+
+        let initial = [
+            rig.create_issue(0, "sibling-crash-pre-0"),
+            rig.create_issue(1, "sibling-crash-pre-1"),
+        ];
+
+        rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(30));
+        for issue_id in &initial {
+            for idx in 0..2 {
+                rig.wait_for_show(idx, issue_id, Duration::from_secs(10));
+            }
+        }
+
+        let ready_snapshot = rig.replication_ready_snapshot();
+        rig.crash_node(1);
+
+        let post = rig.create_issue(0, "sibling-crash-post-0");
+        rig.wait_for_show(0, &post, Duration::from_secs(10));
+        assert!(
+            !node_has_issue(rig.node(1), &post),
+            "crashed sibling-layout node should not observe post-crash writes before restart",
+        );
+
+        rig.restart_node(1);
+        rig.wait_for_admin_ready(1, Duration::from_secs(20));
+        rig.assert_replication_ready_since(&ready_snapshot, Duration::from_secs(30));
+        rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
+
+        for issue_id in initial.iter().chain(std::iter::once(&post)) {
+            for idx in 0..2 {
+                rig.wait_for_show(idx, issue_id, Duration::from_secs(20));
+            }
+        }
     }
 }
