@@ -25,7 +25,7 @@
 
 ## Proof Loops
 - Run `cargo test -p beads-daemon admin_reload_replication` for replication reload, rebind, or config-restore changes.
-- Run `cargo test -p beads-daemon --features test-harness repl:: -- --list` for daemon REPL seam coverage in `crates/beads-daemon/tests/repl.rs`.
-- Run `cargo test -p beads-daemon --features test-harness wal:: -- --list` for daemon WAL seam coverage in `crates/beads-daemon/tests/wal.rs`.
+- Run `cargo test -p beads-daemon --features test-harness --test repl -- --list` for daemon REPL seam coverage in `crates/beads-daemon/tests/repl.rs`.
+- Run `cargo test -p beads-daemon --features test-harness --test wal -- --list` for daemon WAL seam coverage in `crates/beads-daemon/tests/wal.rs`.
 - Run `cargo test -p beads-rs --test public_boundary` if a change makes you want to expose `runtime::*`, but treat that test as a guard against forbidden external imports and assembly-owned boundary drift, not as proof of the daemon export list.
 - Run `cargo test -p beads-daemon --features test-harness` before calling the runtime subtree done.

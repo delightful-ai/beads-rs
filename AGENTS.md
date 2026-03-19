@@ -81,11 +81,13 @@ Root keeps only the cross-subtree assembly-test rules. The child files under `cr
 - Tailnet fault-injection `daemon::repl_e2e` tests run in the `tailnet-fault-injection` nextest group (`max-threads = 1`). If you add another tailnet/proxy stress test, fence it into the same group instead of letting it silently contend with the rest of the suite.
 - Profile the suite with `./scripts/profile-tests.sh`. It records per-test nextest timing plus env-gated fixture timing under `tmp/perf/tests-*`; override its default thread count only when you are deliberately measuring a different concurrency level.
 - Reuse shared helpers under `crates/beads-rs/tests/integration/fixtures/`. If a test needs new repo/runtime/daemon setup behavior, add or extend a shared fixture instead of creating another one-off local harness.
+- Migration store-ref tests should go through `crates/beads-rs/tests/integration/fixtures/legacy_store.rs` plus `legacy_store_corpus/`; do not grow a second fixture-data root or reintroduce git/blob/meta setup into `cli/migration.rs`.
 - Reuse `fixtures::temp` for integration temp roots. Keep Unix socket paths short and deterministic instead of deriving them from `current_dir()/tmp`.
 - Avoid fixed sleeps in tests. Prefer shared condition-based wait helpers and explicit readiness barriers.
 - If a fixture intends to own a daemon process, spawn `bd daemon run` explicitly and drive bootstrap/status through `IpcClient::for_runtime_dir(...).with_autostart(false)` so helper CLI autostart paths do not steal lifecycle ownership.
 - For namespace convergence polling, prefer `AdminFingerprint` over full `AdminStatus` unless the assertion actually needs the heavier payload.
 - For crash/restart replication tests, snapshot readiness first and then require fresh post-restart handshakes with `replication_ready_snapshot()` and `assert_replication_ready_since(...)`.
+- Keep exactly one thin external restart-under-tailnet/proxy smoke in `crates/beads-rs/tests/integration/daemon/repl_e2e.rs`; deeper deterministic backlog/fault/restart semantics belong in `crates/beads-daemon/tests/repl/e2e.rs`.
 - Do not call `reload_replication()` after ordinary replicated writes when the roster/config has not changed; wait on the existing readiness/convergence helpers instead.
 - `crates/beads-rs/tests/public_boundary.rs` is the assembly-boundary guardrail. When you re-home tests or move package-owned seams, update its assertions and the nearby ownership markers in the same change.
 - `crates/beads-rs/tests/e2e.rs` now consumes `beads_daemon::testkit::e2e`; do not grow a second in-memory replication harness under `crates/beads-rs/tests`.

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"
-fixture_dir="$repo_root/crates/beads-rs/tests/fixture-data/migration/v0_1_26_minimal"
+fixture_dir="$repo_root/crates/beads-rs/tests/integration/fixtures/legacy_store_corpus/v0_1_26_minimal"
 
 mkdir -p "$fixture_dir"
 

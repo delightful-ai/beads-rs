@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use thiserror::Error;
@@ -37,8 +37,8 @@ pub struct StatusCollector {
 }
 
 impl StatusCollector {
-    pub fn new(repo: PathBuf) -> Self {
-        Self::with_client(repo, IpcClient::new())
+    pub fn for_runtime_dir(repo: PathBuf, runtime_dir: &Path) -> Self {
+        Self::with_client(repo, IpcClient::for_runtime_dir(runtime_dir))
     }
 
     pub fn with_client(repo: PathBuf, client: IpcClient) -> Self {
@@ -206,9 +206,20 @@ fn next_applied_requirement(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn fixtures_admin_status_monotonic_empty_samples() {
         assert_monotonic_watermarks(&[]);
+    }
+
+    #[test]
+    fn fixtures_admin_status_for_runtime_dir_uses_runtime_socket() {
+        let collector =
+            StatusCollector::for_runtime_dir(PathBuf::from("/tmp/repo"), Path::new("/tmp/runtime"));
+        assert_eq!(
+            collector.client.socket_path(),
+            Path::new("/tmp/runtime/beads/daemon.sock")
+        );
     }
 }

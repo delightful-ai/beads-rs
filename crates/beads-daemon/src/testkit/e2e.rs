@@ -3,6 +3,7 @@
 use crate as beads_daemon;
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -149,6 +150,7 @@ struct TestNodeInner {
     _dir: TestDir,
     git_tx: TestGitTx,
     _git_rx: TestGitRx,
+    running: bool,
 }
 
 #[derive(Clone)]
@@ -305,6 +307,7 @@ impl TestNode {
             _dir: dir,
             git_tx,
             _git_rx: git_rx,
+            running: true,
         };
 
         Self {
@@ -401,6 +404,15 @@ impl TestNode {
             .expect("store runtime")
             .meta
             .replica_id;
+        inner.running = true;
+    }
+
+    pub fn crash(&self) {
+        self.inner.borrow_mut().running = false;
+    }
+
+    pub fn is_running(&self) -> bool {
+        self.inner.borrow().running
     }
 
     pub fn create_issue(&self, title: &str) -> String {
@@ -655,6 +667,11 @@ pub struct ReplicationRig {
     links: Vec<RigLink>,
 }
 
+#[derive(Clone, Debug)]
+pub struct ReplicationReadySnapshot {
+    handshakes: Vec<BTreeMap<ReplicaId, u64>>,
+}
+
 impl ReplicationRig {
     pub fn new(node_count: usize, start_ms: u64) -> Self {
         Self::new_with_options(node_count, start_ms, NodeOptions::default())
@@ -742,6 +759,59 @@ impl ReplicationRig {
         true
     }
 
+    pub fn replication_ready_snapshot(&self) -> ReplicationReadySnapshot {
+        let handshakes = self
+            .nodes
+            .iter()
+            .map(|node| {
+                node.replica_liveness()
+                    .into_iter()
+                    .map(|row| (row.replica_id, row.last_handshake_ms))
+                    .collect()
+            })
+            .collect();
+        ReplicationReadySnapshot { handshakes }
+    }
+
+    pub fn replication_ready_since(&self, snapshot: &ReplicationReadySnapshot) -> bool {
+        if self.nodes.len() < 2 {
+            return true;
+        }
+        if snapshot.handshakes.len() != self.nodes.len() {
+            return false;
+        }
+        let expected: Vec<ReplicaId> = self.nodes.iter().map(|node| node.replica_id()).collect();
+        for ((node, previous), _) in self
+            .nodes
+            .iter()
+            .zip(snapshot.handshakes.iter())
+            .zip(0..self.nodes.len())
+        {
+            let liveness = node.replica_liveness();
+            for peer in &expected {
+                if *peer == node.replica_id() {
+                    continue;
+                }
+                let Some(row) = liveness.iter().find(|row| row.replica_id == *peer) else {
+                    return false;
+                };
+                let baseline = previous.get(peer).copied().unwrap_or(0);
+                if row.last_handshake_ms == 0 || row.last_handshake_ms <= baseline {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    pub fn assert_replication_ready_since(
+        &mut self,
+        snapshot: &ReplicationReadySnapshot,
+        max_steps: usize,
+    ) {
+        self.pump_until(max_steps, |rig| rig.replication_ready_since(snapshot));
+    }
+
     pub fn apply_request_with_wait(
         &mut self,
         node_idx: usize,
@@ -766,11 +836,38 @@ impl ReplicationRig {
         }
     }
 
+    pub fn crash_node(&mut self, idx: usize) {
+        self.nodes[idx].crash();
+        for link in &mut self.links {
+            if link.from == idx || link.to == idx {
+                link.drop_in_flight();
+            }
+        }
+    }
+
     pub fn set_network_profile_all(&mut self, profile: NetworkProfile, seed: u64) {
         for (idx, link) in self.links.iter_mut().enumerate() {
             let net = &mut link.transport.network;
             net.set_profile(profile);
             net.set_seed(seed ^ (idx as u64).wrapping_mul(0x9E3779B97F4A7C15));
+        }
+        let limits = self.nodes[0].with_daemon(|daemon| daemon.limits().clone());
+        let now_ms = self.clock.now_ms();
+        for link in &mut self.links {
+            link.reset_sessions(&limits, now_ms);
+        }
+    }
+
+    pub fn set_link_fault_profile_all(&mut self, profile: LinkFaultProfile, seed: u64) {
+        for (idx, link) in self.links.iter_mut().enumerate() {
+            let net = &mut link.transport.network;
+            net.set_fault_profile(profile);
+            net.set_seed(seed ^ (idx as u64).wrapping_mul(0x9E3779B97F4A7C15));
+        }
+        let limits = self.nodes[0].with_daemon(|daemon| daemon.limits().clone());
+        let now_ms = self.clock.now_ms();
+        for link in &mut self.links {
+            link.reset_sessions(&limits, now_ms);
         }
     }
 
@@ -856,13 +953,14 @@ impl ReplicationRig {
             wait_timeout,
             response,
         } = wait;
-        let started_at = Instant::now();
-        let deadline = started_at.checked_add(wait_timeout).unwrap_or(started_at);
 
         let DurabilityClass::ReplicatedFsync { k } = requested else {
             return Response::ok(ResponsePayload::Op(response));
         };
 
+        let started_at_ms = self.clock.now_ms();
+        let wait_timeout_ms = wait_timeout.as_millis().min(u64::MAX as u128) as u64;
+        let deadline_ms = started_at_ms.saturating_add(wait_timeout_ms);
         let mut response = response;
         for _ in 0..max_steps {
             match coordinator.poll_replicated(&namespace, origin, seq, k) {
@@ -876,10 +974,9 @@ impl ReplicationRig {
                     return Response::ok(ResponsePayload::Op(response));
                 }
                 Ok(ReplicatedPoll::Pending { acked_by, eligible }) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        let waited_ms = (now.duration_since(started_at).as_millis())
-                            .min(u64::MAX as u128) as u64;
+                    let now_ms = self.clock.now_ms();
+                    if now_ms >= deadline_ms {
+                        let waited_ms = now_ms.saturating_sub(started_at_ms);
                         let pending =
                             DurabilityCoordinator::pending_replica_ids(&eligible, &acked_by);
                         let pending_receipt = DurabilityCoordinator::pending_receipt(
@@ -1002,6 +1099,8 @@ struct RigLink {
     to_node: TestNode,
     last_want_sent: Option<WatermarkMap>,
     last_want_sent_at_ms: Option<u64>,
+    outbound_handshake_at_ms: Option<u64>,
+    inbound_handshake_at_ms: Option<u64>,
 }
 
 struct RigLinkInit {
@@ -1041,6 +1140,8 @@ impl RigLink {
             to_node,
             last_want_sent: None,
             last_want_sent_at_ms: None,
+            outbound_handshake_at_ms: None,
+            inbound_handshake_at_ms: None,
         }
     }
 
@@ -1055,6 +1156,8 @@ impl RigLink {
         self.inbound_store = self.to_node.session_store();
         self.last_want_sent = None;
         self.last_want_sent_at_ms = None;
+        self.outbound_handshake_at_ms = None;
+        self.inbound_handshake_at_ms = None;
         let (outbound, action) = begin_outbound_handshake(outbound, &self.outbound_store, now_ms);
         self.outbound = Some(outbound);
         self.inbound = Some(inbound);
@@ -1063,8 +1166,20 @@ impl RigLink {
         }
     }
 
+    fn drop_in_flight(&mut self) {
+        self.transport.network.reset();
+        self.last_want_sent = None;
+        self.last_want_sent_at_ms = None;
+        self.outbound_handshake_at_ms = None;
+        self.inbound_handshake_at_ms = None;
+    }
+
     fn step(&mut self, now_ms: u64) -> bool {
+        if !self.from_node.is_running() || !self.to_node.is_running() {
+            return false;
+        }
         let mut progressed = false;
+        progressed |= self.apply_pending_reset(now_ms);
         self.transport.network.flush();
 
         let outbound_msgs = self.transport.a.drain_messages();
@@ -1079,6 +1194,7 @@ impl RigLink {
                     now_ms,
                 );
                 self.outbound = Some(outbound);
+                self.note_streaming_liveness(Endpoint::Outbound, now_ms);
                 for action in actions {
                     self.apply_action(action, Endpoint::Outbound, now_ms);
                 }
@@ -1097,6 +1213,7 @@ impl RigLink {
                     now_ms,
                 );
                 self.inbound = Some(inbound);
+                self.note_streaming_liveness(Endpoint::Inbound, now_ms);
                 for action in actions {
                     self.apply_action(action, Endpoint::Inbound, now_ms);
                 }
@@ -1157,7 +1274,64 @@ impl RigLink {
             }
         }
 
+        progressed |= self.apply_pending_reset(now_ms);
         progressed
+    }
+
+    fn apply_pending_reset(&mut self, now_ms: u64) -> bool {
+        if !self.transport.network.take_pending_reset() {
+            return false;
+        }
+        let limits = self.from_node.with_daemon(|daemon| daemon.limits().clone());
+        self.reset_sessions(&limits, now_ms);
+        true
+    }
+
+    fn note_streaming_liveness(&mut self, endpoint: Endpoint, now_ms: u64) {
+        match endpoint {
+            Endpoint::Outbound => {
+                if self.outbound_handshake_at_ms.is_some() {
+                    return;
+                }
+                if !matches!(
+                    self.outbound.as_ref(),
+                    Some(SessionState::StreamingLive(_) | SessionState::StreamingSnapshot(_))
+                ) {
+                    return;
+                }
+                let peer = self.to_node.replica_id();
+                self.outbound_handshake_at_ms = Some(now_ms);
+                self.outbound_store
+                    .update_replica_liveness(
+                        peer,
+                        now_ms,
+                        now_ms,
+                        ReplicaDurabilityRole::peer(true),
+                    )
+                    .expect("update outbound replica liveness");
+            }
+            Endpoint::Inbound => {
+                if self.inbound_handshake_at_ms.is_some() {
+                    return;
+                }
+                if !matches!(
+                    self.inbound.as_ref(),
+                    Some(SessionState::StreamingLive(_) | SessionState::StreamingSnapshot(_))
+                ) {
+                    return;
+                }
+                let peer = self.from_node.replica_id();
+                self.inbound_handshake_at_ms = Some(now_ms);
+                self.inbound_store
+                    .update_replica_liveness(
+                        peer,
+                        now_ms,
+                        now_ms,
+                        ReplicaDurabilityRole::peer(true),
+                    )
+                    .expect("update inbound replica liveness");
+            }
+        }
     }
 
     fn apply_action(&mut self, action: SessionAction, endpoint: Endpoint, now_ms: u64) {
@@ -1211,10 +1385,30 @@ impl RigLink {
                 Endpoint::Outbound => {
                     let peer = self.to_node.replica_id();
                     self.from_node.record_peer_ack(peer, &ack);
+                    if let Some(handshake_at_ms) = self.outbound_handshake_at_ms {
+                        self.outbound_store
+                            .update_replica_liveness(
+                                peer,
+                                now_ms,
+                                handshake_at_ms,
+                                ReplicaDurabilityRole::peer(true),
+                            )
+                            .expect("refresh outbound replica liveness");
+                    }
                 }
                 Endpoint::Inbound => {
                     let peer = self.from_node.replica_id();
                     self.to_node.record_peer_ack(peer, &ack);
+                    if let Some(handshake_at_ms) = self.inbound_handshake_at_ms {
+                        self.inbound_store
+                            .update_replica_liveness(
+                                peer,
+                                now_ms,
+                                handshake_at_ms,
+                                ReplicaDurabilityRole::peer(true),
+                            )
+                            .expect("refresh inbound replica liveness");
+                    }
                 }
             },
             SessionAction::PeerError(_err) => {}
@@ -1225,6 +1419,10 @@ impl RigLink {
                 if let Some(inbound) = self.inbound.take() {
                     self.inbound = Some(inbound.close());
                 }
+                self.last_want_sent = None;
+                self.last_want_sent_at_ms = None;
+                self.outbound_handshake_at_ms = None;
+                self.inbound_handshake_at_ms = None;
             }
         }
         if matches!(endpoint, Endpoint::Outbound) {
@@ -1282,6 +1480,37 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn tailnet_latency_profiles_are_latency_only() {
+        let fault = LinkFaultProfile::tailnet_latency();
+        assert_eq!(fault.base_latency_ms, 20);
+        assert_eq!(fault.jitter_ms, 30);
+        assert_eq!(fault.loss_rate, 0.0);
+        assert_eq!(fault.duplicate_rate, 0.0);
+        assert_eq!(fault.reorder_rate, 0.0);
+        assert_eq!(fault.blackhole_after_frames, None);
+        assert_eq!(fault.blackhole_for_ms, None);
+        assert_eq!(fault.reset_after_frames, None);
+        assert_eq!(fault.one_way_loss, None);
+
+        let network = NetworkProfile::tailnet_latency();
+        assert_eq!(network.base_latency_ms, 20);
+        assert_eq!(network.jitter_ms, 30);
+        assert_eq!(network.loss_rate, 0.0);
+        assert_eq!(network.duplicate_rate, 0.0);
+        assert_eq!(network.reorder_rate, 0.0);
+    }
+
+    #[test]
+    fn pathological_tailnet_profile_keeps_fault_knobs_enabled() {
+        let profile = LinkFaultProfile::pathological_tailnet();
+        assert!(profile.loss_rate > 0.0);
+        assert!(profile.reorder_rate > 0.0);
+        assert_eq!(profile.blackhole_after_frames, Some(6));
+        assert_eq!(profile.blackhole_for_ms, Some(250));
+        assert_eq!(profile.reset_after_frames, Some(24));
+    }
 }
 
 fn ensure_tmp_root() -> PathBuf {
@@ -1295,15 +1524,19 @@ pub struct NetworkController {
 
 impl NetworkController {
     pub fn set_profile(&self, profile: NetworkProfile) {
-        self.inner.borrow_mut().profile = profile;
+        self.inner.borrow_mut().set_profile(profile);
+    }
+
+    pub fn set_fault_profile(&self, profile: LinkFaultProfile) {
+        self.inner.borrow_mut().set_fault_profile(profile);
     }
 
     pub fn set_seed(&self, seed: u64) {
         self.inner.borrow_mut().rng = StdRng::seed_from_u64(seed);
     }
 
-    pub fn tailnet(&self, seed: u64) {
-        self.set_profile(NetworkProfile::tailnet());
+    pub fn tailnet_latency(&self, seed: u64) {
+        self.set_fault_profile(LinkFaultProfile::tailnet_latency());
         self.set_seed(seed);
     }
 
@@ -1334,12 +1567,97 @@ impl NetworkController {
     pub fn duplicate_next(&self, direction: Direction) {
         self.inner.borrow_mut().duplicate_next(direction);
     }
+
+    fn take_pending_reset(&self) -> bool {
+        self.inner.borrow_mut().take_pending_reset()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
     AtoB,
     BtoA,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LinkFaultProfile {
+    pub base_latency_ms: u64,
+    pub jitter_ms: u64,
+    pub loss_rate: f64,
+    pub duplicate_rate: f64,
+    pub reorder_rate: f64,
+    pub blackhole_after_frames: Option<u64>,
+    pub blackhole_for_ms: Option<u64>,
+    pub reset_after_frames: Option<u64>,
+    pub one_way_loss: Option<Direction>,
+}
+
+impl Default for LinkFaultProfile {
+    fn default() -> Self {
+        Self {
+            base_latency_ms: 0,
+            jitter_ms: 0,
+            loss_rate: 0.0,
+            duplicate_rate: 0.0,
+            reorder_rate: 0.0,
+            blackhole_after_frames: None,
+            blackhole_for_ms: None,
+            reset_after_frames: None,
+            one_way_loss: None,
+        }
+    }
+}
+
+impl LinkFaultProfile {
+    pub fn tailnet_latency() -> Self {
+        Self {
+            base_latency_ms: 20,
+            jitter_ms: 30,
+            ..Self::default()
+        }
+    }
+
+    pub fn pathological_tailnet() -> Self {
+        Self {
+            base_latency_ms: 15,
+            jitter_ms: 40,
+            loss_rate: 0.08,
+            duplicate_rate: 0.0,
+            reorder_rate: 0.02,
+            blackhole_after_frames: Some(6),
+            blackhole_for_ms: Some(250),
+            reset_after_frames: Some(24),
+            one_way_loss: None,
+        }
+    }
+
+    fn with_network_profile(mut self, profile: NetworkProfile) -> Self {
+        self.base_latency_ms = profile.base_latency_ms;
+        self.jitter_ms = profile.jitter_ms;
+        self.loss_rate = profile.loss_rate;
+        self.duplicate_rate = profile.duplicate_rate;
+        self.reorder_rate = profile.reorder_rate;
+        self
+    }
+
+    fn sample_delay_ms(&self, rng: &mut StdRng) -> u64 {
+        if self.base_latency_ms == 0 && self.jitter_ms == 0 {
+            return 0;
+        }
+        let jitter = if self.jitter_ms > 0 {
+            rng.random_range(0..=self.jitter_ms)
+        } else {
+            0
+        };
+        self.base_latency_ms.saturating_add(jitter)
+    }
+
+    fn loss_rate_for(&self, direction: Direction) -> f64 {
+        match self.one_way_loss {
+            Some(expected) if expected != direction => 0.0,
+            _ => self.loss_rate,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -1364,26 +1682,14 @@ impl Default for NetworkProfile {
 }
 
 impl NetworkProfile {
-    pub fn tailnet() -> Self {
+    pub fn tailnet_latency() -> Self {
         Self {
             base_latency_ms: 20,
             jitter_ms: 30,
-            loss_rate: 0.01,
-            duplicate_rate: 0.002,
-            reorder_rate: 0.01,
+            loss_rate: 0.0,
+            duplicate_rate: 0.0,
+            reorder_rate: 0.0,
         }
-    }
-
-    fn sample_delay_ms(&self, rng: &mut StdRng) -> u64 {
-        if self.base_latency_ms == 0 && self.jitter_ms == 0 {
-            return 0;
-        }
-        let jitter = if self.jitter_ms > 0 {
-            rng.random_range(0..=self.jitter_ms)
-        } else {
-            0
-        };
-        self.base_latency_ms.saturating_add(jitter)
     }
 }
 
@@ -1400,16 +1706,40 @@ struct SimulatedLink {
     delay_next_ms: u64,
     reorder_next: bool,
     duplicate_next: bool,
+    frames_seen: u64,
+    blackhole_after_frames: Option<u64>,
+    blackhole_for_ms: Option<u64>,
+    reset_after_frames: Option<u64>,
+    blackhole_until_ms: Option<u64>,
+    blackhole_indefinite: bool,
 }
 
 impl SimulatedLink {
-    fn new() -> Self {
+    fn new(profile: LinkFaultProfile) -> Self {
         Self {
             queue: Vec::new(),
             drop_next: false,
             delay_next_ms: 0,
             reorder_next: false,
             duplicate_next: false,
+            frames_seen: 0,
+            blackhole_after_frames: profile.blackhole_after_frames,
+            blackhole_for_ms: profile.blackhole_for_ms,
+            reset_after_frames: profile.reset_after_frames,
+            blackhole_until_ms: None,
+            blackhole_indefinite: false,
+        }
+    }
+
+    fn reset_for_profile(&mut self, profile: LinkFaultProfile) {
+        *self = Self::new(profile);
+    }
+
+    fn refresh_blackhole(&mut self, now_ms: u64) {
+        if let Some(until_ms) = self.blackhole_until_ms
+            && now_ms >= until_ms
+        {
+            self.blackhole_until_ms = None;
         }
     }
 
@@ -1472,35 +1802,72 @@ struct NetworkSimulator {
     b_to_a: SimulatedLink,
     a_tx: Sender<Vec<u8>>,
     b_tx: Sender<Vec<u8>>,
-    profile: NetworkProfile,
+    fault_profile: LinkFaultProfile,
     rng: StdRng,
+    pending_reset: bool,
 }
 
 impl NetworkSimulator {
     fn new(a_tx: Sender<Vec<u8>>, b_tx: Sender<Vec<u8>>) -> Self {
+        let fault_profile = LinkFaultProfile::default();
         Self {
             now_ms: 0,
-            a_to_b: SimulatedLink::new(),
-            b_to_a: SimulatedLink::new(),
+            a_to_b: SimulatedLink::new(fault_profile),
+            b_to_a: SimulatedLink::new(fault_profile),
             a_tx,
             b_tx,
-            profile: NetworkProfile::default(),
+            fault_profile,
             rng: StdRng::seed_from_u64(0),
+            pending_reset: false,
         }
     }
 
     fn send(&mut self, direction: Direction, frame: Vec<u8>) {
-        let delay_ms = self.profile.sample_delay_ms(&mut self.rng);
-        let loss_decision = self.profile.loss_rate > 0.0 && self.roll(self.profile.loss_rate);
+        let delay_ms = self.fault_profile.sample_delay_ms(&mut self.rng);
+        let loss_rate = self.fault_profile.loss_rate_for(direction);
+        let loss_decision = loss_rate > 0.0 && self.roll(loss_rate);
         let reorder_decision =
-            self.profile.reorder_rate > 0.0 && self.roll(self.profile.reorder_rate);
+            self.fault_profile.reorder_rate > 0.0 && self.roll(self.fault_profile.reorder_rate);
         let duplicate_decision =
-            self.profile.duplicate_rate > 0.0 && self.roll(self.profile.duplicate_rate);
+            self.fault_profile.duplicate_rate > 0.0 && self.roll(self.fault_profile.duplicate_rate);
 
         let link = match direction {
             Direction::AtoB => &mut self.a_to_b,
             Direction::BtoA => &mut self.b_to_a,
         };
+
+        link.frames_seen = link.frames_seen.saturating_add(1);
+        if link
+            .reset_after_frames
+            .map(|threshold| link.frames_seen >= threshold)
+            .unwrap_or(false)
+        {
+            link.reset_after_frames = None;
+            self.pending_reset = true;
+            return;
+        }
+
+        link.refresh_blackhole(self.now_ms);
+        if link
+            .blackhole_after_frames
+            .map(|threshold| link.frames_seen >= threshold)
+            .unwrap_or(false)
+        {
+            link.blackhole_after_frames = None;
+            if let Some(for_ms) = link.blackhole_for_ms {
+                if for_ms == 0 {
+                    link.blackhole_indefinite = true;
+                } else {
+                    link.blackhole_until_ms = Some(self.now_ms.saturating_add(for_ms));
+                }
+            } else {
+                link.blackhole_indefinite = true;
+            }
+        }
+
+        if link.blackhole_indefinite || link.blackhole_until_ms.is_some() {
+            return;
+        }
 
         if !link.drop_next && loss_decision {
             link.drop_next = true;
@@ -1529,8 +1896,9 @@ impl NetworkSimulator {
     }
 
     fn reset(&mut self) {
-        self.a_to_b = SimulatedLink::new();
-        self.b_to_a = SimulatedLink::new();
+        self.a_to_b.reset_for_profile(self.fault_profile);
+        self.b_to_a.reset_for_profile(self.fault_profile);
+        self.pending_reset = false;
     }
 
     fn drop_next(&mut self, direction: Direction) {
@@ -1559,6 +1927,22 @@ impl NetworkSimulator {
             Direction::AtoB => self.a_to_b.duplicate_next = true,
             Direction::BtoA => self.b_to_a.duplicate_next = true,
         }
+    }
+
+    fn set_profile(&mut self, profile: NetworkProfile) {
+        self.fault_profile = LinkFaultProfile::default().with_network_profile(profile);
+        self.reset();
+    }
+
+    fn set_fault_profile(&mut self, profile: LinkFaultProfile) {
+        self.fault_profile = profile;
+        self.reset();
+    }
+
+    fn take_pending_reset(&mut self) -> bool {
+        let pending = self.pending_reset;
+        self.pending_reset = false;
+        pending
     }
 
     fn roll(&mut self, rate: f64) -> bool {

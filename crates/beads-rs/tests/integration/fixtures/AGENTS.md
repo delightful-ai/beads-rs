@@ -7,11 +7,13 @@ NEVER: hide owner-crate logic or one-off test behavior here. If a helper stops b
 - Start with `bd_runtime.rs` for repo/runtime dirs, `bd` command shaping, autostart control, and `BdCommandProfile`. Copy `BdCommandProfile::cli()` or `fast_daemon()` instead of inventing ad-hoc `BD_*` env sets.
 - Use `temp.rs` for short deterministic temp roots, owner metadata, stale fixture cleanup, and Unix socket path checks. Do not derive temp paths from `current_dir()/tmp`.
 - Use `wait.rs` for polling and child lifecycle. `wait_for_child_exit()` and `kill_child_and_wait()` reap `Child`s; bare `kill()` and PID-only checks leak processes.
-- Use `daemon_runtime.rs` when a fixture owns daemon shutdown/crash semantics. Owned daemons should be driven through `IpcClient::for_runtime_dir(...).with_autostart(false)` so autostart helpers do not steal lifecycle ownership.
+- Use `daemon_runtime.rs` when a fixture owns daemon shutdown/crash semantics. Pass the owning fixture's `runtime_dir` and `data_dir`; do not assume `data/` lives under the runtime tree.
+- Owned daemons should be driven through `IpcClient::for_runtime_dir(...).with_autostart(false)` so autostart helpers do not steal lifecycle ownership.
 - Use `realtime.rs` or `BdRuntimeRepo` for single-daemon tests. Reach for `repl_rig.rs` only when you truly need multi-daemon replication, peer config churn, or tailnet proxy faults.
-- Use `admin_status.rs` when you need repeated admin-status sampling under load instead of open-coding status collectors in individual tests.
+- Use `admin_status.rs` when you need repeated admin-status sampling under load instead of open-coding status collectors in individual tests. Bind those helpers to the owning runtime dir; do not introduce ambient `IpcClient::new()` shortcuts there or in `ipc_stream.rs` / `load_gen.rs`.
 - `tailnet_proxy.rs` is the external fault-injection harness consumed by `repl_rig.rs` and `daemon/repl_e2e.rs`; keep those surfaces aligned.
-- Treat `legacy_store.rs`, `migration_store.rs`, and the checked-in corpora under `legacy_store_corpus/` as provenance fixtures, not scratch space.
+- Treat `legacy_store.rs` and the checked-in corpora under `legacy_store_corpus/` as the canonical migration fixture surface; do not add a second loader or a second corpus root for migration store tests.
+- If a migration test needs to seed or rewrite `refs/heads/beads/store`, extend `legacy_store.rs` first instead of open-coding git/blob/meta plumbing in `cli/migration.rs`.
 
 ## Local rules
 - Add reusable setup here instead of creating per-test harness code in `cli/` or `daemon/`, but only when more than one test needs it.

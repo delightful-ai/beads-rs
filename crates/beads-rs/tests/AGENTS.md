@@ -9,7 +9,7 @@ NEVER: keep a test here once it mostly proves core, git, daemon, or protocol own
 - Treat `e2e.rs` as a consumer of `beads_daemon::testkit::e2e`; do not grow a second in-memory replication harness under `beads-rs/tests`.
 - `integration.rs` is the process-level assembly router. New subtrees should be rare; do not recreate deleted `integration/core` or `integration/repl` buckets just because they are easy names.
 - Reuse shared setup from `integration/fixtures/` instead of creating one-off harness code at this level.
-- Treat `fixture-data/` as checked-in compatibility corpus data with provenance, not a scratch area for ad-hoc test state.
+- Treat checked-in compatibility corpora such as `integration/fixtures/legacy_store_corpus/` as provenance fixtures, not a scratch area for ad-hoc test state.
 
 ## Verification
 - Use `cargo test -p beads-rs --test public_boundary` for package-boundary and ownership assertions.

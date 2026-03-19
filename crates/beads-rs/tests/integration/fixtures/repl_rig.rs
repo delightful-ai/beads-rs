@@ -35,7 +35,6 @@ use super::bd_runtime::{
 use super::daemon_boundary::wal::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 use super::daemon_runtime::{crash_daemon, shutdown_daemon};
 use super::git::{init_bare_repo, init_repo_with_origin};
-use super::store_lock::unlock_store;
 use super::tailnet_proxy::{TailnetProfile, TailnetProxy, TailnetTrace, TailnetTraceMode};
 use super::temp;
 use super::timing;
@@ -333,7 +332,6 @@ impl ReplRig {
     }
 
     pub fn restart_node(&mut self, idx: usize) {
-        self.nodes[idx].unlock_store(self.store_id);
         self.nodes[idx].reset_ipc_connections();
         self.nodes[idx].start_daemon();
     }
@@ -893,10 +891,6 @@ impl Node {
         &self.listen_addr
     }
 
-    fn unlock_store(&self, store_id: StoreId) {
-        unlock_store(&self.data_dir, store_id).expect("unlock store");
-    }
-
     fn start_daemon(&mut self) {
         self.ensure_daemon_child_running();
         self.wait_for_admin_ready(IPC_RELOAD_REPLICATION_TIMEOUT);
@@ -953,12 +947,12 @@ impl Node {
     }
 
     fn crash_owned_daemon(&self) {
-        crash_daemon(&self.runtime_dir);
+        crash_daemon(&self.runtime_dir, &self.data_dir);
         self.sync_daemon_child_exit(Duration::from_secs(1));
     }
 
     fn shutdown_owned_daemon(&self) {
-        shutdown_daemon(&self.runtime_dir);
+        shutdown_daemon(&self.runtime_dir, &self.data_dir);
         if !self.sync_daemon_child_exit(Duration::from_secs(2)) {
             self.kill_owned_daemon_child(Duration::from_secs(1));
         }
@@ -1071,6 +1065,41 @@ impl Node {
             Some(err) => panic!("issue {issue_id} failed to replicate within {timeout:?}: {err}"),
             None => panic!("issue {issue_id} failed to replicate within {timeout:?}"),
         }
+    }
+
+    fn issue_observable(&self, issue_id: &str) -> bool {
+        let request = Request::Show {
+            ctx: ReadCtx::new(self.repo_dir.clone(), ReadConsistency::default()),
+            payload: IdPayload {
+                id: BeadId::parse(issue_id).expect("bead id"),
+            },
+        };
+        match self.send_request(&request) {
+            Err(err) if err.transience().is_retryable() => false,
+            Err(err) => panic!("show request failed for {issue_id}: {err:?}"),
+            Ok(Response::Ok {
+                ok: ResponsePayload::Query(QueryResult::Issue(issue)),
+            }) => {
+                assert_eq!(issue.id, issue_id);
+                true
+            }
+            Ok(Response::Err { err }) if err.code == CliErrorCode::NotFound.into() => false,
+            Ok(other) => panic!("unexpected show response for {issue_id}: {other:?}"),
+        }
+    }
+
+    pub fn assert_issue_stays_unobservable(&self, issue_id: &str, duration: Duration) {
+        let became_observable = wait::poll_until_with_phase(
+            "fixture.repl_rig.assert_issue_stays_unobservable",
+            format!("repo={} issue={issue_id}", self.repo_dir.display()),
+            duration,
+            || self.issue_observable(issue_id),
+        );
+        assert!(
+            !became_observable,
+            "node {} unexpectedly observed {issue_id} before restart",
+            self.repo_dir.display(),
+        );
     }
 
     fn wait_for_admin_ready(&self, timeout: Duration) {
@@ -1862,6 +1891,7 @@ fn request_is_retry_safe(request: &Request) -> bool {
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::time::Duration;
 
     use super::*;
 
@@ -1876,5 +1906,51 @@ mod tests {
         });
 
         assert!(request_is_retry_safe(&request));
+    }
+
+    #[test]
+    fn crash_restart_remains_green_for_sibling_runtime_data_layouts() {
+        let mut options = ReplRigOptions::default();
+        options.seed = 61;
+
+        let mut rig = ReplRig::new(2, options);
+        for (idx, node) in rig.nodes().iter().enumerate() {
+            assert_eq!(
+                node.runtime_dir().parent(),
+                node.data_dir().parent(),
+                "node {idx} should keep runtime/ and data/ as sibling fixture dirs",
+            );
+        }
+
+        let initial = [
+            rig.create_issue(0, "sibling-crash-pre-0"),
+            rig.create_issue(1, "sibling-crash-pre-1"),
+        ];
+
+        rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(30));
+        for issue_id in &initial {
+            for idx in 0..2 {
+                rig.wait_for_show(idx, issue_id, Duration::from_secs(10));
+            }
+        }
+
+        let ready_snapshot = rig.replication_ready_snapshot();
+        rig.crash_node(1);
+
+        let post = rig.create_issue(0, "sibling-crash-post-0");
+        rig.wait_for_show(0, &post, Duration::from_secs(10));
+        rig.node(1)
+            .assert_issue_stays_unobservable(&post, Duration::from_secs(1));
+
+        rig.restart_node(1);
+        rig.wait_for_admin_ready(1, Duration::from_secs(20));
+        rig.assert_replication_ready_since(&ready_snapshot, Duration::from_secs(30));
+        rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(60));
+
+        for issue_id in initial.iter().chain(std::iter::once(&post)) {
+            for idx in 0..2 {
+                rig.wait_for_show(idx, issue_id, Duration::from_secs(20));
+            }
+        }
     }
 }

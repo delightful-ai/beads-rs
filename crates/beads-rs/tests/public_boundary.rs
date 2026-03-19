@@ -69,6 +69,35 @@ fn remaining_daemon_facing_tests_are_documented_as_assembly_owned() {
 }
 
 #[test]
+fn deterministic_repl_fault_cases_stay_out_of_assembly_harness() {
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("canonical repo root");
+    let assembly_repl = repo_root.join("crates/beads-rs/tests/integration/daemon/repl_e2e.rs");
+
+    let assembly_contents = fs::read_to_string(&assembly_repl)
+        .unwrap_or_else(|err| panic!("failed to read {}: {err}", assembly_repl.display()));
+
+    assert!(
+        assembly_contents.contains(
+            "Keep deterministic `beads_daemon::testkit::e2e::ReplicationRig` coverage in"
+        ),
+        "assembly repl harness should document that deterministic ReplicationRig coverage stays daemon-owned",
+    );
+    assert!(
+        !assembly_contents
+            .lines()
+            .filter(|line| {
+                let trimmed = line.trim_start();
+                !trimmed.starts_with("//")
+            })
+            .any(|line| line.contains("beads_daemon::testkit::e2e::ReplicationRig")),
+        "assembly repl harness must not import daemon-owned deterministic ReplicationRig coverage",
+    );
+}
+
+#[test]
 fn mixed_owner_core_tests_do_not_live_under_beads_rs_integration_core() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")

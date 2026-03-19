@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use thiserror::Error;
@@ -34,19 +34,24 @@ pub struct StreamingClient {
 }
 
 impl StreamingClient {
-    pub fn subscribe(repo: PathBuf, namespace: NamespaceId) -> Result<Self, StreamClientError> {
+    pub fn subscribe(
+        repo: PathBuf,
+        namespace: NamespaceId,
+        runtime_dir: &Path,
+    ) -> Result<Self, StreamClientError> {
         let read = ReadConsistency {
             namespace: Some(namespace),
             ..ReadConsistency::default()
         };
-        Self::subscribe_with_read(repo, read)
+        Self::subscribe_with_read(repo, read, runtime_dir)
     }
 
     pub fn subscribe_with_read(
         repo: PathBuf,
         read: ReadConsistency,
+        runtime_dir: &Path,
     ) -> Result<Self, StreamClientError> {
-        Self::subscribe_with_client(repo, read, IpcClient::new())
+        Self::subscribe_with_client(repo, read, runtime_bound_client(runtime_dir))
     }
 
     pub fn subscribe_with_client(
@@ -128,9 +133,14 @@ impl StreamingClient {
     }
 }
 
+fn runtime_bound_client(runtime_dir: &Path) -> IpcClient {
+    IpcClient::for_runtime_dir(runtime_dir)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     use beads_api::EventBody;
     use beads_core::{
@@ -192,5 +202,14 @@ mod tests {
             StreamMessage::Event(actual) => assert_eq!(actual.event_id, event.event_id),
             other => panic!("unexpected message: {other:?}"),
         }
+    }
+
+    #[test]
+    fn fixtures_ipc_stream_runtime_client_uses_runtime_socket() {
+        let client = runtime_bound_client(Path::new("/tmp/runtime"));
+        assert_eq!(
+            client.socket_path(),
+            Path::new("/tmp/runtime/beads/daemon.sock")
+        );
     }
 }

@@ -5,13 +5,12 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::{Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, SystemTime};
 
 use beads_api::QueryResult;
 
-use super::spawn_sanitizer::prepare_daemon_spawn_command;
+use super::spawn_sanitizer::{SpawnedDaemon, spawn_daemon_process};
 use crate::ipc::IpcError;
 use crate::ipc::{IPC_PROTOCOL_VERSION, Request, Response, ResponsePayload};
 
@@ -69,17 +68,8 @@ pub fn socket_dir() -> PathBuf {
 pub fn ensure_socket_dir() -> Result<PathBuf, IpcError> {
     let mut last_err: Option<std::io::Error> = None;
     for dir in socket_dir_candidates() {
-        match fs::create_dir_all(&dir) {
-            Ok(()) => {
-                #[cfg(unix)]
-                {
-                    let mode = fs::metadata(&dir)?.permissions().mode() & 0o777;
-                    if mode != 0o700 {
-                        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))?;
-                    }
-                }
-                return Ok(dir);
-            }
+        match ensure_private_socket_dir_path(&dir) {
+            Ok(()) => return Ok(dir),
             Err(e) => last_err = Some(e),
         }
     }
@@ -87,6 +77,38 @@ pub fn ensure_socket_dir() -> Result<PathBuf, IpcError> {
     Err(IpcError::Io(last_err.unwrap_or_else(|| {
         std::io::Error::other("unable to create a writable socket directory")
     })))
+}
+
+fn ensure_socket_dir_path(dir: &Path) -> Result<(), std::io::Error> {
+    fs::create_dir_all(dir)?;
+    Ok(())
+}
+
+fn ensure_private_socket_dir_path(dir: &Path) -> Result<(), std::io::Error> {
+    ensure_socket_dir_path(dir)?;
+    #[cfg(unix)]
+    {
+        let mode = fs::metadata(dir)?.permissions().mode() & 0o777;
+        if mode != 0o700 {
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700))?;
+        }
+    }
+    Ok(())
+}
+
+fn socket_parent_should_be_private(socket: &Path, dir: &Path) -> bool {
+    socket.file_name() == Some(std::ffi::OsStr::new("daemon.sock"))
+        && socket_dir_candidates()
+            .iter()
+            .any(|candidate| candidate == dir)
+}
+
+fn ensure_autostart_socket_parent(socket: &Path, dir: &Path) -> Result<(), std::io::Error> {
+    if socket_parent_should_be_private(socket, dir) {
+        ensure_private_socket_dir_path(dir)
+    } else {
+        ensure_socket_dir_path(dir)
+    }
 }
 
 /// Get the daemon socket path.
@@ -107,12 +129,6 @@ fn read_daemon_meta_at(socket: &Path) -> Option<beads_api::DaemonInfo> {
     let meta_path = socket.with_file_name("daemon.meta.json");
     let contents = fs::read_to_string(&meta_path).ok()?;
     serde_json::from_str(&contents).ok()
-}
-
-/// Read daemon metadata from the default socket directory.
-fn read_daemon_meta() -> Option<beads_api::DaemonInfo> {
-    let dir = ensure_socket_dir().ok()?;
-    read_daemon_meta_at(&dir.join("daemon.sock"))
 }
 
 fn daemon_pid_alive(pid: u32) -> bool {
@@ -213,6 +229,10 @@ impl IpcClient {
 
     /// Override the program/args used for autostart.
     /// Default spawns `bd daemon run`.
+    ///
+    /// Override programs are treated as launcher-compatible wrappers: the
+    /// client waits for the socket instead of assuming the process itself must
+    /// stay alive until the daemon is ready.
     pub fn with_autostart_program(mut self, program: PathBuf, args: Vec<OsString>) -> Self {
         self.autostart_program = Some(program);
         self.autostart_args = args;
@@ -429,23 +449,54 @@ fn maybe_remove_stale_lock(lock_path: &PathBuf, max_age: Duration) {
     }
 }
 
-fn daemon_command() -> Command {
-    if let Ok(exe) = std::env::current_exe() {
-        let mut cmd = Command::new(exe);
-        cmd.arg("daemon").arg("run");
-        return cmd;
-    }
-
-    let mut cmd = Command::new("bd");
-    cmd.arg("daemon").arg("run");
-    cmd
+#[derive(Clone, Copy)]
+enum AutostartExitPolicy {
+    FailFastOnDirectExit,
+    WaitForSocket,
 }
 
-fn daemon_command_override(program: Option<&Path>, args: &[OsString]) -> Command {
+#[derive(Clone)]
+struct AutostartCommand {
+    program: PathBuf,
+    args: Vec<OsString>,
+    exit_policy: AutostartExitPolicy,
+}
+
+impl AutostartCommand {
+    fn direct(program: PathBuf, args: Vec<OsString>) -> Self {
+        Self {
+            program,
+            args,
+            exit_policy: AutostartExitPolicy::FailFastOnDirectExit,
+        }
+    }
+
+    fn launcher_compatible(program: PathBuf, args: Vec<OsString>) -> Self {
+        Self {
+            program,
+            args,
+            exit_policy: AutostartExitPolicy::WaitForSocket,
+        }
+    }
+}
+
+fn daemon_command() -> AutostartCommand {
+    if let Ok(exe) = std::env::current_exe() {
+        return AutostartCommand::direct(
+            exe,
+            vec![OsString::from("daemon"), OsString::from("run")],
+        );
+    }
+
+    AutostartCommand::direct(
+        PathBuf::from("bd"),
+        vec![OsString::from("daemon"), OsString::from("run")],
+    )
+}
+
+fn daemon_command_override(program: Option<&Path>, args: &[OsString]) -> AutostartCommand {
     if let Some(program) = program {
-        let mut cmd = Command::new(program);
-        cmd.args(args);
-        return cmd;
+        return AutostartCommand::launcher_compatible(program.to_path_buf(), args.to_vec());
     }
 
     daemon_command()
@@ -456,13 +507,27 @@ fn connect_with_autostart(
     autostart_program: Option<&Path>,
     autostart_args: &[OsString],
 ) -> Result<UnixStream, IpcError> {
+    let autostart = daemon_command_override(autostart_program, autostart_args);
+    connect_with_autostart_command_with_timeout(socket, &autostart, autostart_connect_timeout())
+}
+
+fn connect_with_autostart_command_with_timeout(
+    socket: &PathBuf,
+    autostart: &AutostartCommand,
+    connect_timeout: Duration,
+) -> Result<UnixStream, IpcError> {
     match UnixStream::connect(socket) {
         Ok(stream) => Ok(stream),
         Err(e) if should_autostart(&e) => {
             // Try to autostart daemon with a simple lock to avoid herds.
-            let connect_timeout = autostart_connect_timeout();
             let stale_lock_age = autostart_lock_stale_age(connect_timeout);
-            let dir = ensure_socket_dir()?;
+            let dir = socket.parent().ok_or_else(|| {
+                IpcError::DaemonUnavailable(format!(
+                    "socket path {} has no parent directory",
+                    socket.display()
+                ))
+            })?;
+            ensure_autostart_socket_parent(socket, dir)?;
             let lock_path = dir.join("daemon.lock");
             maybe_remove_stale_lock(&lock_path, stale_lock_age);
 
@@ -471,13 +536,10 @@ fn connect_with_autostart(
                 .create_new(true)
                 .open(&lock_path)
                 .is_ok();
+            let mut spawned_child = None;
 
             if we_spawned {
-                let mut cmd = daemon_command_override(autostart_program, autostart_args);
-                prepare_daemon_spawn_command(&mut cmd);
-                cmd.spawn().map_err(|e| {
-                    IpcError::DaemonUnavailable(format!("failed to spawn daemon: {}", e))
-                })?;
+                spawned_child = Some(spawn_autostart_command(autostart)?);
             }
 
             let deadline = SystemTime::now() + connect_timeout;
@@ -492,6 +554,17 @@ fn connect_with_autostart(
                         return Ok(stream);
                     }
                     Err(e) if should_autostart(&e) => {
+                        if matches!(
+                            autostart.exit_policy,
+                            AutostartExitPolicy::FailFastOnDirectExit
+                        ) && let Some(message) =
+                            take_spawned_child_exit_message(spawned_child.as_mut(), socket)?
+                        {
+                            if we_spawned {
+                                let _ = fs::remove_file(&lock_path);
+                            }
+                            return Err(IpcError::DaemonUnavailable(message));
+                        }
                         if !we_spawned {
                             // If the lock disappeared (spawner died), try to take over.
                             maybe_remove_stale_lock(&lock_path, stale_lock_age);
@@ -502,15 +575,17 @@ fn connect_with_autostart(
                                 .is_ok()
                             {
                                 we_spawned = true;
-                                let mut cmd =
-                                    daemon_command_override(autostart_program, autostart_args);
-                                prepare_daemon_spawn_command(&mut cmd);
-                                if let Err(e) = cmd.spawn() {
-                                    let _ = fs::remove_file(&lock_path);
-                                    return Err(IpcError::DaemonUnavailable(format!(
-                                        "failed to spawn daemon: {}",
-                                        e
-                                    )));
+                                match spawn_autostart_command(autostart) {
+                                    Ok(child) => {
+                                        spawned_child = Some(child);
+                                    }
+                                    Err(e) => {
+                                        let _ = fs::remove_file(&lock_path);
+                                        return Err(IpcError::DaemonUnavailable(format!(
+                                            "failed to spawn daemon: {}",
+                                            e
+                                        )));
+                                    }
                                 }
                             }
                         }
@@ -537,6 +612,74 @@ fn connect_with_autostart(
         }
         Err(e) => Err(IpcError::Io(e)),
     }
+}
+
+fn spawn_autostart_command(command: &AutostartCommand) -> Result<SpawnedDaemon, IpcError> {
+    spawn_daemon_process(&command.program, &command.args)
+        .map_err(|e| IpcError::DaemonUnavailable(format!("failed to spawn daemon: {e}")))
+}
+
+fn take_spawned_child_exit_message(
+    child: Option<&mut SpawnedDaemon>,
+    socket: &Path,
+) -> Result<Option<String>, IpcError> {
+    let Some(child) = child else {
+        return Ok(None);
+    };
+    let Some(status) = child.try_wait().map_err(|err| {
+        IpcError::DaemonUnavailable(format!("failed to monitor spawned daemon: {err}"))
+    })?
+    else {
+        return Ok(None);
+    };
+    let _ = fs::remove_file(socket);
+    let _ = fs::remove_file(socket.with_file_name("daemon.meta.json"));
+    Ok(Some(format!(
+        "daemon exited before socket ready at {} ({})",
+        socket.display(),
+        format_exit_status(status)
+    )))
+}
+
+fn format_exit_status(status: std::process::ExitStatus) -> String {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+
+        if let Some(code) = status.code() {
+            return format!("exit status {code}");
+        }
+        if let Some(signal) = status.signal() {
+            return format!("signal {signal}");
+        }
+    }
+
+    match status.code() {
+        Some(code) => format!("exit status {code}"),
+        None => status.to_string(),
+    }
+}
+
+#[cfg(test)]
+fn connect_with_autostart_for_test(
+    socket: &PathBuf,
+    autostart_program: Option<&Path>,
+    autostart_args: &[OsString],
+    connect_timeout: Duration,
+) -> Result<UnixStream, IpcError> {
+    let autostart = daemon_command_override(autostart_program, autostart_args);
+    connect_with_autostart_command_with_timeout(socket, &autostart, connect_timeout)
+}
+
+#[cfg(test)]
+fn connect_with_direct_autostart_for_test(
+    socket: &PathBuf,
+    program: &Path,
+    args: &[OsString],
+    connect_timeout: Duration,
+) -> Result<UnixStream, IpcError> {
+    let autostart = AutostartCommand::direct(program.to_path_buf(), args.to_vec());
+    connect_with_autostart_command_with_timeout(socket, &autostart, connect_timeout)
 }
 
 fn write_req_line(stream: &mut UnixStream, req: &Request) -> Result<(), IpcError> {
@@ -1017,7 +1160,7 @@ fn kill_daemon_forcefully(pid: u32, socket: &PathBuf) -> Result<(), IpcError> {
 /// Uses daemon.meta.json to find PID if available.
 fn try_restart_daemon_by_socket(socket: &PathBuf) -> Result<(), IpcError> {
     // Try to get PID from meta file first
-    if let Some(meta) = read_daemon_meta() {
+    if let Some(meta) = read_daemon_meta_at(socket) {
         tracing::debug!("found daemon pid {} from meta file", meta.pid);
         return kill_daemon_forcefully(meta.pid, socket);
     }
@@ -1044,6 +1187,10 @@ fn try_restart_daemon_by_socket(socket: &PathBuf) -> Result<(), IpcError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsString;
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::time::{Duration, Instant};
     use tempfile::TempDir;
 
     #[test]
@@ -1117,5 +1264,140 @@ mod tests {
         });
         let expected = temp.path().join("beads");
         assert_eq!(dirs.first(), Some(&expected));
+    }
+
+    #[test]
+    fn connect_with_autostart_reports_spawned_child_exit_immediately() {
+        let temp = TempDir::new().expect("temp dir");
+        let runtime_dir = temp.path().join("runtime");
+        let socket_dir = runtime_dir.join("beads");
+        std::fs::create_dir_all(&socket_dir).expect("socket dir");
+        let socket = socket_dir.join("daemon.sock");
+        let args = vec![OsString::from("-c"), OsString::from("exit 23")];
+
+        let started = Instant::now();
+        let err = connect_with_direct_autostart_for_test(
+            &socket,
+            Path::new("/bin/sh"),
+            &args,
+            Duration::from_secs(2),
+        )
+        .expect_err("autostart should fail");
+        let elapsed = started.elapsed();
+
+        let IpcError::DaemonUnavailable(message) = err else {
+            panic!("expected daemon unavailable, got {err:?}");
+        };
+        assert!(
+            message.contains("exited before socket ready"),
+            "expected actionable early-exit message, got {message}"
+        );
+        assert!(
+            message.contains("23"),
+            "expected exit status in message, got {message}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "expected failure before socket timeout, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn connect_with_autostart_override_waits_for_socket_instead_of_child_exit() {
+        let temp = TempDir::new().expect("temp dir");
+        let runtime_dir = temp.path().join("runtime");
+        let socket_dir = runtime_dir.join("beads");
+        std::fs::create_dir_all(&socket_dir).expect("socket dir");
+        let socket = socket_dir.join("daemon.sock");
+        let args = vec![OsString::from("-c"), OsString::from("exit 23")];
+
+        let started = Instant::now();
+        let err = connect_with_autostart_for_test(
+            &socket,
+            Some(Path::new("/bin/sh")),
+            &args,
+            Duration::from_millis(250),
+        )
+        .expect_err("autostart should fail");
+        let elapsed = started.elapsed();
+
+        let IpcError::DaemonUnavailable(message) = err else {
+            panic!("expected daemon unavailable, got {err:?}");
+        };
+        assert!(
+            message.contains("timed out waiting for daemon socket"),
+            "expected launcher-compatible timeout, got {message}"
+        );
+        assert!(
+            !message.contains("exited before socket ready"),
+            "override path should not treat launcher exit as direct daemon failure: {message}"
+        );
+        assert!(
+            elapsed >= Duration::from_millis(200),
+            "expected override path to keep waiting for the socket, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn connect_with_autostart_does_not_chmod_custom_socket_parent() {
+        let temp = TempDir::new().expect("temp dir");
+        let custom_parent = temp.path().join("shared");
+        fs::create_dir_all(&custom_parent).expect("custom socket parent");
+        fs::set_permissions(&custom_parent, fs::Permissions::from_mode(0o755))
+            .expect("set custom parent perms");
+        let socket = custom_parent.join("daemon.sock");
+        let args = vec![OsString::from("-c"), OsString::from("exit 23")];
+
+        let err = connect_with_autostart_for_test(
+            &socket,
+            Some(Path::new("/bin/sh")),
+            &args,
+            Duration::from_millis(200),
+        )
+        .expect_err("autostart should fail");
+        assert!(matches!(err, IpcError::DaemonUnavailable(_)));
+
+        let mode = fs::metadata(&custom_parent)
+            .expect("custom parent metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "custom socket parent perms changed to {:o}",
+            mode
+        );
+    }
+
+    #[test]
+    fn connect_with_autostart_restricts_default_socket_parent() {
+        let temp = TempDir::new().expect("temp dir");
+        let runtime_dir = temp.path().join("runtime");
+        let _override = override_runtime_dir_for_tests(Some(runtime_dir.clone()));
+        let socket = socket_path();
+        let socket_parent = socket.parent().expect("socket parent");
+        fs::set_permissions(socket_parent, fs::Permissions::from_mode(0o755))
+            .expect("set permissive default socket parent");
+
+        let args = vec![OsString::from("-c"), OsString::from("exit 23")];
+        let err = connect_with_direct_autostart_for_test(
+            &socket,
+            Path::new("/bin/sh"),
+            &args,
+            Duration::from_millis(200),
+        )
+        .expect_err("autostart should fail");
+        assert!(matches!(err, IpcError::DaemonUnavailable(_)));
+
+        let mode = fs::metadata(socket_parent)
+            .expect("socket parent metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "default socket parent perms changed to {:o}",
+            mode
+        );
     }
 }

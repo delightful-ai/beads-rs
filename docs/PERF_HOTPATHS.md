@@ -160,6 +160,14 @@ Current receipts from that run:
 - hottest common setup phase after consolidation: `fixture.repl_rig.new` at about `7.0s` fast / `6.9s` slow total across the run
 - the prior flaky restart/tailnet tests now pass inside the profiling run: `repl_daemon_crash_restart_tailnet_roundtrip`, `repl_daemon_pathological_tailnet_roundtrip`, `test_crash_recovery_replays_wal`, and the lifecycle restart tests
 
+March 19 follow-through note:
+
+- `beads-rs-fblt.15` moved the deterministic restart/pathological tailnet proofs out of `crates/beads-rs/tests/integration/daemon/repl_e2e.rs` and into `crates/beads-daemon/tests/repl/e2e.rs` as `replication_rig_tailnet_restart_requires_fresh_handshakes` and `replication_rig_pathological_tailnet_recovers_without_external_proxies`
+- the historical March 14 receipts below intentionally keep the old `daemon::repl_e2e::*` names because those were the profiled test IDs at the time; the assembly harness now keeps only thin external-process smoke/proxy coverage
+- `beads-rs-81vj.4` made the built-in `bd daemon run` autostart path fail fast in test workflows by surfacing direct spawned-daemon early exits as immediate `DaemonUnavailable` errors; override programs remain launcher-compatible and wait for the socket instead
+- the autostart fd sanitizer now closes inherited non-stdio descriptors with child-side primitives on the primary supported dev platforms: macOS uses `posix_spawn(... POSIX_SPAWN_CLOEXEC_DEFAULT ...)`, Linux uses the `close_range` syscall, and unsupported Unix targets still keep the child-side `_SC_OPEN_MAX` fallback sweep
+- local proof receipts for that follow-through were `cargo test -p beads-surface ipc:: -- --nocapture` and `cargo test -p beads-rs --test integration cli::critical_path::test_auto_init_on_first_create -- --exact --nocapture`
+
 Warm runner burn-in receipts:
 
 - `tmp/perf/burnin-20260314-121518`
@@ -244,3 +252,10 @@ Root-cause note for the review-loop receipts:
 - `cargo xtest` now stays on the intended fast surface by enabling `beads-rs/e2e-tests` explicitly instead of `--all-features`, so `slow-tests` do not silently leak back into the fast tier during review fixes
 - `ReplRig` teardown still had one leak path after the earlier ownership work: once the socket/meta files disappeared, generic daemon discovery could miss split `runtime/` + sibling `data/` fixtures, leaving the owned child alive long enough for nextest to flag a leaky test
 - the shared wait helper now force-kills and reaps owned daemon children through the `Child` handle when graceful shutdown misses its deadline, which closes that teardown hole without relying on late PID/lock-file discovery
+
+Latest March 19 deterministic-harness migration receipts:
+
+- `cargo xtest` -> `28.257s` nextest, `1128 passed`
+- `cargo nextest run --profile slow --workspace --all-features --features slow-tests` -> `64.217s` nextest, `1250 passed`
+- deterministic pathological-tailnet and crash/restart coverage now lives in `crates/beads-daemon/tests/repl/e2e.rs` as `replication_rig_pathological_tailnet_recovers_without_external_proxies` and `replication_rig_tailnet_restart_requires_fresh_handshakes`
+- `crates/beads-rs/tests/integration/daemon/repl_e2e.rs` now keeps only external-process smoke, one thin tailnet crash/restart product proof (`repl_daemon_tailnet_crash_restart_roundtrip`), tailnet-proxy coverage, and other package-owned seams

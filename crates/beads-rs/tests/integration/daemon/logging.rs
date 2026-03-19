@@ -78,7 +78,7 @@ impl LogDaemon {
     }
 
     fn shutdown(&self) {
-        shutdown_daemon(self.runtime_dir.path());
+        shutdown_daemon(self.runtime_dir.path(), &self.data_dir);
     }
 }
 

@@ -13,10 +13,10 @@ use beads_surface::ipc::{Request, Response};
 /// Best-effort daemon shutdown for tests.
 ///
 /// Idempotent: missing socket or meta -> Ok.
-pub fn shutdown_daemon(runtime_dir: &Path) {
+pub fn shutdown_daemon(runtime_dir: &Path, data_dir: &Path) {
     let socket = daemon_socket_path(runtime_dir);
     let meta = daemon_meta_path(runtime_dir);
-    let mut candidates = candidate_daemon_candidates(runtime_dir);
+    let mut candidates = candidate_daemon_candidates(runtime_dir, data_dir);
     let _ = poll_until_with_backoff(
         Duration::from_secs(2),
         Duration::from_millis(5),
@@ -41,7 +41,7 @@ pub fn shutdown_daemon(runtime_dir: &Path) {
     }
 
     if socket.exists() || meta.exists() || !candidates.is_empty() {
-        candidates.extend(candidate_daemon_candidates(runtime_dir));
+        candidates.extend(candidate_daemon_candidates(runtime_dir, data_dir));
         candidates.sort_unstable_by_key(|candidate| candidate.pid);
         candidates.dedup_by_key(|candidate| candidate.pid);
         for candidate in candidates {
@@ -50,12 +50,12 @@ pub fn shutdown_daemon(runtime_dir: &Path) {
         let _ = fs::remove_file(&socket);
         let _ = fs::remove_file(&meta);
     }
-    cleanup_store_locks(runtime_dir);
+    cleanup_store_locks(data_dir);
 }
 
 /// Force-kill the daemon process without cleanup (simulates a crash).
-pub fn crash_daemon(runtime_dir: &Path) {
-    let mut candidates = candidate_daemon_candidates(runtime_dir);
+pub fn crash_daemon(runtime_dir: &Path, data_dir: &Path) {
+    let mut candidates = candidate_daemon_candidates(runtime_dir, data_dir);
     if candidates.is_empty() {
         if let Some(candidate) = daemon_candidate_from_meta(runtime_dir) {
             candidates.push(candidate);
@@ -66,6 +66,7 @@ pub fn crash_daemon(runtime_dir: &Path) {
     for candidate in candidates {
         force_kill(&candidate, Duration::from_millis(500));
     }
+    cleanup_store_locks(data_dir);
 }
 
 #[derive(Clone, Copy)]
@@ -83,13 +84,13 @@ fn daemon_candidate_from_meta(runtime_dir: &Path) -> Option<DaemonCandidate> {
     })
 }
 
-fn candidate_daemon_candidates(runtime_dir: &Path) -> Vec<DaemonCandidate> {
+fn candidate_daemon_candidates(runtime_dir: &Path, data_dir: &Path) -> Vec<DaemonCandidate> {
     let mut candidates = Vec::new();
     if let Some(candidate) = daemon_candidate_from_meta(runtime_dir) {
         candidates.push(candidate);
     }
     candidates.extend(
-        store_lock_entries(runtime_dir)
+        store_lock_entries(data_dir)
             .into_iter()
             .filter_map(|entry| {
                 entry.pid.map(|pid| DaemonCandidate {
@@ -101,8 +102,8 @@ fn candidate_daemon_candidates(runtime_dir: &Path) -> Vec<DaemonCandidate> {
     candidates
 }
 
-fn cleanup_store_locks(runtime_dir: &Path) {
-    for entry in store_lock_entries(runtime_dir) {
+fn cleanup_store_locks(data_dir: &Path) {
+    for entry in store_lock_entries(data_dir) {
         let stale_or_missing = match entry.pid {
             None => true,
             Some(pid) => !candidate_matches_running_process(&DaemonCandidate {
@@ -122,8 +123,8 @@ struct StoreLockEntry {
     started_at_ms: Option<u64>,
 }
 
-fn store_lock_entries(runtime_dir: &Path) -> Vec<StoreLockEntry> {
-    let stores_dir = runtime_dir.join("data").join("stores");
+fn store_lock_entries(data_dir: &Path) -> Vec<StoreLockEntry> {
+    let stores_dir = data_dir.join("stores");
     let Ok(entries) = fs::read_dir(stores_dir) else {
         return Vec::new();
     };
@@ -300,14 +301,8 @@ mod tests {
         BdCommandProfile, spawn_daemon_with_paths, wait_for_daemon_ready,
     };
 
-    #[test]
-    fn shutdown_daemon_removes_stale_store_lock() {
-        let runtime_dir = tempfile::TempDir::new().expect("runtime dir");
-        let store_dir = runtime_dir
-            .path()
-            .join("data")
-            .join("stores")
-            .join("store-a");
+    fn write_stale_store_lock(data_dir: &Path) -> std::path::PathBuf {
+        let store_dir = data_dir.join("stores").join("store-a");
         fs::create_dir_all(&store_dir).expect("store dir");
         let lock_path = store_dir.join("store.lock");
         fs::write(
@@ -315,8 +310,42 @@ mod tests {
             r#"{"store_id":"s","replica_id":"r","pid":999999,"started_at_ms":1}"#,
         )
         .expect("write lock file");
+        lock_path
+    }
 
-        shutdown_daemon(runtime_dir.path());
+    #[test]
+    fn shutdown_daemon_removes_stale_store_lock_for_nested_data_dir() {
+        let runtime_dir = tempfile::TempDir::new().expect("runtime dir");
+        let data_dir = runtime_dir.path().join("data");
+        let lock_path = write_stale_store_lock(&data_dir);
+
+        shutdown_daemon(runtime_dir.path(), &data_dir);
+
+        assert!(!lock_path.exists(), "expected stale lock to be removed");
+    }
+
+    #[test]
+    fn shutdown_daemon_removes_stale_store_lock_for_sibling_data_dir() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let runtime_dir = root.path().join("runtime");
+        let data_dir = root.path().join("data");
+        fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        let lock_path = write_stale_store_lock(&data_dir);
+
+        shutdown_daemon(&runtime_dir, &data_dir);
+
+        assert!(!lock_path.exists(), "expected stale lock to be removed");
+    }
+
+    #[test]
+    fn crash_daemon_removes_stale_store_lock_for_sibling_data_dir() {
+        let root = tempfile::TempDir::new().expect("fixture root");
+        let runtime_dir = root.path().join("runtime");
+        let data_dir = root.path().join("data");
+        fs::create_dir_all(&runtime_dir).expect("runtime dir");
+        let lock_path = write_stale_store_lock(&data_dir);
+
+        crash_daemon(&runtime_dir, &data_dir);
 
         assert!(!lock_path.exists(), "expected stale lock to be removed");
     }
@@ -361,7 +390,7 @@ mod tests {
         )
         .expect("rewrite daemon meta without started_at_ms");
 
-        shutdown_daemon(&runtime_dir);
+        shutdown_daemon(&runtime_dir, &data_dir);
         let status = child.wait().expect("wait for daemon child");
         assert!(status.code().is_some(), "daemon child should exit");
         assert!(!process_alive(pid), "daemon should be terminated");
