@@ -1,7 +1,5 @@
 ## Boundary
 This directory defines proc-macro helpers for the beads workspace.
-Depends on: `syn`, `quote`, `proc-macro2`.
-Depended on by: `beads-core` and other crates that opt into derives.
 NEVER: add runtime logic or reach into daemon/CLI behavior.
 
 ## How to work here

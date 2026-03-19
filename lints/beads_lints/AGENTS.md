@@ -1,23 +1,23 @@
 ## Boundary
-This crate owns beads-rs specific lint policies (currently crate-boundary enforcement for CLI/daemon seams).
+This crate owns beads-rs specific lint policies and the diagnostics that point code back to the allowed seam.
 Depends on: `dylint_linting`, `rustc_*` internals, and local `clippy_utils`.
-Depended on by: `just dylint` and all lint CI checks.
-NEVER: depend on `crates/beads-*` runtime code or leak policy checks into non-lint crates.
+NEVER: depend on `crates/beads-*` runtime code from lint logic.
 
 ## How to work here
 Golden example:
-- `/Users/darin/src/personal/beads-rs/lints/beads_lints/src/lib.rs` (`CLI_DAEMON_BOUNDARY`) for lint declaration, registration, and diagnostics.
+- `lints/beads_lints/src/lib.rs` (`CLI_DAEMON_BOUNDARY`) for lint declaration, registration, and diagnostics.
 
 When adding or changing a lint:
 1. Declare lint + pass registration close together so scope is explicit.
 2. Prefer `clippy_utils` traversal/diagnostic helpers before hand-rolled AST matching.
 3. Keep matching logic in small helpers (path parsing, filename checks, allowlists) to keep `check_*` readable.
-4. Add a failing fixture and expected stderr in `/Users/darin/src/personal/beads-rs/lints/beads_lints/ui/src/`.
+4. Add a failing fixture and expected stderr in `lints/beads_lints/ui/src/`.
 5. Add/adjust a passing fixture for non-regression.
+6. Make diagnostics point to the allowed seam, not just the forbidden one.
 
-Tests that matter:
-- `cargo test -p beads_lints --manifest-path /Users/darin/src/personal/beads-rs/lints/Cargo.toml`
-- `cargo dylint --path /Users/darin/src/personal/beads-rs/lints --pattern beads_lints --all`
+Verification:
+- `cargo test -p beads_lints --manifest-path lints/Cargo.toml`
+- `cargo dylint --path lints --pattern beads_lints --all`
 
 Invariants:
 - Diagnostics must explain the boundary violation and point to the allowed alternative seam.
