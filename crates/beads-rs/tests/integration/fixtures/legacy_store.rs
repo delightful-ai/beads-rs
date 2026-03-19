@@ -3,7 +3,11 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use beads_core::CanonicalState;
+use beads_core::{
+    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Lww, Priority,
+    Stamp, Workflow, WriteStamp,
+};
+use beads_git::wire::{StoreChecksums, serialize_meta};
 use git2::{FetchOptions, ObjectType, Oid, Repository, Signature, Time};
 
 use super::timing;
@@ -103,6 +107,83 @@ pub fn write_store_commit_bytes(
         notes_bytes,
         meta_bytes,
         message,
+    )
+}
+
+pub fn write_store_commit(
+    repo_path: &Path,
+    deps_bytes: &[u8],
+    include_notes: bool,
+    include_meta: bool,
+) -> Oid {
+    let state_bytes = b"";
+    let tombstones_bytes = b"";
+    let notes_bytes = include_notes.then_some(b"" as &[u8]);
+    let meta_bytes = if include_meta {
+        let checksums =
+            StoreChecksums::from_bytes(state_bytes, tombstones_bytes, deps_bytes, Some(b""));
+        Some(serialize_meta(Some("bd"), None, &checksums).expect("meta bytes"))
+    } else {
+        None
+    };
+    write_store_commit_bytes(
+        repo_path,
+        state_bytes,
+        tombstones_bytes,
+        deps_bytes,
+        notes_bytes,
+        meta_bytes.as_deref(),
+        "test store commit",
+    )
+}
+
+pub fn write_strict_store_commit(repo_path: &Path) -> Oid {
+    let state = CanonicalState::new();
+    let state_bytes = beads_git::wire::serialize_state(&state).expect("state bytes");
+    let tombstones_bytes = beads_git::wire::serialize_tombstones(&state).expect("tombstones bytes");
+    let deps_bytes = beads_git::wire::serialize_deps(&state).expect("deps bytes");
+    let notes_bytes = beads_git::wire::serialize_notes(&state).expect("notes bytes");
+    let checksums = StoreChecksums::from_bytes(
+        &state_bytes,
+        &tombstones_bytes,
+        &deps_bytes,
+        Some(&notes_bytes),
+    );
+    let meta_bytes = serialize_meta(Some("bd"), None, &checksums).expect("meta bytes");
+    write_store_commit_bytes(
+        repo_path,
+        &state_bytes,
+        &tombstones_bytes,
+        &deps_bytes,
+        Some(&notes_bytes),
+        Some(&meta_bytes),
+        "test store commit",
+    )
+}
+
+pub fn write_nonempty_strict_store_commit(repo_path: &Path) -> Oid {
+    let mut state = CanonicalState::new();
+    let stamp = make_stamp(1_765_500_000_000, "migration-test");
+    state.insert_live(make_bead("bd-nonempty", &stamp));
+    let state_bytes = beads_git::wire::serialize_state(&state).expect("state bytes");
+    let tombstones_bytes = beads_git::wire::serialize_tombstones(&state).expect("tombstones bytes");
+    let deps_bytes = beads_git::wire::serialize_deps(&state).expect("deps bytes");
+    let notes_bytes = beads_git::wire::serialize_notes(&state).expect("notes bytes");
+    let checksums = StoreChecksums::from_bytes(
+        &state_bytes,
+        &tombstones_bytes,
+        &deps_bytes,
+        Some(&notes_bytes),
+    );
+    let meta_bytes = serialize_meta(Some("bd"), None, &checksums).expect("meta bytes");
+    write_store_commit_bytes(
+        repo_path,
+        &state_bytes,
+        &tombstones_bytes,
+        &deps_bytes,
+        Some(&notes_bytes),
+        Some(&meta_bytes),
+        "test store commit",
     )
 }
 
@@ -255,6 +336,31 @@ pub fn push_store_ref(repo_path: &Path) {
     remote
         .push(&["refs/heads/beads/store:refs/heads/beads/store"], None)
         .expect("push store ref");
+}
+
+fn make_stamp(wall_ms: u64, actor: &str) -> Stamp {
+    Stamp::new(
+        WriteStamp::new(wall_ms, 0),
+        ActorId::new(actor).expect("actor"),
+    )
+}
+
+fn make_bead(id: &str, stamp: &Stamp) -> Bead {
+    let core = BeadCore::new(BeadId::parse(id).expect("bead id"), stamp.clone(), None);
+    let fields = BeadFields {
+        title: Lww::new("test".to_string(), stamp.clone()),
+        description: Lww::new(String::new(), stamp.clone()),
+        design: Lww::new(None, stamp.clone()),
+        acceptance_criteria: Lww::new(None, stamp.clone()),
+        priority: Lww::new(Priority::new(2).expect("priority"), stamp.clone()),
+        bead_type: Lww::new(BeadType::Task, stamp.clone()),
+        external_ref: Lww::new(None, stamp.clone()),
+        source_repo: Lww::new(None, stamp.clone()),
+        estimated_minutes: Lww::new(None, stamp.clone()),
+        workflow: Lww::new(Workflow::Open, stamp.clone()),
+        claim: Lww::new(Claim::default(), stamp.clone()),
+    };
+    Bead::new(core, fields)
 }
 
 fn write_store_ref(

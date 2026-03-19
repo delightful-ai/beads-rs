@@ -12,7 +12,8 @@ NEVER: hide owner-crate logic or one-off test behavior here. If a helper stops b
 - Use `realtime.rs` or `BdRuntimeRepo` for single-daemon tests. Reach for `repl_rig.rs` only when you truly need multi-daemon replication, peer config churn, or tailnet proxy faults.
 - Use `admin_status.rs` when you need repeated admin-status sampling under load instead of open-coding status collectors in individual tests. Bind those helpers to the owning runtime dir; do not introduce ambient `IpcClient::new()` shortcuts there or in `ipc_stream.rs` / `load_gen.rs`.
 - `tailnet_proxy.rs` is the external fault-injection harness consumed by `repl_rig.rs` and `daemon/repl_e2e.rs`; keep those surfaces aligned.
-- Treat `legacy_store.rs`, `migration_store.rs`, and the checked-in corpora under `legacy_store_corpus/` as provenance fixtures, not scratch space.
+- Treat `legacy_store.rs` and the checked-in corpora under `legacy_store_corpus/` as the canonical migration fixture surface; do not add a second loader or a second corpus root for migration store tests.
+- If a migration test needs to seed or rewrite `refs/heads/beads/store`, extend `legacy_store.rs` first instead of open-coding git/blob/meta plumbing in `cli/migration.rs`.
 
 ## Local rules
 - Add reusable setup here instead of creating per-test harness code in `cli/` or `daemon/`, but only when more than one test needs it.

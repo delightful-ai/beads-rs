@@ -17,6 +17,7 @@ documented derived variants.
 
 | Fixture | Kind | Source / derivation | Purpose |
 | --- | --- | --- | --- |
+| `v0_1_26_minimal` | Historical synthetic fixture | Generated locally from the historical `v0.1.26` wire shapes by `scripts/generate-v0_1_26-store-fixture.sh`, then checked into this corpus so current migration tests can install it through the same `legacy_store.rs` surface as the richer reduced captures. | Minimal exact old-store artifact: one live bead, one embedded note, legacy line-per-edge deps, no `notes.jsonl`, and `meta.json` without checksums. |
 | `rich_workflow` | Reduced capture | Reduced by hand from `/Users/darin/Projects/mcp_dspy_eveals` store `f585e7883ad025b4ee1461fcbbfc6cf14f558b00`; titles/content shortened while preserving field shape. | Claimed + closed beads, embedded notes, legacy labels array, legacy alias-shaped deps, missing `notes.jsonl`, and `meta.json` without checksums. |
 | `rich_workflow_peer` | Derived variant | Built locally on `2026-03-11` from the `rich_workflow` reduced capture, then edited to add peer-only divergence: later `_at` on `bd-rich-open`, extra `api` label, peer-side note/label changes on `bd-rich-claimed`, a peer-only bead, and a peer-only dep edge. The peer variant also removes the base alias-shaped related dep edge so the merge tests prove that local-only legacy deps survive related divergence instead of being accidentally recreated by the peer fixture. | Related/unrelated local-vs-remote divergence coverage with realistic peer-side updates. |
 | `tombstone_deleted_dep` | Derived variant | Built locally on `2026-03-11` from the same source-store shape family as `rich_workflow`, then minimized into a tombstone-focused scenario with one active dep and one deleted legacy dep row following the current parser contract in `crates/beads-git/src/wire.rs`. The fixture also omits `notes.jsonl` while keeping one embedded bead note so migration must backfill notes from state. A scan across current repos under `/Users/darin/Projects` and `/Users/darin/src/personal` found no live `refs/heads/beads/store` that still carried deleted legacy dep rows, so this remains contract-derived for now; tracked follow-up: `beads-rs-qin2`. | Tombstones, deleted legacy dep rows, embedded-note backfill, active dep preservation, and missing `meta.json`. |
@@ -55,6 +56,7 @@ To refresh the real-source anchor or derive new reduced fixtures:
 - `notes.jsonl` is intentionally absent from the rich fixtures and from
   `tombstone_deleted_dep`, so migration must backfill notes from embedded bead
   notes in both paths.
+- `v0_1_26_minimal` is the canonical minimal historical artifact for migration smoke coverage; it lives in this corpus, not under a separate `tests/fixture-data` tree.
 - `rich_workflow_peer` and `tombstone_deleted_dep` are derived variants, not raw
   source-store extracts.
 - `tombstone_deleted_dep` currently proves the implemented deleted-row parser

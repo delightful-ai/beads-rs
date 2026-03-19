@@ -13,12 +13,9 @@ use crate::fixtures::legacy_store::{
     fetch_remote_store_ref, fixture, push_store_ref, read_store_blob, read_store_meta_json,
     read_store_state, rewrite_store_meta, rewrite_store_ref_commit, set_ref_target,
     store_first_parent_oid, store_ref_oid, wait_for_fetched_remote_store_ref,
-    write_store_commit_bytes,
+    write_nonempty_strict_store_commit, write_store_commit, write_strict_store_commit,
 };
-use beads_core::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey, DepKind,
-    Lww, Priority, Stamp, Workflow, WriteStamp,
-};
+use beads_core::{BeadId, CanonicalState, Claim, DepKey, DepKind, Workflow, WriteStamp};
 use beads_git::sync::migrate_store_ref_to_v1_with_before_push_for_testing;
 use beads_git::wire::{StoreChecksums, serialize_meta};
 use git2::{ObjectType, Repository};
@@ -32,99 +29,6 @@ fn sample_go_export() -> &'static str {
 {"id":"bd-abc2","title":"Bug to fix","description":"Something is broken","status":"in_progress","priority":0,"issue_type":"bug","assignee":"alice","created_at":"2025-01-02T10:00:00Z","updated_at":"2025-01-02T12:00:00Z"}
 {"id":"bd-abc3","title":"Completed feature","description":"All done","status":"closed","priority":2,"issue_type":"feature","created_at":"2025-01-03T10:00:00Z","updated_at":"2025-01-03T15:00:00Z","closed_at":"2025-01-03T15:00:00Z","close_reason":"Shipped it"}
 "#
-}
-
-fn write_store_commit(
-    repo_path: &Path,
-    deps_bytes: &[u8],
-    include_notes: bool,
-    include_meta: bool,
-) {
-    let state_bytes = b"";
-    let tombs_bytes = b"";
-    let notes_bytes = include_notes.then_some(b"" as &[u8]);
-    let meta_bytes = if include_meta {
-        let checksums = StoreChecksums::from_bytes(state_bytes, tombs_bytes, deps_bytes, Some(b""));
-        Some(serialize_meta(Some("bd"), None, &checksums).expect("meta bytes"))
-    } else {
-        None
-    };
-    write_store_commit_bytes(
-        repo_path,
-        state_bytes,
-        tombs_bytes,
-        deps_bytes,
-        notes_bytes,
-        meta_bytes.as_deref(),
-        "test store commit",
-    );
-}
-
-fn write_strict_store_commit(repo_path: &Path) {
-    let state = CanonicalState::new();
-    let state_bytes = beads_git::wire::serialize_state(&state).expect("state bytes");
-    let tombs_bytes = beads_git::wire::serialize_tombstones(&state).expect("tombstones bytes");
-    let deps_bytes = beads_git::wire::serialize_deps(&state).expect("deps bytes");
-    let notes_bytes = beads_git::wire::serialize_notes(&state).expect("notes bytes");
-    let checksums =
-        StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes, Some(&notes_bytes));
-    let meta_bytes = serialize_meta(Some("bd"), None, &checksums).expect("meta bytes");
-    write_store_commit_bytes(
-        repo_path,
-        &state_bytes,
-        &tombs_bytes,
-        &deps_bytes,
-        Some(&notes_bytes),
-        Some(&meta_bytes),
-        "test store commit",
-    );
-}
-
-fn make_stamp(wall_ms: u64, actor: &str) -> Stamp {
-    Stamp::new(
-        WriteStamp::new(wall_ms, 0),
-        ActorId::new(actor).expect("actor"),
-    )
-}
-
-fn make_bead(id: &str, stamp: &Stamp) -> Bead {
-    let core = BeadCore::new(BeadId::parse(id).expect("bead id"), stamp.clone(), None);
-    let fields = BeadFields {
-        title: Lww::new("test".to_string(), stamp.clone()),
-        description: Lww::new(String::new(), stamp.clone()),
-        design: Lww::new(None, stamp.clone()),
-        acceptance_criteria: Lww::new(None, stamp.clone()),
-        priority: Lww::new(Priority::new(2).expect("priority"), stamp.clone()),
-        bead_type: Lww::new(BeadType::Task, stamp.clone()),
-        external_ref: Lww::new(None, stamp.clone()),
-        source_repo: Lww::new(None, stamp.clone()),
-        estimated_minutes: Lww::new(None, stamp.clone()),
-        workflow: Lww::new(Workflow::Open, stamp.clone()),
-        claim: Lww::new(Claim::default(), stamp.clone()),
-    };
-    Bead::new(core, fields)
-}
-
-fn write_nonempty_strict_store_commit(repo_path: &Path) {
-    let mut state = CanonicalState::new();
-    let stamp = make_stamp(1_765_500_000_000, "migration-test");
-    state.insert_live(make_bead("bd-nonempty", &stamp));
-    let state_bytes = beads_git::wire::serialize_state(&state).expect("state bytes");
-    let tombs_bytes = beads_git::wire::serialize_tombstones(&state).expect("tombstones bytes");
-    let deps_bytes = beads_git::wire::serialize_deps(&state).expect("deps bytes");
-    let notes_bytes = beads_git::wire::serialize_notes(&state).expect("notes bytes");
-    let checksums =
-        StoreChecksums::from_bytes(&state_bytes, &tombs_bytes, &deps_bytes, Some(&notes_bytes));
-    let meta_bytes = serialize_meta(Some("bd"), None, &checksums).expect("meta bytes");
-    write_store_commit_bytes(
-        repo_path,
-        &state_bytes,
-        &tombs_bytes,
-        &deps_bytes,
-        Some(&notes_bytes),
-        Some(&meta_bytes),
-        "test store commit",
-    );
 }
 
 fn note_ids_for(state: &CanonicalState, id: &BeadId) -> BTreeSet<String> {
@@ -678,15 +582,7 @@ fn test_migrate_to_1_noop_when_already_canonical() {
 #[test]
 fn test_migrate_to_1_rewrites_legacy_deps_and_store_invariants() {
     let repo = TestRepo::new();
-    write_store_commit(
-        repo.path(),
-        br#"{"from":"bd-abc1","to":"bd-abc2","kind":"blocks"}
-"#,
-        false,
-        false,
-    );
-    let local_before = store_ref_oid(repo.path(), "refs/heads/beads/store")
-        .expect("local store ref before migration");
+    let local_before = fixture("v0_1_26_minimal").install(repo.path());
     assert_eq!(
         store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store"),
         None,

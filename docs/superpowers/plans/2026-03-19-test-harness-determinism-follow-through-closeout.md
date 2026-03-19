@@ -169,7 +169,8 @@
 **Files:**
 - Modify: `crates/beads-rs/tests/integration/cli/migration.rs`
 - Modify: `crates/beads-rs/tests/integration/fixtures/legacy_store.rs`
-- Modify: `crates/beads-rs/tests/integration/fixtures/migration_store.rs`
+- Delete: `crates/beads-rs/tests/integration/fixtures/migration_store.rs` after folding its remaining value into `legacy_store.rs`
+- Move: `crates/beads-rs/tests/fixture-data/migration/v0_1_26_minimal/*` into `crates/beads-rs/tests/integration/fixtures/legacy_store_corpus/v0_1_26_minimal/`
 - Modify: `crates/beads-rs/tests/integration/cli/AGENTS.md`
 - Modify: `crates/beads-rs/tests/integration/fixtures/AGENTS.md`
 - Test: `cargo test -p beads-rs --test integration test_migrate_fixture_rich_workflow_rewrites_and_preserves_state -- --exact`
@@ -179,7 +180,7 @@
 - [ ] Read `bd show beads-rs-81vj.3` and `crates/beads-rs/tests/integration/cli/AGENTS.md` before editing.
 - [ ] Claim the bead and start a fresh change: `bd claim beads-rs-81vj.3` then `jj new -m "beads-rs-81vj.3: unify migration fixture canon"`.
 - [ ] Pick one canonical fixture surface for migration/store-ref tests and route the existing helper flows through it instead of keeping parallel local plumbing in `migration.rs`.
-- [ ] Remove or fold dead duplicate entry points in `migration_store.rs` once the canonical path is in place.
+- [ ] Remove `migration_store.rs` after folding its dead duplicate loader role into `legacy_store.rs` and the canonical `legacy_store_corpus/` path.
 - [ ] Keep `migration.rs` scenario-focused: fixture install, CLI invocation, and assertions should stay there; git/blob/meta plumbing should move into the shared fixture surface.
 - [ ] Update local AGENTS guidance so future migration tests start from the canonical fixture instead of copying ad hoc helpers.
 - [ ] Run the narrow proof loop listed above.
