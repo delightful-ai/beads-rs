@@ -16,7 +16,7 @@ This tree proves daemon crate seams, not assembly flows. The layout is intention
 - Keep WAL fixtures and REPL fixtures separate. The split between `support/wal*.rs` and `support/repl*.rs` is part of the proof model.
 
 ## Proof Loops
-- Run `cargo test -p beads-daemon --features test-harness repl:: -- --list` for the cheap proof that the REPL seam compiles and is wired into the harness.
-- Run `cargo test -p beads-daemon --features test-harness wal:: -- --list` for the WAL seam, including fsck/receipt/index coverage under `tests/wal.rs`.
+- Run `cargo test -p beads-daemon --features test-harness --test repl -- --list` for the cheap proof that the REPL integration target compiles and is wired into the harness.
+- Run `cargo test -p beads-daemon --features test-harness --test wal -- --list` for the WAL integration target, including fsck/receipt/index coverage under `tests/wal.rs`.
 - Run `cargo test -p beads-daemon --features test-harness private_field_compile_fail_guards_acknowledgement_apis -- --list` when touching `PendingReplayApply`, `PlannedMutation`, or the UI privacy boundary.
 - Run `cargo test -p beads-daemon --features test-harness` before calling this subtree done.
