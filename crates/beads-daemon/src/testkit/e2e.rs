@@ -953,13 +953,14 @@ impl ReplicationRig {
             wait_timeout,
             response,
         } = wait;
-        let started_at = Instant::now();
-        let deadline = started_at.checked_add(wait_timeout).unwrap_or(started_at);
 
         let DurabilityClass::ReplicatedFsync { k } = requested else {
             return Response::ok(ResponsePayload::Op(response));
         };
 
+        let started_at_ms = self.clock.now_ms();
+        let wait_timeout_ms = wait_timeout.as_millis().min(u64::MAX as u128) as u64;
+        let deadline_ms = started_at_ms.saturating_add(wait_timeout_ms);
         let mut response = response;
         for _ in 0..max_steps {
             match coordinator.poll_replicated(&namespace, origin, seq, k) {
@@ -973,10 +974,9 @@ impl ReplicationRig {
                     return Response::ok(ResponsePayload::Op(response));
                 }
                 Ok(ReplicatedPoll::Pending { acked_by, eligible }) => {
-                    let now = Instant::now();
-                    if now >= deadline {
-                        let waited_ms = (now.duration_since(started_at).as_millis())
-                            .min(u64::MAX as u128) as u64;
+                    let now_ms = self.clock.now_ms();
+                    if now_ms >= deadline_ms {
+                        let waited_ms = now_ms.saturating_sub(started_at_ms);
                         let pending =
                             DurabilityCoordinator::pending_replica_ids(&eligible, &acked_by);
                         let pending_receipt = DurabilityCoordinator::pending_receipt(
