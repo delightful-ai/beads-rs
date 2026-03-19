@@ -6,89 +6,154 @@ Core idea: beads are a CRDT. Most fields are last-writer-wins via `Lww<T>` (time
 
 A local daemon holds canonical state and schedules git sync (~500ms). CLI talks to it over Unix socket, auto-starts on first use. One daemon serves many clones by keying state on normalized remote URL.
 
+If this is your first time touching beads this session, run `bd prime`. It is the fastest way to reload the mental model and command language.
+
 ## Worldview
 
 - **Kill scatter**: One source of truth per concept. If data lives in two places, merge or derive.
 - **Types tell the truth**: Typed digests, enums not strings, validated IDs. Wrong states should be unrepresentable.
+- **Proof beats vibes**: deterministic merges, explicit invariants, and cheap verification are part of the design, not cleanup.
 
 ## Architecture
 
-```
-crates/beads-core/     CRDT/domain model, Lww<T>, CanonicalState, validated types
-crates/beads-api/      IPC + --json schemas
-crates/beads-rs/src/
-  ├── git/             sync protocol, wire format, checkpoint
-  ├── daemon/          ops + queries, Unix socket IPC, sync scheduling
-  ├── cli/             clap parsing, command handlers, rendering
-  ├── migrate/         import utilities (beads-go JSONL)
-  └── bin/             bd entrypoint
+The important ownership split is:
+
+```text
+crates/beads-core/         Canonical domain model, CRDT semantics, validated types, apply/merge rules
+crates/beads-api/          Output/result schemas for CLI/daemon JSON surfaces
+crates/beads-bootstrap/    Repo discovery, path derivation, config schema + precedence
+crates/beads-surface/      IPC request/response contract, client helpers, shared patch/query types
+crates/beads-cli/          Command language, clap parsing, request construction, human/JSON rendering
+crates/beads-git/          Git-backed sync, wire format, checkpoint import/export/publication
+crates/beads-daemon-core/  Shared REPL/WAL/durability contracts
+crates/beads-daemon/       Runtime process, store/session lifecycle, mutation/query orchestration
+crates/beads-rs/           Assembly crate/package entrypoint, host seams, binary wiring, upgrade/migration glue
+crates/beads-rs/tests/     Assembly/product integration, package behavior, public-boundary enforcement
+scripts/                   Side-effectful tooling, profiling helpers, release/install automation
+docs/                      Source-of-truth specs, design notes, and repo policy documents
+lints/                     Custom Dylint rules and vendored lint authoring utilities
 ```
 
-## Key Files
+`beads-rs` is the tiny assembly crate/package entrypoint. It is not the old compatibility umbrella. Do not route new internal dependencies through it just because it is convenient.
 
-- `SPEC.md` — data model + invariants
-- `CLI_SPEC.md` — CLI surface
-- `WORKFLOW.md` — jj + bd workflow details
+## Cross-Cutting Invariants
+
+- The CLI tree must not import daemon modules directly. `beads-cli` owns command language and rendering; `beads-rs` CLI code is limited to host orchestration hooks.
+- Non-daemon crates must not import `beads_daemon::runtime::*`, and no crate may import `beads_daemon::git::*`. Those are private organization shims, not public APIs.
+- `crates/beads-rs/tests` is for assembly/product seams only. Pure core, git, daemon, or protocol coverage should live with the owning crate unless there is a genuine cross-crate reason not to.
+
+## Design References
+
+- `docs/CRATE_DAG.md` — canonical crate ownership + forbidden dependency edges
+- `docs/AGENTSMD_INFO.md` — local spec for what `AGENTS.md` files should contain and how they should stack
+- `docs/philosophy/type_design.md` — read before introducing new state types, validated wrappers, enums, or other domain-shaping types
+- `docs/philosophy/trait_design.md` — read before adding or reshaping capability traits
+- `docs/philosophy/error_design.md` — read before adding new error surfaces
+- `docs/philosophy/test_design.md` — read before adding new test families, harnesses, or proof loops
+- `docs/philosophy/scatter.md` — read when code placement, ownership, or source-of-truth questions feel diffuse
 
 ## Build & Verify
 
 ```bash
 cargo check                      # typecheck (run compulsively)
 cargo fmt --all                  # format
-just dylint                      # required boundary gate (CLI/daemon layering)
+just dylint                      # required boundary gate (includes crate DAG policy test)
 cargo clippy --all-features -- -D warnings  # lint (CI uses --all-features)
-cargo xtest                      # canonical fast tier (nextest fast profile)
+cargo xtest                      # canonical fast tier (nextest fast profile + beads-rs/e2e-tests)
 cargo nextest run --profile slow --workspace --all-features --features slow-tests
 ```
 
 Logging: `LOG=debug` or `LOG=beads_rs=trace`, or `-v/-vv` on `bd`.
 
+The default workspace verification does **not** automatically cover every specialty surface.
+
+- If you touch `crates/beads_stateright_models`, run `cargo check -p beads_stateright_models` and at least one relevant model/example check.
+- If you touch `lints/`, run `cargo test -p beads_lints --manifest-path lints/Cargo.toml` in addition to `just dylint`.
+- If you touch release/install scripts or CI workflows, sanity-check the referenced cargo commands and artifact flow locally instead of assuming root verification covers them.
+
 ## Test Infrastructure
 
-- Default to `cargo xtest` for the warm fast tier. It intentionally runs the workspace fast profile plus `beads-rs/e2e-tests`, not `--all-features`, so `slow-tests` stay out of the fast tier. Use `cargo nextest run --profile slow --workspace --all-features --features slow-tests` for the slow tier.
-- The shared nextest runner is intentionally capped in `.config/nextest.toml` (`test-threads = 4`). Do not raise it blindly; prove any change with repeated whole-suite burn-in receipts.
-- Tailnet fault-injection `daemon::repl_e2e` tests run in the `tailnet-fault-injection` nextest group (`max-threads = 1`). If you add another tailnet/proxy stress test, fence it into the same group instead of letting it silently contend with the rest of the fast tier.
-- Profile the suite with `./scripts/profile-tests.sh`. It captures per-test nextest timing plus env-gated fixture timing under `tmp/perf/tests-*`.
-- `./scripts/profile-tests.sh` defaults to `PROFILE_TEST_THREADS=2` so profiling artifacts stay reproducible under load. Override only when you are deliberately measuring a different concurrency level.
-- Reuse shared helpers under `crates/beads-rs/tests/integration/fixtures/`. If a test needs new repo/runtime/daemon setup behavior, add or extend a shared fixture instead of creating another one-off local `TestRepo`.
-- Reuse `fixtures::temp` for integration temp roots. Do not derive test temp dirs from `current_dir()/tmp`; keep Unix socket paths short and deterministic instead. Use `BD_TEST_TMP_ROOT` only when you need an explicit override, and `BD_TEST_KEEP_TMP=1` when you need to retain fixture dirs for debugging.
-- Shared fixture timing lives in `crates/beads-rs/tests/integration/fixtures/timing.rs` and is activated with `BD_TEST_TIMING_DIR`.
+Root keeps only the cross-subtree assembly-test rules. The child files under `crates/beads-rs/tests/**` own the local harness tactics and helper-level lore.
+
+- Default to `cargo xtest` for the warm fast tier. It intentionally runs the workspace fast profile plus `beads-rs/e2e-tests`, not `--all-features`, so anything behind `slow-tests` still needs the slow tier.
+- Use `cargo nextest run --profile slow --workspace --all-features --features slow-tests` when you touch time-based daemon/load/tailnet paths. `cargo xtest` will not prove those.
+- The shared nextest runner is intentionally capped in `.config/nextest.toml` (`test-threads = 4`). Treat changes there as performance/flake work, not housekeeping.
+- Tailnet fault-injection `daemon::repl_e2e` tests run in the `tailnet-fault-injection` nextest group (`max-threads = 1`). If you add another tailnet/proxy stress test, fence it into the same group instead of letting it silently contend with the rest of the suite.
+- Profile the suite with `./scripts/profile-tests.sh`. It records per-test nextest timing plus env-gated fixture timing under `tmp/perf/tests-*`; override its default thread count only when you are deliberately measuring a different concurrency level.
+- Reuse shared helpers under `crates/beads-rs/tests/integration/fixtures/`. If a test needs new repo/runtime/daemon setup behavior, add or extend a shared fixture instead of creating another one-off local harness.
+- Reuse `fixtures::temp` for integration temp roots. Keep Unix socket paths short and deterministic instead of deriving them from `current_dir()/tmp`.
 - Avoid fixed sleeps in tests. Prefer shared condition-based wait helpers and explicit readiness barriers.
-- Reuse `fixtures::bd_runtime` and `fixtures::wait` for daemon socket/meta/store discovery and process-exit polling instead of open-coding JSON/socket probes in individual tests.
-- If a test can autostart or restart a daemon, allocate its runtime through `BdRuntimeRepo` or another shared fixture with an owned `Drop` cleanup path. Do not spin up git-sync-enabled daemons against ad hoc `TempDir` runtimes.
-- If a fixture intends to own a daemon process, spawn `bd daemon run` explicitly from the fixture before `Init` and drive bootstrap/status over `IpcClient::for_runtime_dir(...).with_autostart(false)`. Do not bootstrap owned daemons through helper CLI autostart paths like `bd init` or `bd status`, or you will lose process ownership before teardown.
-- If a fixture owns a `std::process::Child`, wait for shutdown by polling `Child::try_wait()` and reap it through the handle. If graceful daemon shutdown misses its deadline, force-kill the owned child and reap it through the same handle instead of hoping PID/lock discovery finds it later.
-- For replicated-fsync integration tests, gate writes on `ReplRig::assert_replication_durability_ready()` rather than handshake-only helpers. `dead_ms` is also the daemon-side durability wait budget, so a write started before peers become `durability_eligible` can stall until nextest kills the test.
-- For namespace convergence polling, prefer `AdminFingerprint` over full `AdminStatus`. Reserve `AdminStatus` for liveness/WAL assertions that actually need the heavier payload.
-- If you add a read-based admin helper, thread its `ctx.read.wait_timeout_ms` through the fixture IPC timeout mapping. Do not let read-heavy helpers like `AdminFingerprint` fall back to the 7-second floor, or convergence loops will spin until nextest kills the test under load.
-- For crash/restart replication tests, snapshot readiness first and then require fresh post-restart handshakes with `replication_ready_snapshot()` and `assert_replication_ready_since(...)`. Do not treat persisted pre-crash liveness rows as proof of recovery.
+- If a fixture intends to own a daemon process, spawn `bd daemon run` explicitly and drive bootstrap/status through `IpcClient::for_runtime_dir(...).with_autostart(false)` so helper CLI autostart paths do not steal lifecycle ownership.
+- For namespace convergence polling, prefer `AdminFingerprint` over full `AdminStatus` unless the assertion actually needs the heavier payload.
+- For crash/restart replication tests, snapshot readiness first and then require fresh post-restart handshakes with `replication_ready_snapshot()` and `assert_replication_ready_since(...)`.
 - Do not call `reload_replication()` after ordinary replicated writes when the roster/config has not changed; wait on the existing readiness/convergence helpers instead.
-- The default tailnet smoke profile should stay deterministic (latency/jitter only). Put loss, duplication, blackholes, and reorder stress in the explicit pathological tailnet tests instead of the default roundtrip smoke.
-- Fault-injection tests should use test-local liveness budgets when the assertion is about eventual recovery under packet loss or resets. Do not inherit production `keepalive_ms` / `dead_ms` into pathological CI tests unless the test is explicitly about those production budgets.
-- External daemon + proxy fault-injection tests must declare their isolation boundary in both runners. Fence them into the `tailnet-fault-injection` nextest group, and if they live in the same libtest binary, guard the conflicting cases with a shared single-flight lock so plain `cargo test` does not hang on the same OS-level harness contention. Fast/default profiles can share the runner with non-tailnet tests once the convergence helper stays lightweight; the slow profile still reserves full runner ownership for these tests.
+- `crates/beads-rs/tests/public_boundary.rs` is the assembly-boundary guardrail. When you re-home tests or move package-owned seams, update its assertions and the nearby ownership markers in the same change.
+- `crates/beads-rs/tests/e2e.rs` now consumes `beads_daemon::testkit::e2e`; do not grow a second in-memory replication harness under `crates/beads-rs/tests`.
+- Tests should usually live with the owning crate. `crates/beads-rs/tests` is reserved for assembly/product integration, package behavior, public-boundary enforcement, and cross-crate seams that do not belong cleanly to a single owner crate.
 
-## Coding Style
+## Code Style
 
-- Follow `rustfmt` + keep `clippy` clean.
-- Explicit error types (`thiserror`), `Result<T, beads_rs::Error>` in library APIs.
-- Naming: `snake_case.rs` modules, `CamelCase` types, `kebab-case` CLI flags.
-- Regression test for bug fixes; keep tests deterministic and OS-independent.
+- Types should tell the truth, especially uncomfortable truths. Prefer validated/newtyped/enumerated states over strings, booleans, or parallel flags when the distinction changes behavior.
+- Preserve information until a deliberate boundary. Do not collapse rich domain state or error context into lossy helper shapes just to satisfy one caller.
+- New traits should represent real capability seams, not bags of methods. If context is unavoidable, make it explicit in the type or method contract instead of smuggling it through lore.
+- New error types should be structured caller decision surfaces. Use crate-local `thiserror` enums, preserve evidence until a real boundary, and reserve panics for bugs.
+- New tests must kill a family of wrong implementations. Assert at the lowest clean layer first; use assembly/e2e tests only for shipped seams and cross-crate behavior that cannot be proven lower.
+- Parse and validate at the boundary, then pass typed values inward. Do not re-parse, re-normalize, or re-derive canonical semantics in higher layers.
+- Prefer one canonical helper stack per seam. If multiple call sites or tests want the same setup, promote a shared helper in the owning subtree instead of cloning one-off flows.
+- Follow `rustfmt` and keep `clippy` clean, but treat formatting/lints as hygiene, not the design bar.
+- Naming still matters: `snake_case.rs` modules, `CamelCase` types, and `kebab-case` CLI flags.
+
+## AGENTS.md Policy
+
+Root `AGENTS.md` stays rich on purpose. It is the only context guaranteed to be present in every stack, so it keeps the beads mental model, repo worldview, crate ownership map, default verification tiers, and `bd` + `jj` workflow.
+
+The hierarchy rule is highest stable truth, not highest possible truth. Put guidance at the highest layer where it is still true for the whole subtree, changes decisions there, and is unlikely to churn with local implementation details.
+
+Agents should read `AGENTS.md` files from root down to the working directory. Higher levels set defaults; lower levels add local delta and explicit exceptions.
+
+Add a child `AGENTS.md` when a subtree has its own ownership boundary, verification delta, proof model, side effects, or nearby legacy bait that a smart stranger would otherwise copy.
+
+Prefer child files at:
+
+- first-class crate roots
+- test roots with their own proof model
+- tooling/script roots with side effects
+- docs roots where source-of-truth vs historical context needs to be explicit
+
+Child files should mostly contain **delta**, not duplication.
+
+- **On-touch rule**: if you change a directory's boundary, canonical pattern, verification command, or known hazard, update the nearest relevant `AGENTS.md` in the same change.
+- **No-void rule**: do not demote guidance out of a parent unless the receiving child `AGENTS.md` already exists or is being created in the same change.
+- **Missing-child rule**: if a subtree clearly needs local guidance and has no child `AGENTS.md`, either add it immediately or keep the rule at the parent until that child exists.
+- **Promotion rule**: if the same rule becomes true for two or more siblings, move it up one level.
+- **Demotion rule**: if a root rule names a helper, fixture, or command that only matters in one subtree, move it down.
+- **Stale-child rule**: if the nearest child `AGENTS.md` is stale, fix it before relying on it. Do not preserve known-bad local guidance just because a parent file is more accurate.
+- **Ownership rule**: every child `AGENTS.md` should have an obvious review affinity through the owning crate, test root, or tooling area. If no one can say who should keep a file true, the file is probably at the wrong layer.
+- **Churn rule**: high-churn or high-incident directories should get periodic `AGENTS.md` review when touched, not just opportunistic edits.
+- **Validation rule**: when you touch an `AGENTS.md`, sanity-check that referenced paths still exist and that referenced commands still parse or obviously match the current workflow.
+- **Incident rule**: if an `AGENTS.md` lied badly enough to waste time or cause a bug, fix it immediately or file a `P0` bead immediately, and complete that bead before declaring the current chunk done.
 
 ## Version Control
 
-We use **jj** (jujutsu), not git directly. Use the `/using-jj` skill for VCS operations.
-- Resolving conflicts? See the conflicts section in the jj skill.
-- Making PRs? Read the github file first.
-- Messing with the DAG? Read the surgery file.
+We use **jj** (jujutsu), not git directly. Use the `jj` skill for VCS operations.
+- Resolving conflicts? Open `reference/conflicts.md` from the `jj` skill.
+- Making PRs? Open `github.md` from the `jj` skill first.
+- Messing with the DAG? Open `surgery.md` from the `jj` skill first.
+
+### Why jj
+
+- No staging area. Working copy IS the commit.
+- `jj describe` is retroactive labeling, not “committing”.
+- Rewrites are trivial (`jj squash`, `jj rebase`, etc.), so capture progress now and reorganize later.
 
 ### JJ Rhythm
 
 **Commits are checkpoints, not milestones.**
 
-```
+```bash
 jj new                              # start fresh change
 # edit: one logical thing
-jj describe "bd-xyz: what you did"  # label it
+jj describe "<bead-id>: what you did"  # label it
 # repeat
 ```
 
@@ -109,16 +174,16 @@ We use **bd**. If this is your first time interacting with beads this session, r
 
 ```bash
 bd ready                    # see what's next
-bd show bd-xyz              # understand it
-bd claim bd-xyz             # you own it now
+bd show <bead-id>           # understand it
+bd claim <bead-id>          # you own it now
 jj new                      # start first change
 
 # --- this loop runs MANY times per bead ---
 # edit: one coherent thing (add fn, fix bug, write test)
-jj describe "bd-xyz: added validation for Foo"
+jj describe "<bead-id>: added validation for Foo"
 jj new
 # edit: next coherent thing
-jj describe "bd-xyz: tests for Foo validation"
+jj describe "<bead-id>: tests for Foo validation"
 jj new
 # ---
 
@@ -126,9 +191,11 @@ jj new
 cargo fmt --all
 just dylint                       # required boundary gate (crate layering)
 cargo clippy --all-features -- -D warnings
-cargo test
+cargo xtest
 
-bd close bd-xyz            # bead done, all acceptance criteria met
+# when the change touches slow or specialty surfaces, run their extra gates too
+
+bd close <bead-id>         # bead done, all acceptance criteria met
 bd ready                    # next bead
 ```
 
@@ -149,7 +216,7 @@ Each bead should be **one self-contained, independently doable thing**. If you'r
 
 **Structure for non-trivial beads:**
 
-```
+```text
 **Problem**
 What's wrong or missing. Be specific — file paths, error messages, code snippets.
 
@@ -169,7 +236,7 @@ How to fix it. Include implementation approach and code examples.
 **Epics & deps:**
 ```bash
 bd create "Auth overhaul" --type=epic
-bd create "Add OAuth support" --parent=bd-xxx
+bd create "Add OAuth support" --parent=<epic-id>
 bd dep add A B              # A depends on B
 ```
 

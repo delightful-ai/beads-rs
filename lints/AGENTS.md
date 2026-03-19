@@ -1,7 +1,6 @@
 ## Boundary
 This directory is the lint workspace for custom Dylint rules and their vendored lint authoring utilities.
-Depends on: `rustc_private` nightly APIs, `dylint_linting`, local `clippy_utils`.
-Depended on by: repo lint gates (`just dylint`, CI lint jobs).
+Depends on: `rustc_private` nightly APIs, `dylint_linting`, and local `clippy_utils`.
 NEVER: ship product/runtime behavior from here or encode business logic that belongs in `crates/*`.
 
 ## How to work here

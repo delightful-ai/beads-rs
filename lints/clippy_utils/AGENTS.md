@@ -1,7 +1,7 @@
 ## Boundary
 This directory is a vendored copy of upstream `clippy_utils` used to author custom lints.
-Depends on: pinned nightly compiler internals (`nightly-2026-01-22` in `/Users/darin/src/personal/beads-rs/lints/rust-toolchain.toml`).
-Depended on by: `/Users/darin/src/personal/beads-rs/lints/beads_lints`.
+Depends on: the pinned nightly toolchain in `lints/rust-toolchain.toml`.
+Depended on by: `lints/beads_lints`.
 NEVER: add beads-rs specific policy logic here.
 
 ## How to work here
