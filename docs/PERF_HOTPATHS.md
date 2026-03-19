@@ -255,7 +255,7 @@ Root-cause note for the review-loop receipts:
 
 Latest March 19 deterministic-harness migration receipts:
 
-- `cargo xtest` -> `27.620s` nextest, `1114 passed`
-- `cargo nextest run --profile slow --workspace --all-features --features slow-tests` -> `62.133s` nextest, `1235 passed`
+- `cargo xtest` -> `28.257s` nextest, `1128 passed`
+- `cargo nextest run --profile slow --workspace --all-features --features slow-tests` -> `64.217s` nextest, `1250 passed`
 - deterministic pathological-tailnet and crash/restart coverage now lives in `crates/beads-daemon/tests/repl/e2e.rs` as `replication_rig_pathological_tailnet_recovers_without_external_proxies` and `replication_rig_tailnet_restart_requires_fresh_handshakes`
-- `crates/beads-rs/tests/integration/daemon/repl_e2e.rs` now keeps only external-process smoke, tailnet-proxy product coverage, and other package-owned seams
+- `crates/beads-rs/tests/integration/daemon/repl_e2e.rs` now keeps only external-process smoke, one thin tailnet crash/restart product proof (`repl_daemon_tailnet_crash_restart_roundtrip`), tailnet-proxy coverage, and other package-owned seams
