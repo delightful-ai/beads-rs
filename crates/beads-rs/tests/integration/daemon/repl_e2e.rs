@@ -1,3 +1,9 @@
+//! External-process daemon replication smoke coverage.
+//!
+//! Keep deterministic `beads_daemon::testkit::e2e::ReplicationRig` coverage in
+//! `crates/beads-daemon/tests/repl/e2e.rs`; this file stays on assembly-owned
+//! `ReplRig` smoke and product seams.
+
 #![cfg(feature = "slow-tests")]
 
 use std::num::NonZeroU32;
