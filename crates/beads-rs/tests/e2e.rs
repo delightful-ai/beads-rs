@@ -94,10 +94,10 @@ fn e2e_replication_roundtrip() {
 }
 
 #[test]
-fn e2e_replication_converges_under_tailnet_profile() {
+fn e2e_replication_converges_under_tailnet_latency_profile() {
     let mut rig = ReplicationRig::new(3, 1_700_000_000_300);
     rig.pump(10);
-    rig.set_network_profile_all(NetworkProfile::tailnet(), 7);
+    rig.set_network_profile_all(NetworkProfile::tailnet_latency(), 7);
 
     let ids = [
         rig.node(0).create_issue("tailnet-0"),

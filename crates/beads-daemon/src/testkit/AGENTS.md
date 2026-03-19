@@ -11,6 +11,7 @@ Do not reintroduce wall-clock waits, process spawning, or runtime-dir ownership 
 - If the harness advances time with `TestClock`, `pump()`, or `advance_ms()`, timeout logic must use that same simulated clock. Do not mix in `Instant`, sleeps, or other host wall-clock checks for deterministic wait paths.
 - Prefer bounded harness loops that return protocol responses or receipts over host-speed-sensitive panic paths.
 - Keep network fault profiles explicit and reproducible; seed randomized behavior through the shared harness APIs instead of ad hoc per-test RNG state.
+- Use truthful network helper names here: `tailnet_latency` means latency and jitter only, while degraded/lossy cases should use `pathological_tailnet` or explicit `LinkFaultProfile` knobs.
 
 ## Verification
 - `cargo test -p beads-rs --features e2e-tests --test e2e -- e2e_replicated_fsync_timeout_receipt --exact --nocapture` proves the deterministic durability-timeout path in this subtree.

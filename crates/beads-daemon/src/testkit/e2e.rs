@@ -1480,6 +1480,37 @@ mod tests {
             );
         });
     }
+
+    #[test]
+    fn tailnet_latency_profiles_are_latency_only() {
+        let fault = LinkFaultProfile::tailnet_latency();
+        assert_eq!(fault.base_latency_ms, 20);
+        assert_eq!(fault.jitter_ms, 30);
+        assert_eq!(fault.loss_rate, 0.0);
+        assert_eq!(fault.duplicate_rate, 0.0);
+        assert_eq!(fault.reorder_rate, 0.0);
+        assert_eq!(fault.blackhole_after_frames, None);
+        assert_eq!(fault.blackhole_for_ms, None);
+        assert_eq!(fault.reset_after_frames, None);
+        assert_eq!(fault.one_way_loss, None);
+
+        let network = NetworkProfile::tailnet_latency();
+        assert_eq!(network.base_latency_ms, 20);
+        assert_eq!(network.jitter_ms, 30);
+        assert_eq!(network.loss_rate, 0.0);
+        assert_eq!(network.duplicate_rate, 0.0);
+        assert_eq!(network.reorder_rate, 0.0);
+    }
+
+    #[test]
+    fn pathological_tailnet_profile_keeps_fault_knobs_enabled() {
+        let profile = LinkFaultProfile::pathological_tailnet();
+        assert!(profile.loss_rate > 0.0);
+        assert!(profile.reorder_rate > 0.0);
+        assert_eq!(profile.blackhole_after_frames, Some(6));
+        assert_eq!(profile.blackhole_for_ms, Some(250));
+        assert_eq!(profile.reset_after_frames, Some(24));
+    }
 }
 
 fn ensure_tmp_root() -> PathBuf {
@@ -1504,8 +1535,8 @@ impl NetworkController {
         self.inner.borrow_mut().rng = StdRng::seed_from_u64(seed);
     }
 
-    pub fn tailnet(&self, seed: u64) {
-        self.set_fault_profile(LinkFaultProfile::tailnet());
+    pub fn tailnet_latency(&self, seed: u64) {
+        self.set_fault_profile(LinkFaultProfile::tailnet_latency());
         self.set_seed(seed);
     }
 
@@ -1578,7 +1609,7 @@ impl Default for LinkFaultProfile {
 }
 
 impl LinkFaultProfile {
-    pub fn tailnet() -> Self {
+    pub fn tailnet_latency() -> Self {
         Self {
             base_latency_ms: 20,
             jitter_ms: 30,
@@ -1586,7 +1617,7 @@ impl LinkFaultProfile {
         }
     }
 
-    pub fn pathological() -> Self {
+    pub fn pathological_tailnet() -> Self {
         Self {
             base_latency_ms: 15,
             jitter_ms: 40,
@@ -1651,7 +1682,7 @@ impl Default for NetworkProfile {
 }
 
 impl NetworkProfile {
-    pub fn tailnet() -> Self {
+    pub fn tailnet_latency() -> Self {
         Self {
             base_latency_ms: 20,
             jitter_ms: 30,

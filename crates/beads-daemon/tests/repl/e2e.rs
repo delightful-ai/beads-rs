@@ -35,7 +35,7 @@ fn assert_core_converged(rig: &mut ReplicationRig, max_steps: usize) {
 fn replication_rig_pathological_tailnet_recovers_without_external_proxies() {
     let mut rig = ReplicationRig::new(2, START_MS);
     rig.write_replica_roster();
-    let mut profile = LinkFaultProfile::pathological();
+    let mut profile = LinkFaultProfile::pathological_tailnet();
     profile.one_way_loss = Some(Direction::AtoB);
     profile.blackhole_after_frames = Some(5);
     profile.blackhole_for_ms = Some(200);
@@ -58,7 +58,7 @@ fn replication_rig_pathological_tailnet_recovers_without_external_proxies() {
 fn replication_rig_tailnet_restart_requires_fresh_handshakes() {
     let mut rig = ReplicationRig::new(2, START_MS);
     rig.write_replica_roster();
-    rig.set_link_fault_profile_all(LinkFaultProfile::tailnet(), 51);
+    rig.set_link_fault_profile_all(LinkFaultProfile::tailnet_latency(), 51);
 
     rig.assert_replication_ready(READY_STEPS);
 
