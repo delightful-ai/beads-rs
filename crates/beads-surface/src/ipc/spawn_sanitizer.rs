@@ -31,7 +31,7 @@ pub(super) fn spawn_daemon_process(
         let mut cmd = Command::new(program);
         cmd.args(args);
         prepare_daemon_spawn_command(&mut cmd);
-        return cmd.spawn().map(SpawnedDaemon::Child);
+        cmd.spawn().map(SpawnedDaemon::Child)
     }
 }
 
