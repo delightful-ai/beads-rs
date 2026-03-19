@@ -14,8 +14,8 @@ When you think you need to change this directory:
 4. Preserve upstream style and module layout.
 
 Verification:
-- `cargo test -p beads_lints --manifest-path /Users/darin/src/personal/beads-rs/lints/Cargo.toml`
-- `cargo dylint --path /Users/darin/src/personal/beads-rs/lints --pattern beads_lints --all`
+- `cargo test -p beads_lints --manifest-path lints/Cargo.toml`
+- `cargo dylint --path lints --pattern beads_lints --all`
 
 ## Don't copy this
 Legacy pattern: forking deep utility code for one lint rule.

@@ -3,9 +3,9 @@ This subtree holds superpowers workflow artifacts: design specs and executable p
 NEVER: treat this subtree as the canonical home for durable repo policy.
 
 ## Routing
-- [specs/](/Users/darin/src/personal/beads-rs/docs/superpowers/specs) captures design intent, goals, non-goals, and chosen direction.
-- [plans/](/Users/darin/src/personal/beads-rs/docs/superpowers/plans) captures agent-facing execution breakdowns for approved work.
-- Maintained repo docs still live elsewhere under [docs/](/Users/darin/src/personal/beads-rs/docs) or the owning subtree.
+- `docs/superpowers/specs/` captures design intent, goals, non-goals, and chosen direction.
+- `docs/superpowers/plans/` captures agent-facing execution breakdowns for approved work.
+- Maintained repo docs still live elsewhere under `docs/` or the owning subtree.
 
 ## Local rules
 - Keep files here dated; these are point-in-time workflow artifacts.

@@ -4,8 +4,8 @@ NEVER: assume a checkbox list here is still correct without verifying the live t
 
 ## Routing
 - Put chunked execution handoffs here when they are part of the superpowers workflow.
-- Pre-implementation design belongs in [../specs/](/Users/darin/src/personal/beads-rs/docs/superpowers/specs).
-- Non-superpowers working plans belong in [../../plans/](/Users/darin/src/personal/beads-rs/docs/plans).
+- Pre-implementation design belongs in `docs/superpowers/specs/`.
+- Non-superpowers working plans belong in `docs/plans/`.
 
 ## Local rules
 - Plans here should follow the real handoff contract used in this subtree: an agent-facing header with the required workflow/skill, chunked or checkbox task boundaries, explicit file ownership, explicit verification, and a paired spec link when design context lives next door.
