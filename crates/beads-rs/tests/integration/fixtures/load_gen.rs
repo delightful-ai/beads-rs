@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -69,8 +69,8 @@ pub struct LoadGenerator {
 }
 
 impl LoadGenerator {
-    pub fn new(repo: PathBuf) -> Self {
-        Self::with_client(repo, IpcClient::new())
+    pub fn for_runtime_dir(repo: PathBuf, runtime_dir: &Path) -> Self {
+        Self::with_client(repo, IpcClient::for_runtime_dir(runtime_dir))
     }
 
     pub fn with_client(repo: PathBuf, client: IpcClient) -> Self {
@@ -317,11 +317,24 @@ fn record_error(errors: &Mutex<Vec<LoadError>>, error: LoadError, max: usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn fixtures_load_gen_for_runtime_dir_uses_runtime_socket() {
+        let generator =
+            LoadGenerator::for_runtime_dir(PathBuf::from("/tmp/repo"), Path::new("/tmp/runtime"));
+        assert_eq!(
+            generator.client.socket_path(),
+            Path::new("/tmp/runtime/beads/daemon.sock")
+        );
+    }
 
     #[test]
     fn fixtures_load_gen_reports_failures_when_daemon_missing() {
         let temp = tempfile::TempDir::new().expect("temp repo");
-        let mut generator = LoadGenerator::new(temp.path().to_path_buf());
+        let runtime = tempfile::TempDir::new().expect("temp runtime");
+        let mut generator =
+            LoadGenerator::for_runtime_dir(temp.path().to_path_buf(), runtime.path());
         generator.config_mut().autostart = Autostart::Disabled;
         generator.config_mut().total_requests = 1;
         let report = generator.run();

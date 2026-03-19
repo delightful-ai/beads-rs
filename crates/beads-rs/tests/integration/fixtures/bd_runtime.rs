@@ -549,7 +549,7 @@ impl BdRuntimeRepo {
 
 impl Drop for BdRuntimeRepo {
     fn drop(&mut self) {
-        shutdown_daemon(self.runtime_dir());
+        shutdown_daemon(self.runtime_dir(), self.data_dir());
         self.sync_daemon_child_exit(Duration::from_secs(2));
     }
 }

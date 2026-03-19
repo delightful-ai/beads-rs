@@ -35,7 +35,6 @@ use super::bd_runtime::{
 use super::daemon_boundary::wal::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 use super::daemon_runtime::{crash_daemon, shutdown_daemon};
 use super::git::{init_bare_repo, init_repo_with_origin};
-use super::store_lock::unlock_store;
 use super::tailnet_proxy::{TailnetProfile, TailnetProxy, TailnetTrace, TailnetTraceMode};
 use super::temp;
 use super::timing;
@@ -333,7 +332,6 @@ impl ReplRig {
     }
 
     pub fn restart_node(&mut self, idx: usize) {
-        self.nodes[idx].unlock_store(self.store_id);
         self.nodes[idx].reset_ipc_connections();
         self.nodes[idx].start_daemon();
     }
@@ -893,10 +891,6 @@ impl Node {
         &self.listen_addr
     }
 
-    fn unlock_store(&self, store_id: StoreId) {
-        unlock_store(&self.data_dir, store_id).expect("unlock store");
-    }
-
     fn start_daemon(&mut self) {
         self.ensure_daemon_child_running();
         self.wait_for_admin_ready(IPC_RELOAD_REPLICATION_TIMEOUT);
@@ -953,12 +947,12 @@ impl Node {
     }
 
     fn crash_owned_daemon(&self) {
-        crash_daemon(&self.runtime_dir);
+        crash_daemon(&self.runtime_dir, &self.data_dir);
         self.sync_daemon_child_exit(Duration::from_secs(1));
     }
 
     fn shutdown_owned_daemon(&self) {
-        shutdown_daemon(&self.runtime_dir);
+        shutdown_daemon(&self.runtime_dir, &self.data_dir);
         if !self.sync_daemon_child_exit(Duration::from_secs(2)) {
             self.kill_owned_daemon_child(Duration::from_secs(1));
         }
