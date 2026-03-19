@@ -164,6 +164,9 @@ March 19 follow-through note:
 
 - `beads-rs-fblt.15` moved the deterministic restart/pathological tailnet proofs out of `crates/beads-rs/tests/integration/daemon/repl_e2e.rs` and into `crates/beads-daemon/tests/repl/e2e.rs` as `replication_rig_tailnet_restart_requires_fresh_handshakes` and `replication_rig_pathological_tailnet_recovers_without_external_proxies`
 - the historical March 14 receipts below intentionally keep the old `daemon::repl_e2e::*` names because those were the profiled test IDs at the time; the assembly harness now keeps only thin external-process smoke/proxy coverage
+- `beads-rs-81vj.4` made the built-in `bd daemon run` autostart path fail fast in test workflows by surfacing direct spawned-daemon early exits as immediate `DaemonUnavailable` errors; override programs remain launcher-compatible and wait for the socket instead
+- the autostart fd sanitizer now closes inherited non-stdio descriptors with child-side primitives on the primary supported dev platforms: macOS uses `posix_spawn(... POSIX_SPAWN_CLOEXEC_DEFAULT ...)`, Linux uses the `close_range` syscall, and unsupported Unix targets still keep the child-side `_SC_OPEN_MAX` fallback sweep
+- local proof receipts for that follow-through were `cargo test -p beads-surface ipc:: -- --nocapture` and `cargo test -p beads-rs --test integration cli::critical_path::test_auto_init_on_first_create -- --exact --nocapture`
 
 Warm runner burn-in receipts:
 
