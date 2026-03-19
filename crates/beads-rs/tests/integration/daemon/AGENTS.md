@@ -8,6 +8,7 @@ NEVER: keep a case here once it only proves daemon-owned runtime behavior, WAL i
 - Copy `lifecycle.rs`, `crash_recovery.rs`, or `store_lock.rs` for daemon ownership, stale socket/meta, restart, and operator-facing store-lock behavior.
 - Copy `logging.rs` or `realtime_smoke.rs` for runtime/log-dir/realtime wiring at the product seam.
 - Copy `repl_e2e.rs` only for multi-daemon external-process replication smoke, tailnet-proxy product coverage, or checkpoint/WAL behavior that truly needs the assembly harness.
+- Keep exactly one thin external restart-under-tailnet/proxy smoke in `repl_e2e.rs` for the shipped daemon restart + IPC reconnect + proxy-process seam; deeper backlog/fresh-handshake semantics stay in `crates/beads-daemon/tests/repl/e2e.rs`.
 - Deterministic restart or fault-profile replication proofs belong in `crates/beads-daemon/tests/repl/e2e.rs` via `beads_daemon::testkit::e2e::ReplicationRig`, not here.
 - If a case no longer needs the package/runtime seam, move it to `crates/beads-daemon/tests`.
 

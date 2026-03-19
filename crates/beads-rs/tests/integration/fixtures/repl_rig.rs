@@ -1067,6 +1067,41 @@ impl Node {
         }
     }
 
+    fn issue_observable(&self, issue_id: &str) -> bool {
+        let request = Request::Show {
+            ctx: ReadCtx::new(self.repo_dir.clone(), ReadConsistency::default()),
+            payload: IdPayload {
+                id: BeadId::parse(issue_id).expect("bead id"),
+            },
+        };
+        match self.send_request(&request) {
+            Err(err) if err.transience().is_retryable() => false,
+            Err(err) => panic!("show request failed for {issue_id}: {err:?}"),
+            Ok(Response::Ok {
+                ok: ResponsePayload::Query(QueryResult::Issue(issue)),
+            }) => {
+                assert_eq!(issue.id, issue_id);
+                true
+            }
+            Ok(Response::Err { err }) if err.code == CliErrorCode::NotFound.into() => false,
+            Ok(other) => panic!("unexpected show response for {issue_id}: {other:?}"),
+        }
+    }
+
+    pub fn assert_issue_stays_unobservable(&self, issue_id: &str, duration: Duration) {
+        let became_observable = wait::poll_until_with_phase(
+            "fixture.repl_rig.assert_issue_stays_unobservable",
+            format!("repo={} issue={issue_id}", self.repo_dir.display()),
+            duration,
+            || self.issue_observable(issue_id),
+        );
+        assert!(
+            !became_observable,
+            "node {} unexpectedly observed {issue_id} before restart",
+            self.repo_dir.display(),
+        );
+    }
+
     fn wait_for_admin_ready(&self, timeout: Duration) {
         let _phase = timing::scoped_phase_with_context(
             "fixture.repl_rig.wait_for_admin_ready",
@@ -1860,27 +1895,6 @@ mod tests {
 
     use super::*;
 
-    fn node_has_issue(node: &Node, issue_id: &str) -> bool {
-        let request = Request::Show {
-            ctx: ReadCtx::new(node.repo_dir().to_path_buf(), ReadConsistency::default()),
-            payload: IdPayload {
-                id: BeadId::parse(issue_id).expect("bead id"),
-            },
-        };
-        match node.send_request(&request) {
-            Err(err) if err.transience().is_retryable() => false,
-            Err(err) => panic!("show request failed for {issue_id}: {err:?}"),
-            Ok(Response::Ok {
-                ok: ResponsePayload::Query(QueryResult::Issue(issue)),
-            }) => {
-                assert_eq!(issue.id, issue_id);
-                true
-            }
-            Ok(Response::Err { err }) if err.code == CliErrorCode::NotFound.into() => false,
-            Ok(other) => panic!("unexpected show response for {issue_id}: {other:?}"),
-        }
-    }
-
     #[test]
     fn admin_fingerprint_requests_are_retry_safe() {
         let request = Request::Admin(AdminOp::Fingerprint {
@@ -1925,10 +1939,8 @@ mod tests {
 
         let post = rig.create_issue(0, "sibling-crash-post-0");
         rig.wait_for_show(0, &post, Duration::from_secs(10));
-        assert!(
-            !node_has_issue(rig.node(1), &post),
-            "crashed sibling-layout node should not observe post-crash writes before restart",
-        );
+        rig.node(1)
+            .assert_issue_stays_unobservable(&post, Duration::from_secs(1));
 
         rig.restart_node(1);
         rig.wait_for_admin_ready(1, Duration::from_secs(20));
