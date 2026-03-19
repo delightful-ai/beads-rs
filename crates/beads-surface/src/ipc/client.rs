@@ -96,6 +96,21 @@ fn ensure_private_socket_dir_path(dir: &Path) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+fn socket_parent_should_be_private(socket: &Path, dir: &Path) -> bool {
+    socket.file_name() == Some(std::ffi::OsStr::new("daemon.sock"))
+        && socket_dir_candidates()
+            .iter()
+            .any(|candidate| candidate == dir)
+}
+
+fn ensure_autostart_socket_parent(socket: &Path, dir: &Path) -> Result<(), std::io::Error> {
+    if socket_parent_should_be_private(socket, dir) {
+        ensure_private_socket_dir_path(dir)
+    } else {
+        ensure_socket_dir_path(dir)
+    }
+}
+
 /// Get the daemon socket path.
 pub fn socket_path() -> PathBuf {
     ensure_socket_dir()
@@ -512,7 +527,7 @@ fn connect_with_autostart_command_with_timeout(
                     socket.display()
                 ))
             })?;
-            ensure_socket_dir_path(dir)?;
+            ensure_autostart_socket_parent(socket, dir)?;
             let lock_path = dir.join("daemon.lock");
             maybe_remove_stale_lock(&lock_path, stale_lock_age);
 
@@ -1350,6 +1365,38 @@ mod tests {
         assert_eq!(
             mode, 0o755,
             "custom socket parent perms changed to {:o}",
+            mode
+        );
+    }
+
+    #[test]
+    fn connect_with_autostart_restricts_default_socket_parent() {
+        let temp = TempDir::new().expect("temp dir");
+        let runtime_dir = temp.path().join("runtime");
+        let _override = override_runtime_dir_for_tests(Some(runtime_dir.clone()));
+        let socket = socket_path();
+        let socket_parent = socket.parent().expect("socket parent");
+        fs::set_permissions(socket_parent, fs::Permissions::from_mode(0o755))
+            .expect("set permissive default socket parent");
+
+        let args = vec![OsString::from("-c"), OsString::from("exit 23")];
+        let err = connect_with_direct_autostart_for_test(
+            &socket,
+            Path::new("/bin/sh"),
+            &args,
+            Duration::from_millis(200),
+        )
+        .expect_err("autostart should fail");
+        assert!(matches!(err, IpcError::DaemonUnavailable(_)));
+
+        let mode = fs::metadata(socket_parent)
+            .expect("socket parent metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o700,
+            "default socket parent perms changed to {:o}",
             mode
         );
     }

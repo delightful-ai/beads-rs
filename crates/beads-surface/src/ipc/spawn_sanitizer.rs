@@ -92,7 +92,24 @@ impl SpawnedDaemon {
 
 #[cfg(all(test, unix, target_vendor = "apple"))]
 impl SpawnedDaemon {
-    fn terminate_for_test(&mut self) {}
+    fn terminate_for_test(&mut self) {
+        let Self::Pid(pid) = self;
+        if pid.try_wait().ok().flatten().is_some() {
+            return;
+        }
+
+        // Safety: `kill` and `waitpid` operate on the spawned child pid.
+        unsafe {
+            let _ = nix::libc::kill(pid.pid, nix::libc::SIGKILL);
+        }
+
+        let mut status = 0;
+        // Safety: `waitpid` reaps the child we just signaled if it is still live.
+        let rc = unsafe { nix::libc::waitpid(pid.pid, &mut status, 0) };
+        if rc > 0 {
+            pid.cached_status = Some(status);
+        }
+    }
 }
 
 #[cfg(not(target_vendor = "apple"))]
