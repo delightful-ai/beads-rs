@@ -77,6 +77,11 @@ pub fn store_meta_path(data_dir: &Path, store_id: StoreId) -> PathBuf {
     store_dir(data_dir, store_id).join("meta.json")
 }
 
+/// Pending store metadata transition path (`meta.pending.json`).
+pub fn store_meta_pending_path(data_dir: &Path, store_id: StoreId) -> PathBuf {
+    store_dir(data_dir, store_id).join("meta.pending.json")
+}
+
 /// Store lock file path (`store.lock`).
 pub fn store_lock_path(data_dir: &Path, store_id: StoreId) -> PathBuf {
     store_dir(data_dir, store_id).join("store.lock")

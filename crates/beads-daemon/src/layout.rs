@@ -49,6 +49,11 @@ impl DaemonLayout {
     }
 
     #[must_use]
+    pub fn store_meta_pending_path(&self, store_id: &StoreId) -> PathBuf {
+        self.store_dir(store_id).join("meta.pending.json")
+    }
+
+    #[must_use]
     pub fn store_lock_path(&self, store_id: &StoreId) -> PathBuf {
         self.store_dir(store_id).join("store.lock")
     }

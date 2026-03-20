@@ -136,6 +136,10 @@ pub fn store_meta_path(store_id: StoreId) -> PathBuf {
     moved::store_meta_path(&data_dir(), store_id)
 }
 
+pub fn store_meta_pending_path(store_id: StoreId) -> PathBuf {
+    moved::store_meta_pending_path(&data_dir(), store_id)
+}
+
 pub fn store_lock_path(store_id: StoreId) -> PathBuf {
     moved::store_lock_path(&data_dir(), store_id)
 }
