@@ -29,7 +29,6 @@ struct EventEntry {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 struct MemoryWalIndexState {
-    version: u64,
     origin_next_seq: BTreeMap<(NamespaceId, ReplicaId), u64>,
     events: BTreeMap<EventKey, EventEntry>,
     segments: BTreeMap<(NamespaceId, SegmentId), SegmentRow>,
@@ -126,12 +125,10 @@ impl WalIndexWriter for MemoryWalIndexWriter {
             .read()
             .expect("memory wal index lock poisoned")
             .clone();
-        let base_version = snapshot.version;
         Ok(Box::new(MemoryWalIndexTxn {
             state: Arc::clone(&self.state),
             txn_gate: Arc::clone(&self.txn_gate),
             working: snapshot,
-            base_version,
             committed: false,
         }))
     }
@@ -141,7 +138,6 @@ struct MemoryWalIndexTxn {
     state: Arc<RwLock<MemoryWalIndexState>>,
     txn_gate: Arc<AtomicBool>,
     working: MemoryWalIndexState,
-    base_version: u64,
     committed: bool,
 }
 
@@ -370,10 +366,7 @@ impl WalIndexTxn for MemoryWalIndexTxn {
             return Ok(());
         }
         let mut guard = self.state.write().expect("memory wal index lock poisoned");
-        let _ = self.base_version;
-        let mut working = std::mem::take(&mut self.working);
-        working.version = guard.version.wrapping_add(1);
-        *guard = working;
+        *guard = std::mem::take(&mut self.working);
         self.committed = true;
         self.txn_gate.store(false, Ordering::Release);
         Ok(())
@@ -662,6 +655,64 @@ mod tests {
             err,
             WalIndexError::ClientRequestIdReuseMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn model_snapshot_ignores_transaction_history() {
+        let namespace = NamespaceId::core();
+        let segment = SegmentRow::open(
+            namespace.clone(),
+            SegmentId::new(Uuid::from_bytes([8u8; 16])),
+            "seg-0".into(),
+            10,
+            crate::wal::WalCursorOffset::new(1),
+        );
+
+        let once = MemoryWalIndex::new();
+        let mut txn = once.writer().begin_txn().expect("begin txn");
+        txn.upsert_segment(&segment).expect("upsert segment");
+        txn.commit().expect("commit");
+
+        let twice = MemoryWalIndex::new();
+        let mut txn = twice.writer().begin_txn().expect("begin txn");
+        txn.upsert_segment(&segment).expect("upsert segment");
+        txn.commit().expect("commit first");
+        let mut txn = twice.writer().begin_txn().expect("begin txn");
+        txn.upsert_segment(&segment)
+            .expect("upsert segment idempotent");
+        txn.commit().expect("commit second");
+
+        assert_eq!(
+            once.reader()
+                .list_segments(&namespace)
+                .expect("list segments"),
+            twice
+                .reader()
+                .list_segments(&namespace)
+                .expect("list segments"),
+            "logical index state should match"
+        );
+        assert_eq!(
+            once.model_snapshot(),
+            twice.model_snapshot(),
+            "snapshot should not encode transaction history"
+        );
+
+        let snapshot = twice.model_snapshot();
+        let restored = MemoryWalIndex::from_snapshot(snapshot.clone());
+        assert_eq!(
+            restored.model_snapshot(),
+            snapshot,
+            "snapshot round-trip should preserve logical state"
+        );
+        assert_eq!(
+            restored
+                .reader()
+                .list_segments(&namespace)
+                .expect("list restored segments"),
+            vec![segment],
+            "restored index should expose the same reader-visible state"
+        );
     }
 
     #[test]

@@ -115,8 +115,6 @@ pub enum WalIndexError {
         namespace: String,
         origin: ReplicaId,
     },
-    #[error("wal index txn conflict: expected version {expected}, got {got}")]
-    ConcurrentWrite { expected: u64, got: u64 },
     #[error("equivocation for {namespace} {origin} seq {seq}")]
     Equivocation {
         namespace: NamespaceId,
@@ -176,7 +174,6 @@ impl WalIndexError {
             | WalIndexError::ReplicaLivenessRowDecode(_)
             | WalIndexError::CborDecode(_)
             | WalIndexError::CborEncode(_)
-            | WalIndexError::ConcurrentWrite { .. }
             | WalIndexError::OriginSeqOverflow { .. } => ProtocolErrorCode::IndexCorrupt.into(),
             WalIndexError::Sql { .. } => ProtocolErrorCode::IndexCorrupt.into(),
             WalIndexError::Io { .. } => CliErrorCode::IoError.into(),
@@ -195,7 +192,6 @@ impl WalIndexError {
             WalIndexError::Equivocation { .. }
             | WalIndexError::EventConflict { .. }
             | WalIndexError::ClientRequestIdReuseMismatch { .. } => Transience::Permanent,
-            WalIndexError::ConcurrentWrite { .. } => Transience::Retryable,
             _ => Transience::Retryable,
         }
     }
@@ -312,7 +308,6 @@ impl WalIndexError {
             | WalIndexError::ReplicaLivenessRowDecode(_)
             | WalIndexError::CborDecode(_)
             | WalIndexError::CborEncode(_)
-            | WalIndexError::ConcurrentWrite { .. }
             | WalIndexError::OriginSeqOverflow { .. }
             | WalIndexError::Sql { .. } => ErrorPayload::new(
                 ProtocolErrorCode::IndexCorrupt.into(),
