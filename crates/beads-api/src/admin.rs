@@ -6,7 +6,7 @@ use std::fmt;
 use std::path::PathBuf;
 
 use beads_core::{
-    Applied, ContentHash, Durable, NamespaceId, ReplicaId, ReplicaRole, SegmentId, StoreId,
+    Applied, ContentHash, Durable, NamespaceId, ReplicaId, ReplicaRole, SegmentId, Seq0, StoreId,
     Watermarks,
 };
 
@@ -121,9 +121,40 @@ pub struct AdminReplicationPeer {
     pub peer: ReplicaId,
     pub last_ack_at_ms: u64,
     pub diverged: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<AdminReplicationPeerState>,
     pub lag_by_namespace: Vec<AdminReplicationNamespace>,
     pub watermarks_durable: Watermarks<Durable>,
     pub watermarks_applied: Watermarks<Applied>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminReplicationPeerState {
+    Healthy,
+    Quarantined {
+        reason: AdminReplicationQuarantineReason,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminReplicationQuarantineReason {
+    DivergedHead {
+        kind: AdminReplicationWatermarkKind,
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        seq: Seq0,
+        expected: ContentHash,
+        got: ContentHash,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AdminReplicationWatermarkKind {
+    Durable,
+    Applied,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -815,5 +846,42 @@ mod tests {
         let parsed: AdminStatusOutput =
             serde_json::from_value(value).expect("deserialize old admin status payload");
         assert_eq!(parsed.replication_listen_addr, None);
+    }
+
+    #[test]
+    fn admin_status_output_deserializes_replication_without_state() {
+        let status = AdminStatusOutput {
+            store_id: StoreId::new(Uuid::nil()),
+            replica_id: ReplicaId::new(Uuid::nil()),
+            replication_listen_addr: None,
+            namespaces: vec![NamespaceId::core()],
+            watermarks_applied: Watermarks::new(),
+            watermarks_durable: Watermarks::new(),
+            last_clock_anomaly: None,
+            wal: Vec::new(),
+            wal_warnings: Vec::new(),
+            replication: vec![AdminReplicationPeer {
+                peer: ReplicaId::new(Uuid::from_u128(1)),
+                last_ack_at_ms: 0,
+                diverged: true,
+                state: Some(AdminReplicationPeerState::Healthy),
+                lag_by_namespace: Vec::new(),
+                watermarks_durable: Watermarks::new(),
+                watermarks_applied: Watermarks::new(),
+            }],
+            replica_liveness: Vec::new(),
+            checkpoints: Vec::new(),
+        };
+        let mut value = serde_json::to_value(status).expect("serialize status");
+        value["replication"][0]
+            .as_object_mut()
+            .expect("replication peer object")
+            .remove("state");
+
+        let parsed: AdminStatusOutput =
+            serde_json::from_value(value).expect("deserialize old replication peer payload");
+        assert_eq!(parsed.replication.len(), 1);
+        assert!(parsed.replication[0].diverged);
+        assert!(parsed.replication[0].state.is_none());
     }
 }

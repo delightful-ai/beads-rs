@@ -449,4 +449,67 @@ mod tests {
             _ => panic!("expected timeout"),
         }
     }
+
+    #[test]
+    fn quarantined_peer_keeps_quorum_pending_while_recovery_is_possible() {
+        let namespace = NamespaceId::core();
+        let local = replica(30);
+        let peer = replica(31);
+        let roster = roster(vec![
+            ReplicaEntry {
+                replica_id: local,
+                name: "local".to_string(),
+                role: ReplicaDurabilityRole::anchor(true),
+                allowed_namespaces: None,
+                expire_after_ms: None,
+            },
+            ReplicaEntry {
+                replica_id: peer,
+                name: "peer".to_string(),
+                role: ReplicaDurabilityRole::peer(true),
+                allowed_namespaces: None,
+                expire_after_ms: None,
+            },
+        ]);
+
+        let peer_acks = Arc::new(Mutex::new(PeerAckTable::new()));
+        let coordinator =
+            DurabilityCoordinator::new(local, policy_peers(), Some(roster), peer_acks.clone());
+
+        let mut durable: WatermarkState<Durable> = std::collections::BTreeMap::new();
+        durable.entry(namespace.clone()).or_default().insert(
+            local,
+            Watermark::new(Seq0::new(2), HeadStatus::Known([1u8; 32])).unwrap(),
+        );
+        peer_acks
+            .lock()
+            .unwrap()
+            .update_peer(peer, &durable, None, 10)
+            .unwrap();
+
+        let mut diverged: WatermarkState<Durable> = std::collections::BTreeMap::new();
+        diverged.entry(namespace.clone()).or_default().insert(
+            local,
+            Watermark::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap(),
+        );
+        let _ = peer_acks
+            .lock()
+            .unwrap()
+            .update_peer(peer, &diverged, None, 11)
+            .unwrap_err();
+
+        let poll = coordinator
+            .poll_replicated(
+                &namespace,
+                local,
+                Seq1::from_u64(2).unwrap(),
+                NonZeroU32::new(1).unwrap(),
+            )
+            .expect("quarantined peer should remain waitable");
+
+        assert!(matches!(
+            poll,
+            ReplicatedPoll::Pending { ref acked_by, .. } if acked_by.is_empty()
+        ));
+    }
 }

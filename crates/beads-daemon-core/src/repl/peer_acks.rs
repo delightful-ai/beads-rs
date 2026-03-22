@@ -18,11 +18,38 @@ pub struct PeerAckTable {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum PeerAckQuarantineReason {
+    DivergedHead {
+        kind: WatermarkKind,
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        seq: Seq0,
+        expected: [u8; 32],
+        got: [u8; 32],
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub enum PeerAckStatus {
+    #[default]
+    Healthy,
+    Quarantined {
+        reason: PeerAckQuarantineReason,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WatermarkKind {
+    Durable,
+    Applied,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct PeerAckState {
     durable: Watermarks<Durable>,
     applied: Watermarks<Applied>,
     last_ack_at_ms: u64,
-    diverged: bool,
+    status: PeerAckStatus,
 }
 
 impl Default for PeerAckState {
@@ -31,7 +58,7 @@ impl Default for PeerAckState {
             durable: Watermarks::new(),
             applied: Watermarks::new(),
             last_ack_at_ms: 0,
-            diverged: false,
+            status: PeerAckStatus::Healthy,
         }
     }
 }
@@ -42,7 +69,7 @@ pub struct PeerAckSnapshot {
     pub durable: Watermarks<Durable>,
     pub applied: Watermarks<Applied>,
     pub last_ack_at_ms: u64,
-    pub diverged: bool,
+    pub status: PeerAckStatus,
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -79,11 +106,19 @@ pub enum PeerAckError {
         source: WatermarkError,
     },
 
-    #[error("peer {peer} is marked diverged")]
-    PeerDiverged { peer: ReplicaId },
+    #[error("peer {peer} is quarantined: {reason:?}")]
+    PeerQuarantined {
+        peer: ReplicaId,
+        reason: PeerAckQuarantineReason,
+    },
 }
 
 pub type PeerAckResult<T> = Result<T, Box<PeerAckError>>;
+
+enum WatermarkUpdateError {
+    Peer(Box<PeerAckError>),
+    Quarantine(PeerAckQuarantineReason),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QuorumOutcome {
@@ -129,7 +164,7 @@ impl PeerAckTable {
                     durable: state.durable,
                     applied: state.applied,
                     last_ack_at_ms: state.last_ack_at_ms,
-                    diverged: state.diverged,
+                    status: state.status,
                 }
             })
             .collect()
@@ -147,15 +182,45 @@ impl PeerAckTable {
         now_ms: u64,
     ) -> PeerAckResult<()> {
         let state = self.peers.entry(peer).or_default();
-        if state.diverged {
-            return Err(Box::new(PeerAckError::PeerDiverged { peer }));
+        if let PeerAckStatus::Quarantined { reason } = &state.status {
+            if !reason.is_recovered_by(durable, applied) {
+                return Err(Box::new(PeerAckError::PeerQuarantined {
+                    peer,
+                    reason: reason.clone(),
+                }));
+            }
+            state.status = PeerAckStatus::Healthy;
         }
-        update_watermarks(&mut state.durable, peer, durable, &mut state.diverged)?;
 
-        if let Some(applied) = applied {
-            update_watermarks(&mut state.applied, peer, applied, &mut state.diverged)?;
+        if let Err(err) =
+            update_watermarks(&mut state.durable, peer, durable, WatermarkKind::Durable)
+        {
+            return match err {
+                WatermarkUpdateError::Peer(err) => Err(err),
+                WatermarkUpdateError::Quarantine(reason) => {
+                    state.status = PeerAckStatus::Quarantined {
+                        reason: reason.clone(),
+                    };
+                    Err(Box::new(reason.into_peer_error(peer)))
+                }
+            };
+        }
+        if let Some(applied) = applied
+            && let Err(err) =
+                update_watermarks(&mut state.applied, peer, applied, WatermarkKind::Applied)
+        {
+            return match err {
+                WatermarkUpdateError::Peer(err) => Err(err),
+                WatermarkUpdateError::Quarantine(reason) => {
+                    state.status = PeerAckStatus::Quarantined {
+                        reason: reason.clone(),
+                    };
+                    Err(Box::new(reason.into_peer_error(peer)))
+                }
+            };
         }
 
+        state.status = PeerAckStatus::Healthy;
         state.last_ack_at_ms = now_ms;
         Ok(())
     }
@@ -174,7 +239,7 @@ impl PeerAckTable {
             .iter()
             .filter_map(|peer| {
                 let state = self.peers.get(peer)?;
-                if state.diverged {
+                if !state.status.is_healthy() {
                     return None;
                 }
                 let acked_seq = state
@@ -206,12 +271,11 @@ impl PeerAckTable {
 
         for peer in eligible {
             let state = self.peers.get(peer);
-            if state.map(|state| state.diverged).unwrap_or(false) {
-                continue;
-            }
             eligible_total += 1;
-
             if let Some(state) = state {
+                if !state.status.is_healthy() {
+                    continue;
+                }
                 let acked_seq = state
                     .durable
                     .get(namespace, origin)
@@ -251,8 +315,8 @@ fn update_watermarks<K>(
     watermarks: &mut Watermarks<K>,
     peer: ReplicaId,
     updates: &WatermarkState<K>,
-    diverged: &mut bool,
-) -> PeerAckResult<()> {
+    kind: WatermarkKind,
+) -> Result<(), WatermarkUpdateError> {
     for (namespace, origins) in updates {
         for (origin, watermark) in origins {
             let seq0 = watermark.seq();
@@ -263,13 +327,15 @@ fn update_watermarks<K>(
                 .unwrap_or((Seq0::ZERO, HeadStatus::Genesis));
 
             if seq0 < current_seq {
-                return Err(Box::new(PeerAckError::NonMonotonic {
-                    peer,
-                    namespace: namespace.clone(),
-                    origin: *origin,
-                    current: current_seq,
-                    attempted: seq0,
-                }));
+                return Err(WatermarkUpdateError::Peer(Box::new(
+                    PeerAckError::NonMonotonic {
+                        peer,
+                        namespace: namespace.clone(),
+                        origin: *origin,
+                        current: current_seq,
+                        attempted: seq0,
+                    },
+                )));
             }
 
             if seq0 == current_seq
@@ -277,15 +343,16 @@ fn update_watermarks<K>(
                     (current_head, incoming_head)
                 && expected != got
             {
-                *diverged = true;
-                return Err(Box::new(PeerAckError::Diverged {
-                    peer,
-                    namespace: namespace.clone(),
-                    origin: *origin,
-                    seq: seq0,
-                    expected,
-                    got,
-                }));
+                return Err(WatermarkUpdateError::Quarantine(
+                    PeerAckQuarantineReason::DivergedHead {
+                        kind,
+                        namespace: namespace.clone(),
+                        origin: *origin,
+                        seq: seq0,
+                        expected,
+                        got,
+                    },
+                ));
             }
 
             watermarks
@@ -296,10 +363,64 @@ fn update_watermarks<K>(
                     origin: *origin,
                     source,
                 })
-                .map_err(Box::new)?;
+                .map_err(Box::new)
+                .map_err(WatermarkUpdateError::Peer)?;
         }
     }
     Ok(())
+}
+
+impl PeerAckQuarantineReason {
+    fn is_recovered_by(
+        &self,
+        durable: &WatermarkState<Durable>,
+        applied: Option<&WatermarkState<Applied>>,
+    ) -> bool {
+        match self {
+            Self::DivergedHead {
+                kind,
+                namespace,
+                origin,
+                seq,
+                ..
+            } => match kind {
+                WatermarkKind::Durable => durable
+                    .get(namespace)
+                    .and_then(|origins| origins.get(origin))
+                    .is_some_and(|watermark| watermark.seq() > *seq),
+                WatermarkKind::Applied => applied
+                    .and_then(|state| state.get(namespace))
+                    .and_then(|origins| origins.get(origin))
+                    .is_some_and(|watermark| watermark.seq() > *seq),
+            },
+        }
+    }
+
+    fn into_peer_error(self, peer: ReplicaId) -> PeerAckError {
+        match self {
+            Self::DivergedHead {
+                kind: _,
+                namespace,
+                origin,
+                seq,
+                expected,
+                got,
+            } => PeerAckError::Diverged {
+                peer,
+                namespace,
+                origin,
+                seq,
+                expected,
+                got,
+            },
+        }
+    }
+}
+
+impl PeerAckStatus {
+    fn is_healthy(&self) -> bool {
+        matches!(self, Self::Healthy)
+    }
 }
 
 #[cfg(test)]
@@ -375,6 +496,46 @@ mod tests {
     }
 
     #[test]
+    fn diverged_peer_recovers_after_advancing_past_conflict() {
+        let peer = replica(30);
+        let origin = replica(31);
+        let ns = namespace();
+        let mut table = PeerAckTable::new();
+        let mut eligible = BTreeSet::new();
+        eligible.insert(peer);
+        table.set_eligibility(ns.clone(), eligible);
+
+        let mut durable: WatermarkState<Durable> = BTreeMap::new();
+        durable.entry(ns.clone()).or_default().insert(
+            origin,
+            Watermark::new(Seq0::new(2), HeadStatus::Known([1u8; 32])).unwrap(),
+        );
+        table.update_peer(peer, &durable, None, 10).unwrap();
+
+        let mut diverged: WatermarkState<Durable> = BTreeMap::new();
+        diverged.entry(ns.clone()).or_default().insert(
+            origin,
+            Watermark::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap(),
+        );
+        let err = table.update_peer(peer, &diverged, None, 11).unwrap_err();
+        assert!(matches!(*err, PeerAckError::Diverged { .. }));
+
+        let mut recovered: WatermarkState<Durable> = BTreeMap::new();
+        recovered.entry(ns.clone()).or_default().insert(
+            origin,
+            Watermark::new(Seq0::new(3), HeadStatus::Known([3u8; 32])).unwrap(),
+        );
+        table.update_peer(peer, &recovered, None, 12).unwrap();
+
+        let acked = table.acked_by(&ns, &origin, Seq0::new(3));
+        assert_eq!(acked, vec![peer]);
+        assert!(matches!(
+            table.satisfied_k(&ns, &origin, Seq0::new(3), 1),
+            QuorumOutcome::Satisfied { .. }
+        ));
+    }
+
+    #[test]
     fn satisfied_k_distinguishes_failure_modes() {
         let ns = namespace();
         let origin = replica(5);
@@ -420,5 +581,106 @@ mod tests {
             insufficient,
             QuorumOutcome::InsufficientEligible { .. }
         ));
+    }
+
+    #[test]
+    fn quarantined_peer_stays_quarantined_until_conflicted_watermark_advances() {
+        let peer = replica(40);
+        let origin = replica(41);
+        let other_origin = replica(42);
+        let ns = namespace();
+        let mut table = PeerAckTable::new();
+        let mut eligible = BTreeSet::new();
+        eligible.insert(peer);
+        table.set_eligibility(ns.clone(), eligible);
+
+        let mut durable: WatermarkState<Durable> = BTreeMap::new();
+        durable.entry(ns.clone()).or_default().insert(
+            origin,
+            Watermark::new(Seq0::new(2), HeadStatus::Known([1u8; 32])).unwrap(),
+        );
+        table.update_peer(peer, &durable, None, 10).unwrap();
+
+        let mut diverged: WatermarkState<Durable> = BTreeMap::new();
+        diverged.entry(ns.clone()).or_default().insert(
+            origin,
+            Watermark::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap(),
+        );
+        table.update_peer(peer, &diverged, None, 11).unwrap_err();
+
+        let mut unrelated: WatermarkState<Durable> = BTreeMap::new();
+        unrelated.entry(ns.clone()).or_default().insert(
+            other_origin,
+            Watermark::new(Seq0::new(5), HeadStatus::Known([5u8; 32])).unwrap(),
+        );
+        let err = table.update_peer(peer, &unrelated, None, 12).unwrap_err();
+        assert!(matches!(*err, PeerAckError::PeerQuarantined { .. }));
+
+        let mut same_conflict: WatermarkState<Durable> = BTreeMap::new();
+        same_conflict.entry(ns.clone()).or_default().insert(
+            origin,
+            Watermark::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap(),
+        );
+        let err = table
+            .update_peer(peer, &same_conflict, None, 13)
+            .unwrap_err();
+        assert!(matches!(*err, PeerAckError::PeerQuarantined { .. }));
+
+        let mut recovered: WatermarkState<Durable> = BTreeMap::new();
+        recovered.entry(ns.clone()).or_default().insert(
+            origin,
+            Watermark::new(Seq0::new(3), HeadStatus::Known([3u8; 32])).unwrap(),
+        );
+        table.update_peer(peer, &recovered, None, 14).unwrap();
+    }
+
+    #[test]
+    fn applied_quarantine_recovers_only_from_applied_advance() {
+        let peer = replica(50);
+        let origin = replica(51);
+        let ns = namespace();
+        let mut table = PeerAckTable::new();
+        let mut eligible = BTreeSet::new();
+        eligible.insert(peer);
+        table.set_eligibility(ns.clone(), eligible);
+
+        let durable: WatermarkState<Durable> = BTreeMap::new();
+        let mut applied: WatermarkState<Applied> = BTreeMap::new();
+        applied.entry(ns.clone()).or_default().insert(
+            origin,
+            Watermark::new(Seq0::new(2), HeadStatus::Known([1u8; 32])).unwrap(),
+        );
+        table
+            .update_peer(peer, &durable, Some(&applied), 10)
+            .unwrap();
+
+        let mut diverged_applied: WatermarkState<Applied> = BTreeMap::new();
+        diverged_applied.entry(ns.clone()).or_default().insert(
+            origin,
+            Watermark::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap(),
+        );
+        table
+            .update_peer(peer, &durable, Some(&diverged_applied), 11)
+            .unwrap_err();
+
+        let mut durable_advance: WatermarkState<Durable> = BTreeMap::new();
+        durable_advance.entry(ns.clone()).or_default().insert(
+            origin,
+            Watermark::new(Seq0::new(3), HeadStatus::Known([3u8; 32])).unwrap(),
+        );
+        let empty_applied: WatermarkState<Applied> = BTreeMap::new();
+        let err = table
+            .update_peer(peer, &durable_advance, Some(&empty_applied), 12)
+            .unwrap_err();
+        assert!(matches!(*err, PeerAckError::PeerQuarantined { .. }));
+
+        let mut applied_advance: WatermarkState<Applied> = BTreeMap::new();
+        applied_advance.entry(ns.clone()).or_default().insert(
+            origin,
+            Watermark::new(Seq0::new(3), HeadStatus::Known([3u8; 32])).unwrap(),
+        );
+        table
+            .update_peer(peer, &durable, Some(&applied_advance), 13)
+            .unwrap();
     }
 }

@@ -46,6 +46,20 @@ impl ValidatedAck {
     }
 }
 
+fn snapshot_peer_ack(
+    allowed_namespaces: &[NamespaceId],
+    durable: WatermarkState<Durable>,
+    applied: Option<WatermarkState<Applied>>,
+) -> Result<Option<ValidatedAck>, ReplError> {
+    if durable.is_empty() && applied.as_ref().is_none_or(WatermarkState::is_empty) {
+        return Ok(None);
+    }
+
+    AllowedNamespaces::new(allowed_namespaces)
+        .validate_ack(Ack { durable, applied })
+        .map(Some)
+}
+
 #[derive(Debug, Clone)]
 struct AllowedNamespaces(BTreeSet<NamespaceId>);
 
@@ -798,6 +812,14 @@ impl Session<Inbound, Connecting> {
             return self.fail(error);
         }
         let wants = self.initial_wants(&hello.seen_durable, &incoming_namespaces);
+        let peer_ack = match snapshot_peer_ack(
+            accepted_namespaces.as_slice(),
+            hello.seen_durable,
+            hello.seen_applied,
+        ) {
+            Ok(ack) => ack,
+            Err(error) => return self.fail(error),
+        };
         let peer = SessionPeer {
             replica_id: hello.sender_replica_id,
             store_epoch: hello.store_epoch,
@@ -809,6 +831,9 @@ impl Session<Inbound, Connecting> {
         };
         let session = self.with_streaming(peer);
         let mut actions = vec![SessionAction::Send(ReplMessage::Welcome(welcome))];
+        if let Some(ack) = peer_ack {
+            actions.push(SessionAction::PeerAck(ack));
+        }
         if !wants.is_empty() {
             actions.push(SessionAction::Send(ReplMessage::Want(Want { want: wants })));
         }
@@ -868,6 +893,16 @@ where
             return self.invalid_request("HELLO live_stream changed");
         }
         let mut actions = vec![SessionAction::Send(ReplMessage::Welcome(welcome))];
+        if let Some(ack) = match snapshot_peer_ack(
+            peer.accepted_namespaces.as_slice(),
+            hello.seen_durable,
+            hello.seen_applied,
+        ) {
+            Ok(ack) => ack,
+            Err(error) => return self.fail(error),
+        } {
+            actions.push(SessionAction::PeerAck(ack));
+        }
         if !wants.is_empty() {
             actions.push(SessionAction::Send(ReplMessage::Want(Want { want: wants })));
         }
@@ -917,6 +952,14 @@ impl Session<Outbound, Handshaking> {
         }
 
         let wants = self.initial_wants(&welcome.receiver_seen_durable, &incoming_namespaces);
+        let peer_ack = match snapshot_peer_ack(
+            welcome.accepted_namespaces.as_slice(),
+            welcome.receiver_seen_durable.clone(),
+            welcome.receiver_seen_applied.clone(),
+        ) {
+            Ok(ack) => ack,
+            Err(error) => return self.fail(error),
+        };
         let peer = SessionPeer {
             replica_id: welcome.receiver_replica_id,
             store_epoch: welcome.store_epoch,
@@ -928,11 +971,13 @@ impl Session<Outbound, Handshaking> {
         };
         self.last_accepted_welcome_nonce = Some(welcome.welcome_nonce);
         let session = self.with_streaming(peer);
-        let actions = if wants.is_empty() {
-            Vec::new()
-        } else {
-            vec![SessionAction::Send(ReplMessage::Want(Want { want: wants }))]
-        };
+        let mut actions = Vec::new();
+        if let Some(ack) = peer_ack {
+            actions.push(SessionAction::PeerAck(ack));
+        }
+        if !wants.is_empty() {
+            actions.push(SessionAction::Send(ReplMessage::Want(Want { want: wants })));
+        }
         (session, actions)
     }
 }
@@ -990,6 +1035,16 @@ where
             actions.push(SessionAction::PeerWant(Want { want: resend }));
         }
         let wants = self.initial_wants(&welcome.receiver_seen_durable, &peer.incoming_namespaces);
+        if let Some(ack) = match snapshot_peer_ack(
+            peer.accepted_namespaces.as_slice(),
+            welcome.receiver_seen_durable,
+            welcome.receiver_seen_applied,
+        ) {
+            Ok(ack) => ack,
+            Err(error) => return self.fail(error),
+        } {
+            actions.push(SessionAction::PeerAck(ack));
+        }
         if !wants.is_empty() {
             actions.push(SessionAction::Send(ReplMessage::Want(Want { want: wants })));
         }
@@ -2189,6 +2244,93 @@ mod tests {
     }
 
     #[test]
+    fn inbound_handshake_emits_peer_ack_from_hello_snapshot() {
+        let (mut store, identity, replica) = base_store();
+        let limits = Limits::default();
+        let admission = AdmissionController::new(&limits);
+        let mut config = SessionConfig::new(identity, replica, &limits);
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
+
+        let session = InboundConnecting::new(config, limits, admission);
+        let origin = ReplicaId::new(Uuid::from_bytes([8u8; 16]));
+        let mut seen_durable = WatermarkState::new();
+        seen_durable.entry(NamespaceId::core()).or_default().insert(
+            origin,
+            Watermark::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap(),
+        );
+        let hello = Hello {
+            protocol_version: PROTOCOL_VERSION_V1,
+            min_protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            sender_replica_id: ReplicaId::new(Uuid::from_bytes([7u8; 16])),
+            hello_nonce: 10,
+            max_frame_bytes: 1024,
+            requested_namespaces: vec![NamespaceId::core()].into(),
+            offered_namespaces: vec![NamespaceId::core()].into(),
+            seen_durable: seen_durable.clone(),
+            seen_applied: None,
+            capabilities: Capabilities {
+                supports_snapshots: false,
+                supports_live_stream: true,
+                supports_compression: false,
+            },
+        };
+
+        let (_session, actions) = apply_inbound_hello(session, hello, &mut store);
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            SessionAction::PeerAck(ack) if ack.durable() == &seen_durable && ack.applied().is_none()
+        )));
+    }
+
+    #[test]
+    fn inbound_handshake_rejects_snapshot_outside_negotiated_namespaces() {
+        let (mut store, identity, replica) = base_store();
+        let limits = Limits::default();
+        let admission = AdmissionController::new(&limits);
+        let mut config = SessionConfig::new(identity, replica, &limits);
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
+
+        let session = InboundConnecting::new(config, limits, admission);
+        let other = NamespaceId::parse("other").unwrap();
+        let origin = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
+        let mut seen_durable = WatermarkState::new();
+        seen_durable.entry(other).or_default().insert(
+            origin,
+            Watermark::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap(),
+        );
+        let hello = Hello {
+            protocol_version: PROTOCOL_VERSION_V1,
+            min_protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            sender_replica_id: ReplicaId::new(Uuid::from_bytes([7u8; 16])),
+            hello_nonce: 10,
+            max_frame_bytes: 1024,
+            requested_namespaces: vec![NamespaceId::core()].into(),
+            offered_namespaces: vec![NamespaceId::core()].into(),
+            seen_durable,
+            seen_applied: None,
+            capabilities: Capabilities {
+                supports_snapshots: false,
+                supports_live_stream: true,
+                supports_compression: false,
+            },
+        };
+
+        let (session, actions) = apply_inbound_hello(session, hello, &mut store);
+        assert!(matches!(session, SessionState::Closed(_)));
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            SessionAction::Send(ReplMessage::Error(payload))
+                if payload.code == ProtocolErrorCode::NamespacePolicyViolation.into()
+        )));
+    }
+
+    #[test]
     fn hello_replay_accepts_reordered_namespaces() {
         let (mut store, identity, replica) = base_store();
         let limits = Limits::default();
@@ -2839,6 +2981,54 @@ mod tests {
         let (session, _actions) =
             handle_outbound_message(session, WireReplMessage::Welcome(welcome), &mut store, 0);
         assert!(matches!(session, SessionState::StreamingSnapshot(_)));
+    }
+
+    #[test]
+    fn outbound_handshake_emits_peer_ack_from_welcome_snapshot() {
+        let (mut store, identity, replica) = base_store();
+        let limits = Limits::default();
+        let admission = AdmissionController::new(&limits);
+        let mut config = SessionConfig::new(identity, replica, &limits);
+        config.requested_namespaces = vec![NamespaceId::core()].into();
+        config.offered_namespaces = vec![NamespaceId::core()].into();
+
+        let session = OutboundConnecting::new(config, limits, admission);
+        let (session, action) = session.begin_handshake(&store, 0);
+        let hello_nonce = match action {
+            SessionAction::Send(ReplMessage::Hello(hello)) => hello.hello_nonce,
+            other => panic!("expected hello action, got {other:?}"),
+        };
+        let session = SessionState::Handshaking(session);
+        let origin = ReplicaId::new(Uuid::from_bytes([14u8; 16]));
+        let mut receiver_seen_durable = WatermarkState::new();
+        receiver_seen_durable
+            .entry(NamespaceId::core())
+            .or_default()
+            .insert(
+                origin,
+                Watermark::new(Seq0::new(3), HeadStatus::Known([3u8; 32])).unwrap(),
+            );
+
+        let welcome = proto::Welcome {
+            protocol_version: PROTOCOL_VERSION_V1,
+            store_id: identity.store_id,
+            store_epoch: identity.store_epoch,
+            receiver_replica_id: ReplicaId::new(Uuid::from_bytes([13u8; 16])),
+            welcome_nonce: hello_nonce,
+            accepted_namespaces: vec![NamespaceId::core()].into(),
+            receiver_seen_durable: receiver_seen_durable.clone(),
+            receiver_seen_applied: None,
+            live_stream_enabled: true,
+            max_frame_bytes: 1024,
+        };
+
+        let (_session, actions) =
+            handle_outbound_message(session, WireReplMessage::Welcome(welcome), &mut store, 0);
+        assert!(actions.iter().any(|action| matches!(
+            action,
+            SessionAction::PeerAck(ack)
+                if ack.durable() == &receiver_seen_durable && ack.applied().is_none()
+        )));
     }
 
     #[test]
