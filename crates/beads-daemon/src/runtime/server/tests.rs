@@ -27,7 +27,9 @@ use crate::core::{
     Sha256, StoreEpoch, StoreId, StoreIdentity, TxnId, Watermark, Watermarks,
 };
 use crate::runtime::core::{Daemon, insert_store_for_tests};
-use crate::runtime::durability_coordinator::DurabilityCoordinator;
+use crate::runtime::durability_coordinator::{
+    DurabilityCoordinator, DurabilityRequestClaim, ReplicatedDurabilityClaim,
+};
 use crate::runtime::executor::DurabilityWait;
 use crate::runtime::git_worker::GitOp;
 use crate::runtime::ipc::{
@@ -546,9 +548,10 @@ fn durability_waiter_releases_on_quorum() {
         namespace: namespace.clone(),
         origin: local,
         seq: Seq1::from_u64(2).unwrap(),
-        requested: DurabilityClass::ReplicatedFsync {
+        claim: DurabilityRequestClaim::Replicated(ReplicatedDurabilityClaim {
             k: NonZeroU32::new(2).unwrap(),
-        },
+            eligible: [peer_a, peer_b].into_iter().collect(),
+        }),
         wait_timeout: Duration::from_millis(50),
         response,
     };
@@ -647,9 +650,10 @@ fn durability_waiter_times_out() {
         namespace: namespace.clone(),
         origin: local,
         seq: Seq1::from_u64(1).unwrap(),
-        requested: DurabilityClass::ReplicatedFsync {
+        claim: DurabilityRequestClaim::Replicated(ReplicatedDurabilityClaim {
             k: NonZeroU32::new(1).unwrap(),
-        },
+            eligible: [peer].into_iter().collect(),
+        }),
         wait_timeout: Duration::from_millis(10),
         response,
     };

@@ -12,6 +12,7 @@ use crate::core::{
     StoreId, Transience, TxnId, Watermark, WatermarkPair,
 };
 pub use crate::core::{ReplicaDurabilityRole, ReplicaDurabilityRoleError};
+use crate::durability::DurabilityRequestClaim;
 
 #[cfg(any(feature = "test-harness", test))]
 pub mod contract;
@@ -388,6 +389,7 @@ pub trait WalIndexTxn {
         txn_id: TxnId,
         event_ids: &ClientRequestEventIds,
         created_at_ms: u64,
+        durability_claim: Option<&DurabilityRequestClaim>,
     ) -> Result<(), WalIndexError>;
     fn upsert_replica_liveness(&mut self, row: &ReplicaLivenessRow) -> Result<(), WalIndexError>;
     fn commit(self: Box<Self>) -> Result<(), WalIndexError>;
@@ -513,6 +515,7 @@ pub struct ClientRequestRow {
     pub txn_id: TxnId,
     pub event_ids: ClientRequestEventIds,
     pub created_at_ms: u64,
+    pub durability_claim: Option<DurabilityRequestClaim>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

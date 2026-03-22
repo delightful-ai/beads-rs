@@ -266,12 +266,29 @@ impl PeerAckTable {
             };
         };
 
-        let mut eligible_total = 0usize;
+        self.satisfied_k_with_eligible(namespace, origin, seq, k, eligible)
+    }
+
+    pub fn satisfied_k_with_eligible(
+        &self,
+        namespace: &NamespaceId,
+        origin: &ReplicaId,
+        seq: Seq0,
+        k: u32,
+        eligible: &BTreeSet<ReplicaId>,
+    ) -> QuorumOutcome {
+        let eligible_total = eligible.len();
+        if eligible_total < k as usize {
+            return QuorumOutcome::InsufficientEligible {
+                required: k,
+                eligible_total,
+            };
+        }
+
         let mut acked_by = Vec::new();
 
         for peer in eligible {
             let state = self.peers.get(peer);
-            eligible_total += 1;
             if let Some(state) = state {
                 if !state.status.is_healthy() {
                     continue;
@@ -287,15 +304,7 @@ impl PeerAckTable {
             }
         }
 
-        let required = k as usize;
-        if eligible_total < required {
-            return QuorumOutcome::InsufficientEligible {
-                required: k,
-                eligible_total,
-            };
-        }
-
-        if acked_by.len() >= required {
+        if acked_by.len() >= k as usize {
             QuorumOutcome::Satisfied {
                 required: k,
                 eligible_total,

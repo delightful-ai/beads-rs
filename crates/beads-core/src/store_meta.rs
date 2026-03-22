@@ -18,10 +18,10 @@ pub struct StoreMetaVersions {
 
 impl StoreMetaVersions {
     pub const STORE_FORMAT_VERSION: u32 = 1;
-    pub const WAL_FORMAT_VERSION: u32 = 2;
+    pub const WAL_FORMAT_VERSION: u32 = 3;
     pub const CHECKPOINT_FORMAT_VERSION: u32 = 1;
     pub const REPLICATION_PROTOCOL_VERSION: u32 = 1;
-    pub const INDEX_SCHEMA_VERSION: u32 = 2;
+    pub const INDEX_SCHEMA_VERSION: u32 = 3;
 
     pub const CURRENT: StoreMetaVersions = StoreMetaVersions {
         store_format_version: Self::STORE_FORMAT_VERSION,

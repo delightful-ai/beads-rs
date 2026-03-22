@@ -611,7 +611,13 @@ mod tests {
 
     fn test_meta(store_id: StoreId, store_epoch: StoreEpoch) -> StoreMeta {
         let identity = crate::core::StoreIdentity::new(store_id, store_epoch);
-        let versions = crate::core::StoreMetaVersions::new(1, 2, 3, 4, 5);
+        let versions = crate::core::StoreMetaVersions::new(
+            1,
+            crate::core::StoreMetaVersions::WAL_FORMAT_VERSION,
+            3,
+            4,
+            5,
+        );
         StoreMeta::new(
             identity,
             crate::core::ReplicaId::new(Uuid::from_bytes([9u8; 16])),

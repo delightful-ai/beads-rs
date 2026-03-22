@@ -244,6 +244,7 @@ fn build_receipt(
             txn_id,
             &event_ids,
             now_ms,
+            None,
         )
         .map_err(|_| ())?;
         txn.commit().map_err(|_| ())?;

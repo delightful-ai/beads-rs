@@ -5,7 +5,9 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 
 use beads_daemon_core::durability::DurabilityCoordinator as CoreCoordinator;
-pub use beads_daemon_core::durability::ReplicatedPoll;
+pub use beads_daemon_core::durability::{
+    DurabilityRequestClaim, ReplicatedDurabilityClaim, ReplicatedPoll,
+};
 
 use crate::core::{
     DurabilityClass, DurabilityReceipt, NamespaceId, NamespacePolicy, ReplicaId, ReplicaRoster,
@@ -42,6 +44,16 @@ impl DurabilityCoordinator {
             .map_err(Into::into)
     }
 
+    pub fn request_claim(
+        &self,
+        namespace: &NamespaceId,
+        requested: DurabilityClass,
+    ) -> Result<DurabilityRequestClaim, OpError> {
+        self.0
+            .request_claim(namespace, requested)
+            .map_err(Into::into)
+    }
+
     pub fn poll_replicated(
         &self,
         namespace: &NamespaceId,
@@ -51,6 +63,18 @@ impl DurabilityCoordinator {
     ) -> Result<ReplicatedPoll, OpError> {
         self.0
             .poll_replicated(namespace, origin, seq, k)
+            .map_err(Into::into)
+    }
+
+    pub fn poll_claim(
+        &self,
+        namespace: &NamespaceId,
+        origin: ReplicaId,
+        seq: Seq1,
+        claim: &ReplicatedDurabilityClaim,
+    ) -> Result<ReplicatedPoll, OpError> {
+        self.0
+            .poll_claim(namespace, origin, seq, claim)
             .map_err(Into::into)
     }
 

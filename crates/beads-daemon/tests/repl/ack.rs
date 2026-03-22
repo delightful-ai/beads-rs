@@ -263,7 +263,13 @@ fn repl_want_reads_from_wal() {
     std::fs::create_dir_all(&store_dir).expect("create store dir");
     let identity = StoreIdentity::new(store_id, StoreEpoch::new(0));
     let replica_id = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
-    let versions = StoreMetaVersions::new(1, 2, 1, 1, StoreMetaVersions::INDEX_SCHEMA_VERSION);
+    let versions = StoreMetaVersions::new(
+        1,
+        StoreMetaVersions::WAL_FORMAT_VERSION,
+        1,
+        1,
+        StoreMetaVersions::INDEX_SCHEMA_VERSION,
+    );
     let meta = StoreMeta::new(identity, replica_id, versions, 1_700_000_000_000);
     let limits = Limits::default();
 

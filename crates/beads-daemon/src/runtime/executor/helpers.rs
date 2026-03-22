@@ -102,7 +102,7 @@ pub(super) fn try_reuse_idempotent_response(
     durable_watermarks: Watermarks<Durable>,
     applied_watermarks: Watermarks<Applied>,
     limits: &Limits,
-    durability: DurabilityClass,
+    current_requested: DurabilityClass,
     coordinator: &DurabilityCoordinator,
     wait_timeout: Duration,
 ) -> Result<Option<MutationOutcome>, OpError> {
@@ -143,14 +143,15 @@ pub(super) fn try_reuse_idempotent_response(
     let max_seq = row.event_ids.max_seq();
 
     let mut response = OpResponse::new(result, receipt);
-    let outcome = match durability {
-        DurabilityClass::ReplicatedFsync { k } => {
-            match coordinator.poll_replicated(&ctx.namespace, origin_replica_id, max_seq, k) {
+    let outcome = match row.durability_claim.clone() {
+        Some(DurabilityRequestClaim::Replicated(claim)) => {
+            let requested = DurabilityClass::ReplicatedFsync { k: claim.k };
+            match coordinator.poll_claim(&ctx.namespace, origin_replica_id, max_seq, &claim) {
                 Ok(ReplicatedPoll::Satisfied { acked_by }) => {
                     response.receipt = DurabilityCoordinator::achieved_receipt(
                         response.receipt,
-                        durability,
-                        k,
+                        requested,
+                        claim.k,
                         acked_by,
                     );
                     MutationOutcome::Immediate(response)
@@ -161,11 +162,11 @@ pub(super) fn try_reuse_idempotent_response(
                             DurabilityCoordinator::pending_replica_ids(&eligible, &acked_by);
                         let pending_receipt = DurabilityCoordinator::pending_receipt(
                             response.receipt,
-                            durability,
+                            requested,
                             acked_by,
                         );
                         return Err(OpError::DurabilityTimeout {
-                            requested: durability,
+                            requested,
                             waited_ms: 0,
                             pending_replica_ids: Some(pending),
                             receipt: Box::new(pending_receipt),
@@ -176,7 +177,7 @@ pub(super) fn try_reuse_idempotent_response(
                         namespace: ctx.namespace.clone(),
                         origin: origin_replica_id,
                         seq: max_seq,
-                        requested: durability,
+                        claim: DurabilityRequestClaim::Replicated(claim),
                         wait_timeout,
                         response,
                     })
@@ -184,7 +185,62 @@ pub(super) fn try_reuse_idempotent_response(
                 Err(err) => return Err(err),
             }
         }
-        DurabilityClass::LocalFsync => MutationOutcome::Immediate(response),
+        Some(DurabilityRequestClaim::LocalFsync) => MutationOutcome::Immediate(response),
+        None => match current_requested {
+            // Legacy rows predate persisted claims. We can only honor the current retry
+            // request, but we still freeze one cohort snapshot so this retry does not
+            // observe moving quorum semantics mid-call.
+            DurabilityClass::ReplicatedFsync { .. } => {
+                let claim = match coordinator.request_claim(&ctx.namespace, current_requested)? {
+                    DurabilityRequestClaim::Replicated(claim) => claim,
+                    DurabilityRequestClaim::LocalFsync => {
+                        return Err(OpError::Internal(
+                            "replicated request claim downgraded unexpectedly",
+                        ));
+                    }
+                };
+                let requested = DurabilityClass::ReplicatedFsync { k: claim.k };
+                match coordinator.poll_claim(&ctx.namespace, origin_replica_id, max_seq, &claim) {
+                    Ok(ReplicatedPoll::Satisfied { acked_by }) => {
+                        response.receipt = DurabilityCoordinator::achieved_receipt(
+                            response.receipt,
+                            requested,
+                            claim.k,
+                            acked_by,
+                        );
+                        MutationOutcome::Immediate(response)
+                    }
+                    Ok(ReplicatedPoll::Pending { acked_by, eligible }) => {
+                        if wait_timeout.is_zero() {
+                            let pending =
+                                DurabilityCoordinator::pending_replica_ids(&eligible, &acked_by);
+                            let pending_receipt = DurabilityCoordinator::pending_receipt(
+                                response.receipt,
+                                requested,
+                                acked_by,
+                            );
+                            return Err(OpError::DurabilityTimeout {
+                                requested,
+                                waited_ms: 0,
+                                pending_replica_ids: Some(pending),
+                                receipt: Box::new(pending_receipt),
+                            });
+                        }
+                        MutationOutcome::Pending(DurabilityWait {
+                            coordinator: coordinator.clone(),
+                            namespace: ctx.namespace.clone(),
+                            origin: origin_replica_id,
+                            seq: max_seq,
+                            claim: DurabilityRequestClaim::Replicated(claim),
+                            wait_timeout,
+                            response,
+                        })
+                    }
+                    Err(err) => return Err(err),
+                }
+            }
+            DurabilityClass::LocalFsync => MutationOutcome::Immediate(response),
+        },
     };
 
     let span = tracing::info_span!(
@@ -193,7 +249,11 @@ pub(super) fn try_reuse_idempotent_response(
         store_epoch = store.store_epoch.get(),
         replica_id = %origin_replica_id,
         actor_id = %ctx.actor_id,
-        durability = ?durability,
+        durability = ?row
+            .durability_claim
+            .as_ref()
+            .map(DurabilityRequestClaim::requested)
+            .unwrap_or(current_requested),
         txn_id = %row.txn_id,
         client_request_id = ?ctx.client_request_id,
         trace_id = %ctx.trace_id,

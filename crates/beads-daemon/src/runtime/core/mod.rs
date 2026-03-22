@@ -3350,7 +3350,7 @@ mod tests {
         let event1 = verified_event_for_seq(store, &namespace, origin, 1, None);
         let record1 = record_for_event(&event1);
 
-        let versions = StoreMetaVersions::new(1, 2, 3, 4, 5);
+        let versions = StoreMetaVersions::new(1, StoreMetaVersions::WAL_FORMAT_VERSION, 3, 4, 5);
         let meta = StoreMeta::new(
             store,
             ReplicaId::new(Uuid::from_bytes([8u8; 16])),

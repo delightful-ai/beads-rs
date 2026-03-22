@@ -28,7 +28,9 @@ use beads_daemon::testkit::Clock;
 use beads_daemon::testkit::core::{
     Daemon, HandleOutcome, insert_store_for_tests, replay_event_wal,
 };
-use beads_daemon::testkit::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
+use beads_daemon::testkit::durability_coordinator::{
+    DurabilityCoordinator, DurabilityRequestClaim, ReplicatedPoll,
+};
 use beads_daemon::testkit::executor::DurabilityWait;
 use beads_daemon::testkit::ipc::{
     CreatePayload, MutationCtx, MutationMeta, Request, Response, ResponseExt, ResponsePayload,
@@ -949,26 +951,27 @@ impl ReplicationRig {
             namespace,
             origin,
             seq,
-            requested,
+            claim,
             wait_timeout,
             response,
         } = wait;
 
-        let DurabilityClass::ReplicatedFsync { k } = requested else {
+        let DurabilityRequestClaim::Replicated(claim) = claim else {
             return Response::ok(ResponsePayload::Op(response));
         };
+        let requested = DurabilityClass::ReplicatedFsync { k: claim.k };
 
         let started_at_ms = self.clock.now_ms();
         let wait_timeout_ms = wait_timeout.as_millis().min(u64::MAX as u128) as u64;
         let deadline_ms = started_at_ms.saturating_add(wait_timeout_ms);
         let mut response = response;
         for _ in 0..max_steps {
-            match coordinator.poll_replicated(&namespace, origin, seq, k) {
+            match coordinator.poll_claim(&namespace, origin, seq, &claim) {
                 Ok(ReplicatedPoll::Satisfied { acked_by }) => {
                     response.receipt = DurabilityCoordinator::achieved_receipt(
                         response.receipt,
                         requested,
-                        k,
+                        claim.k,
                         acked_by,
                     );
                     return Response::ok(ResponsePayload::Op(response));

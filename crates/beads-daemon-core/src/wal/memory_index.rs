@@ -6,6 +6,7 @@ use crate::core::{
     ActorId, ClientRequestId, EventId, NamespaceId, ReplicaId, SegmentId, Seq0, Seq1, TxnId,
     WatermarkPair,
 };
+use crate::durability::DurabilityRequestClaim;
 
 use super::{
     ClientRequestEventIds, ClientRequestRow, HlcRow, IndexDurabilityMode, IndexedRangeItem,
@@ -318,6 +319,7 @@ impl WalIndexTxn for MemoryWalIndexTxn {
         txn_id: TxnId,
         event_ids: &ClientRequestEventIds,
         created_at_ms: u64,
+        durability_claim: Option<&DurabilityRequestClaim>,
     ) -> Result<(), WalIndexError> {
         self.ensure_live()?;
         event_ids.ensure_matches(ns, origin)?;
@@ -342,6 +344,7 @@ impl WalIndexTxn for MemoryWalIndexTxn {
                 txn_id,
                 event_ids: event_ids.clone(),
                 created_at_ms,
+                durability_claim: durability_claim.cloned(),
             },
         );
         Ok(())
@@ -635,6 +638,7 @@ mod tests {
                 TxnId::new(Uuid::from_bytes([6u8; 16])),
                 &event_ids,
                 10,
+                None,
             )
             .expect("upsert client request");
         first.commit().expect("commit");
@@ -649,6 +653,7 @@ mod tests {
                 TxnId::new(Uuid::from_bytes([7u8; 16])),
                 &event_ids,
                 11,
+                None,
             )
             .expect_err("reuse mismatch");
         assert!(matches!(
