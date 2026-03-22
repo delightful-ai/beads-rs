@@ -78,18 +78,34 @@ impl LoadedStore<'_> {
         git_sync_policy: crate::config::GitSyncPolicy,
         actor: ActorId,
         git_tx: &Sender<GitOp>,
-    ) {
+        gate: crate::scheduler::SyncGateToken,
+    ) -> bool {
         if !git_sync_policy.allows_sync() {
-            return;
+            return false;
+        }
+        if gate.remote() != self.remote() {
+            return false;
+        }
+        self.force_start_sync(git_sync_policy, actor, git_tx)
+    }
+
+    pub(crate) fn force_start_sync(
+        &mut self,
+        git_sync_policy: crate::config::GitSyncPolicy,
+        actor: ActorId,
+        git_tx: &Sender<GitOp>,
+    ) -> bool {
+        if !git_sync_policy.allows_sync() {
+            return false;
         }
         let repo_state = self.lane_mut();
         if !repo_state.dirty || repo_state.sync_in_progress {
-            return;
+            return false;
         }
 
         let path = match repo_state.any_valid_path() {
             Some(p) => p.clone(),
-            None => return,
+            None => return false,
         };
 
         repo_state.start_sync();
@@ -102,5 +118,7 @@ impl LoadedStore<'_> {
             state: self.runtime().state.core().clone(),
             actor,
         });
+
+        true
     }
 }

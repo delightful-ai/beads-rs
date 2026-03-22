@@ -411,8 +411,8 @@ impl Daemon {
 
     pub(in crate::runtime) fn fire_due_syncs(&mut self, git_tx: &Sender<GitOp>) {
         let due = self.scheduler.drain_due(Instant::now());
-        for remote in due {
-            self.maybe_start_sync(&remote, git_tx);
+        for gate in due {
+            self.start_sync_with_gate(gate, git_tx);
         }
     }
 
@@ -2175,6 +2175,169 @@ mod tests {
             .expect("core state");
         assert!(core_state.get_live(&live.core.id).is_some());
         assert!(loaded.lane().sync_in_progress);
+    }
+
+    #[test]
+    fn maybe_start_sync_does_not_bypass_backoff_schedule_after_failure() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("insert store");
+
+        {
+            let mut loaded = daemon.loaded_store(store_id, remote.clone());
+            let repo_state = loaded.lane_mut();
+            repo_state.dirty = true;
+            repo_state.sync_in_progress = true;
+        }
+
+        daemon.complete_sync(
+            session_token(&daemon, store_id),
+            &remote,
+            Err(SyncError::NoLocalRef("sync failed".to_string())),
+        );
+
+        assert!(
+            daemon.scheduler.is_pending(&remote),
+            "failed sync should schedule a retry through the scheduler"
+        );
+
+        let (git_tx, git_rx) = crossbeam::channel::bounded(1);
+        daemon.maybe_start_sync(&remote, &git_tx);
+
+        assert!(
+            git_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+            "sync retry must wait for the scheduler-issued backoff window"
+        );
+        assert!(
+            !daemon
+                .loaded_store(store_id, remote)
+                .lane()
+                .sync_in_progress,
+            "direct maybe_start_sync must not mark sync in progress while backoff is pending"
+        );
+    }
+
+    #[test]
+    fn stale_gate_token_cannot_start_sync_after_scheduler_state_changes() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("insert store");
+
+        {
+            let mut loaded = daemon.loaded_store(store_id, remote.clone());
+            loaded.lane_mut().dirty = true;
+        }
+
+        let gate = daemon
+            .scheduler
+            .issue_immediate_gate(&remote, Instant::now())
+            .expect("initial immediate gate");
+        daemon
+            .scheduler
+            .schedule_after(remote.clone(), Duration::from_secs(30));
+
+        let (git_tx, git_rx) = crossbeam::channel::bounded(1);
+        daemon.start_sync_with_gate(gate, &git_tx);
+
+        assert!(
+            git_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+            "stale gate token must not remain valid after scheduler state changes"
+        );
+        assert!(
+            !daemon
+                .loaded_store(store_id, remote)
+                .lane()
+                .sync_in_progress,
+            "stale gate token must not flip sync state"
+        );
+    }
+
+    #[test]
+    fn force_start_sync_bypasses_backoff_for_explicit_and_shutdown_syncs() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("insert store");
+
+        {
+            let mut loaded = daemon.loaded_store(store_id, remote.clone());
+            let repo_state = loaded.lane_mut();
+            repo_state.dirty = true;
+            repo_state.sync_in_progress = true;
+        }
+
+        daemon.complete_sync(
+            session_token(&daemon, store_id),
+            &remote,
+            Err(SyncError::NoLocalRef("sync failed".to_string())),
+        );
+
+        let (git_tx, git_rx) = crossbeam::channel::bounded(1);
+        assert!(
+            daemon.force_start_sync(&remote, &git_tx),
+            "forced sync should ignore scheduler backoff for explicit sync/shutdown flows"
+        );
+        assert!(
+            git_rx.recv_timeout(Duration::from_millis(20)).is_ok(),
+            "forced sync should enqueue a git sync op despite pending backoff"
+        );
+        assert!(
+            daemon
+                .loaded_store(store_id, remote)
+                .lane()
+                .sync_in_progress,
+            "forced sync should mark sync in progress"
+        );
+    }
+
+    #[test]
+    fn force_start_sync_clears_stale_pending_backoff() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("insert store");
+
+        {
+            let mut loaded = daemon.loaded_store(store_id, remote.clone());
+            let repo_state = loaded.lane_mut();
+            repo_state.dirty = true;
+            repo_state.sync_in_progress = true;
+        }
+
+        daemon.complete_sync(
+            session_token(&daemon, store_id),
+            &remote,
+            Err(SyncError::NoLocalRef("sync failed".to_string())),
+        );
+        assert!(
+            daemon.scheduler.is_pending(&remote),
+            "failed sync should leave a pending retry backoff"
+        );
+
+        let (git_tx, _git_rx) = crossbeam::channel::bounded(1);
+        assert!(daemon.force_start_sync(&remote, &git_tx));
+        assert!(
+            !daemon.scheduler.is_pending(&remote),
+            "forced sync should clear the obsolete retry backoff it bypassed"
+        );
     }
 
     #[test]
