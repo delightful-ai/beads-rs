@@ -1,8 +1,9 @@
 //! Store lock handling and metadata persistence.
 
 use std::fs;
-use std::io;
+use std::io::{self, Read, Seek};
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -121,84 +122,132 @@ impl StoreLock {
 
         let path = layout.store_lock_path(&store_id);
         reject_symlink(&path)?;
-
-        let mut next_lease_epoch = 1;
-        let mut file = match open_new_lock_file(&path) {
-            Ok(file) => file,
-            Err(StoreLockError::Io { source, .. })
-                if source.kind() == io::ErrorKind::AlreadyExists =>
-            {
-                let (held_meta, held_meta_error) = match read_metadata(&path) {
-                    Ok(meta) => (Some(meta), None),
-                    Err(err) => (None, Some(err.to_string())),
-                };
-                let Some(held_meta) = held_meta else {
-                    return Err(StoreLockError::Held {
-                        store_id,
-                        path: Box::new(path),
-                        meta: None,
-                        meta_error: held_meta_error,
-                    });
-                };
-
-                let pid_state = check_pid(held_meta.pid);
-                let reclaimable = matches!(pid_state, LockPidState::Missing)
-                    || !held_meta.lease_is_fresh(started_at_ms);
-                if reclaimable {
-                    next_lease_epoch = held_meta.lease_epoch.saturating_add(1).max(1);
-                    remove_lock_path_if_present(&path)?;
-                    tracing::warn!(
-                        store_id = %store_id,
-                        lock_path = %path.display(),
-                        stale_pid = held_meta.pid,
-                        previous_lease_epoch = held_meta.lease_epoch,
-                        previous_last_heartbeat_ms = held_meta.last_heartbeat_ms,
-                        "reclaimed stale store lock"
-                    );
-                    match open_new_lock_file(&path) {
-                        Ok(file) => file,
-                        Err(StoreLockError::Io { source, .. })
-                            if source.kind() == io::ErrorKind::AlreadyExists =>
-                        {
-                            let (meta, meta_error) = match read_metadata(&path) {
-                                Ok(meta) => (Some(meta), None),
-                                Err(err) => (None, Some(err.to_string())),
-                            };
+        with_store_lock_path_guard(&path, || {
+            let mut next_lease_epoch = 1;
+            let mut file = match open_new_lock_file(&path) {
+                Ok(file) => file,
+                Err(StoreLockError::Io { source, .. })
+                    if source.kind() == io::ErrorKind::AlreadyExists =>
+                {
+                    loop {
+                        let mut current = match open_current_lock_file(&path)? {
+                            Some(current) => current,
+                            None => match open_new_lock_file(&path) {
+                                Ok(file) => break file,
+                                Err(StoreLockError::Io { source, .. })
+                                    if source.kind() == io::ErrorKind::AlreadyExists =>
+                                {
+                                    continue;
+                                }
+                                Err(err) => return Err(err),
+                            },
+                        };
+                        let (held_meta, held_meta_error) = match current.read_metadata(&path) {
+                            Ok(meta) => (Some(meta), None),
+                            Err(err) => (None, Some(err.to_string())),
+                        };
+                        let Some(held_meta) = held_meta else {
                             return Err(StoreLockError::Held {
                                 store_id,
-                                path: Box::new(path),
-                                meta: meta.map(Box::new),
-                                meta_error,
+                                path: Box::new(path.clone()),
+                                meta: None,
+                                meta_error: held_meta_error,
+                            });
+                        };
+                        if !current.matches_current_path(&path)? {
+                            drop(current);
+                            match open_new_lock_file(&path) {
+                                Ok(file) => break file,
+                                Err(StoreLockError::Io { source, .. })
+                                    if source.kind() == io::ErrorKind::AlreadyExists =>
+                                {
+                                    return Err(held_error_from_snapshot(
+                                        store_id,
+                                        &path,
+                                        current_path_snapshot(&path),
+                                    ));
+                                }
+                                Err(err) => return Err(err),
+                            }
+                        }
+
+                        let pid_state = check_pid(held_meta.pid);
+                        let reclaimable = matches!(pid_state, LockPidState::Missing)
+                            || !held_meta.lease_is_fresh(started_at_ms);
+                        if reclaimable {
+                            #[cfg(test)]
+                            maybe_run_lock_mutation_hook(
+                                &path,
+                                LockMutationHookStage::BeforeReclaimRemove,
+                            );
+                            if !current.matches_current_path(&path)? {
+                                drop(current);
+                                match open_new_lock_file(&path) {
+                                    Ok(file) => break file,
+                                    Err(StoreLockError::Io { source, .. })
+                                        if source.kind() == io::ErrorKind::AlreadyExists =>
+                                    {
+                                        return Err(held_error_from_snapshot(
+                                            store_id,
+                                            &path,
+                                            current_path_snapshot(&path),
+                                        ));
+                                    }
+                                    Err(err) => return Err(err),
+                                }
+                            }
+                            next_lease_epoch = held_meta.lease_epoch.saturating_add(1).max(1);
+                            remove_lock_path_if_present(&path)?;
+                            tracing::warn!(
+                                store_id = %store_id,
+                                lock_path = %path.display(),
+                                stale_pid = held_meta.pid,
+                                previous_lease_epoch = held_meta.lease_epoch,
+                                previous_last_heartbeat_ms = held_meta.last_heartbeat_ms,
+                                "reclaimed stale store lock"
+                            );
+                            drop(current);
+                            match open_new_lock_file(&path) {
+                                Ok(file) => break file,
+                                Err(StoreLockError::Io { source, .. })
+                                    if source.kind() == io::ErrorKind::AlreadyExists =>
+                                {
+                                    return Err(held_error_from_snapshot(
+                                        store_id,
+                                        &path,
+                                        current_path_snapshot(&path),
+                                    ));
+                                }
+                                Err(err) => return Err(err),
+                            }
+                        } else {
+                            return Err(StoreLockError::Held {
+                                store_id,
+                                path: Box::new(path.clone()),
+                                meta: Some(Box::new(held_meta)),
+                                meta_error: held_meta_error,
                             });
                         }
-                        Err(err) => return Err(err),
                     }
-                } else {
-                    return Err(StoreLockError::Held {
-                        store_id,
-                        path: Box::new(path),
-                        meta: Some(Box::new(held_meta)),
-                        meta_error: held_meta_error,
-                    });
                 }
-            }
-            Err(err) => return Err(err),
-        };
-        let meta = StoreLockMeta::new(
-            store_id,
-            replica_id,
-            started_at_ms,
-            next_lease_epoch,
-            daemon_version,
-        );
+                Err(err) => return Err(err),
+            };
+            let meta = StoreLockMeta::new(
+                store_id,
+                replica_id,
+                started_at_ms,
+                next_lease_epoch,
+                daemon_version,
+            );
 
-        write_metadata(&mut file, &path, &meta)?;
-        set_file_permissions(&path, 0o600)?;
+            write_metadata(&mut file, &path, &meta)?;
+            set_file_permissions(&path, 0o600)?;
 
-        Ok(Self {
-            path,
-            meta,
-            released: false,
+            Ok(Self {
+                path: path.clone(),
+                meta,
+                released: false,
+            })
         })
     }
 
@@ -212,16 +261,28 @@ impl StoreLock {
 
     pub fn update_heartbeat(&mut self, now_ms: u64) -> Result<(), StoreLockError> {
         self.meta.last_heartbeat_ms = Some(now_ms);
-        ensure_lock_owner(&self.path, &self.meta)?;
-        let mut file = open_existing_lock_file(&self.path)?;
-        write_metadata(&mut file, &self.path, &self.meta)?;
-        set_file_permissions(&self.path, 0o600)?;
-        Ok(())
+        with_store_lock_path_guard(&self.path, || {
+            let mut file = open_owned_current_lock_file(&self.path, &self.meta)?;
+            #[cfg(test)]
+            maybe_run_lock_mutation_hook(&self.path, LockMutationHookStage::BeforeHeartbeatWrite);
+            if !file_matches_current_path(&file, &self.path)? {
+                return Err(held_error_from_snapshot(
+                    self.meta.store_id,
+                    &self.path,
+                    current_path_snapshot(&self.path),
+                ));
+            }
+            rewrite_metadata(&mut file, &self.path, &self.meta)?;
+            set_file_permissions(&self.path, 0o600)?;
+            Ok(())
+        })
     }
 
     pub fn release(mut self) -> Result<(), StoreLockError> {
         if !self.released {
-            remove_if_owner_matches(&self.path, &self.meta)?;
+            with_store_lock_path_guard(&self.path, || {
+                remove_if_owner_matches(&self.path, &self.meta)
+            })?;
             self.released = true;
         }
         Ok(())
@@ -253,7 +314,9 @@ fn pid_state_for_lock(pid: u32) -> LockPidState {
 impl Drop for StoreLock {
     fn drop(&mut self) {
         if !self.released {
-            let _ = remove_if_owner_matches(&self.path, &self.meta);
+            let _ = with_store_lock_path_guard(&self.path, || {
+                remove_if_owner_matches(&self.path, &self.meta)
+            });
             self.released = true;
         }
     }
@@ -286,8 +349,10 @@ pub fn remove_lock_file_with_layout(
     store_id: StoreId,
 ) -> Result<bool, StoreLockError> {
     let path = layout.store_lock_path(&store_id);
-    match fs::symlink_metadata(&path) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(StoreLockError::Symlink { path }),
+    with_store_lock_path_guard(&path, || match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err(StoreLockError::Symlink { path: path.clone() })
+        }
         Ok(_) => {
             fs::remove_file(&path).map_err(|source| StoreLockError::Io {
                 path: path.clone(),
@@ -298,11 +363,11 @@ pub fn remove_lock_file_with_layout(
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(err) => Err(StoreLockError::Io {
-            path,
+            path: path.clone(),
             operation: StoreLockOperation::Read,
             source: err,
         }),
-    }
+    })
 }
 
 pub fn remove_lock_file_if_meta_matches_with_layout(
@@ -310,19 +375,21 @@ pub fn remove_lock_file_if_meta_matches_with_layout(
     owner: &StoreLockMeta,
 ) -> Result<bool, StoreLockError> {
     let path = layout.store_lock_path(&owner.store_id);
-    match fs::symlink_metadata(&path) {
-        Ok(meta) if meta.file_type().is_symlink() => Err(StoreLockError::Symlink { path }),
+    with_store_lock_path_guard(&path, || match fs::symlink_metadata(&path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err(StoreLockError::Symlink { path: path.clone() })
+        }
         Ok(_) => {
             remove_if_owner_matches(&path, owner)?;
             Ok(true)
         }
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(err) => Err(StoreLockError::Io {
-            path,
+            path: path.clone(),
             operation: StoreLockOperation::Read,
             source: err,
         }),
-    }
+    })
 }
 
 pub fn remove_lock_file(store_id: StoreId) -> Result<bool, StoreLockError> {
@@ -535,6 +602,24 @@ fn write_metadata(
     Ok(())
 }
 
+fn rewrite_metadata(
+    file: &mut fs::File,
+    path: &Path,
+    meta: &StoreLockMeta,
+) -> Result<(), StoreLockError> {
+    file.set_len(0).map_err(|source| StoreLockError::Io {
+        path: path.to_path_buf(),
+        operation: StoreLockOperation::Write,
+        source,
+    })?;
+    file.rewind().map_err(|source| StoreLockError::Io {
+        path: path.to_path_buf(),
+        operation: StoreLockOperation::Write,
+        source,
+    })?;
+    write_metadata(file, path, meta)
+}
+
 fn open_new_lock_file(path: &Path) -> Result<fs::File, StoreLockError> {
     #[cfg(unix)]
     {
@@ -564,14 +649,135 @@ fn open_new_lock_file(path: &Path) -> Result<fs::File, StoreLockError> {
 fn open_existing_lock_file(path: &Path) -> Result<fs::File, StoreLockError> {
     reject_symlink(path)?;
     fs::OpenOptions::new()
+        .read(true)
         .write(true)
-        .truncate(true)
         .open(path)
         .map_err(|source| StoreLockError::Io {
             path: path.to_path_buf(),
             operation: StoreLockOperation::Write,
             source,
         })
+}
+
+struct CurrentLockFile {
+    file: nix::fcntl::Flock<fs::File>,
+}
+
+impl CurrentLockFile {
+    fn read_metadata(&mut self, path: &Path) -> Result<StoreLockMeta, StoreLockError> {
+        self.file.rewind().map_err(|source| StoreLockError::Io {
+            path: path.to_path_buf(),
+            operation: StoreLockOperation::Read,
+            source,
+        })?;
+        let mut bytes = Vec::new();
+        self.file
+            .read_to_end(&mut bytes)
+            .map_err(|source| StoreLockError::Io {
+                path: path.to_path_buf(),
+                operation: StoreLockOperation::Read,
+                source,
+            })?;
+        serde_json::from_slice(&bytes).map_err(|source| StoreLockError::MetadataCorrupt {
+            path: path.to_path_buf(),
+            source,
+        })
+    }
+
+    fn matches_current_path(&self, path: &Path) -> Result<bool, StoreLockError> {
+        file_matches_current_path(&self.file, path)
+    }
+}
+
+fn open_current_lock_file(path: &Path) -> Result<Option<CurrentLockFile>, StoreLockError> {
+    let file = match open_existing_lock_file(path) {
+        Ok(file) => file,
+        Err(StoreLockError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+            return Ok(None);
+        }
+        Err(err) => return Err(err),
+    };
+    let file = lock_file_exclusive(file, path)?;
+    if !file_matches_current_path(&file, path)? {
+        return Ok(None);
+    }
+    Ok(Some(CurrentLockFile { file }))
+}
+
+fn open_owned_current_lock_file(
+    path: &Path,
+    owner: &StoreLockMeta,
+) -> Result<nix::fcntl::Flock<fs::File>, StoreLockError> {
+    let mut current = match open_current_lock_file(path)? {
+        Some(current) => current,
+        None => {
+            return Err(held_error_from_snapshot(
+                owner.store_id,
+                path,
+                current_path_snapshot(path),
+            ));
+        }
+    };
+    let on_disk = current.read_metadata(path)?;
+    if !on_disk.owner_matches(owner) {
+        return Err(StoreLockError::Held {
+            store_id: owner.store_id,
+            path: Box::new(path.to_path_buf()),
+            meta: Some(Box::new(on_disk)),
+            meta_error: None,
+        });
+    }
+    Ok(current.file)
+}
+
+fn lock_file_exclusive(
+    file: fs::File,
+    path: &Path,
+) -> Result<nix::fcntl::Flock<fs::File>, StoreLockError> {
+    nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusive).map_err(|(_file, errno)| {
+        StoreLockError::Io {
+            path: path.to_path_buf(),
+            operation: StoreLockOperation::Write,
+            source: io::Error::from_raw_os_error(errno as i32),
+        }
+    })
+}
+
+fn file_matches_current_path(file: &fs::File, path: &Path) -> Result<bool, StoreLockError> {
+    let current = match fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(source) => {
+            return Err(StoreLockError::Io {
+                path: path.to_path_buf(),
+                operation: StoreLockOperation::Read,
+                source,
+            });
+        }
+    };
+    if current.file_type().is_symlink() {
+        return Err(StoreLockError::Symlink {
+            path: path.to_path_buf(),
+        });
+    }
+    let held = file.metadata().map_err(|source| StoreLockError::Io {
+        path: path.to_path_buf(),
+        operation: StoreLockOperation::Read,
+        source,
+    })?;
+    Ok(same_file_identity(&held, &current))
+}
+
+#[cfg(unix)]
+fn same_file_identity(held: &fs::Metadata, current: &fs::Metadata) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    held.dev() == current.dev() && held.ino() == current.ino()
+}
+
+#[cfg(not(unix))]
+fn same_file_identity(_held: &fs::Metadata, _current: &fs::Metadata) -> bool {
+    true
 }
 
 fn remove_lock_path_if_present(path: &Path) -> Result<(), StoreLockError> {
@@ -586,28 +792,94 @@ fn remove_lock_path_if_present(path: &Path) -> Result<(), StoreLockError> {
     }
 }
 
-fn ensure_lock_owner(path: &Path, owner: &StoreLockMeta) -> Result<(), StoreLockError> {
-    let current = read_metadata(path)?;
-    if current.owner_matches(owner) {
-        Ok(())
-    } else {
-        Err(StoreLockError::Held {
-            store_id: owner.store_id,
-            path: Box::new(path.to_path_buf()),
-            meta: Some(Box::new(current)),
+const STORE_LOCK_PATH_GUARD_STRIPES: usize = 64;
+
+fn store_lock_path_guards() -> &'static [Mutex<()>] {
+    static GUARDS: OnceLock<Box<[Mutex<()>]>> = OnceLock::new();
+    GUARDS.get_or_init(|| {
+        (0..STORE_LOCK_PATH_GUARD_STRIPES)
+            .map(|_| Mutex::new(()))
+            .collect::<Vec<_>>()
+            .into_boxed_slice()
+    })
+}
+
+fn lock_store_lock_path(path: &Path) -> MutexGuard<'static, ()> {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    path.hash(&mut hasher);
+    let stripe = (hasher.finish() as usize) % STORE_LOCK_PATH_GUARD_STRIPES;
+    store_lock_path_guards()[stripe]
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+fn with_store_lock_path_guard<T>(
+    path: &Path,
+    f: impl FnOnce() -> Result<T, StoreLockError>,
+) -> Result<T, StoreLockError> {
+    let guard = lock_store_lock_path(path);
+    let result = f();
+    drop(guard);
+    result
+}
+
+enum CurrentPathSnapshot {
+    Missing,
+    Present {
+        meta: Option<Box<StoreLockMeta>>,
+        meta_error: Option<String>,
+    },
+}
+
+fn current_path_snapshot(path: &Path) -> CurrentPathSnapshot {
+    match read_metadata(path) {
+        Ok(meta) => CurrentPathSnapshot::Present {
+            meta: Some(Box::new(meta)),
             meta_error: None,
-        })
+        },
+        Err(StoreLockError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
+            CurrentPathSnapshot::Missing
+        }
+        Err(err) => CurrentPathSnapshot::Present {
+            meta: None,
+            meta_error: Some(err.to_string()),
+        },
+    }
+}
+
+fn held_error_from_snapshot(
+    store_id: StoreId,
+    path: &Path,
+    snapshot: CurrentPathSnapshot,
+) -> StoreLockError {
+    let (meta, meta_error) = match snapshot {
+        CurrentPathSnapshot::Missing => (None, None),
+        CurrentPathSnapshot::Present { meta, meta_error } => (meta, meta_error),
+    };
+    StoreLockError::Held {
+        store_id,
+        path: Box::new(path.to_path_buf()),
+        meta,
+        meta_error,
     }
 }
 
 fn remove_if_owner_matches(path: &Path, owner: &StoreLockMeta) -> Result<(), StoreLockError> {
-    let current = match read_metadata(path) {
-        Ok(current) => current,
-        Err(StoreLockError::Io { source, .. }) if source.kind() == io::ErrorKind::NotFound => {
-            return Ok(());
+    let mut current_file = match open_current_lock_file(path)? {
+        Some(current) => current,
+        None => {
+            return match current_path_snapshot(path) {
+                CurrentPathSnapshot::Missing => Ok(()),
+                snapshot @ CurrentPathSnapshot::Present { .. } => {
+                    Err(held_error_from_snapshot(owner.store_id, path, snapshot))
+                }
+            };
         }
-        Err(err) => return Err(err),
     };
+    let current = current_file.read_metadata(path)?;
     if !current.owner_matches(owner) {
         return Err(StoreLockError::Held {
             store_id: owner.store_id,
@@ -615,6 +887,16 @@ fn remove_if_owner_matches(path: &Path, owner: &StoreLockMeta) -> Result<(), Sto
             meta: Some(Box::new(current)),
             meta_error: None,
         });
+    }
+    #[cfg(test)]
+    maybe_run_lock_mutation_hook(path, LockMutationHookStage::BeforeOwnerMatchedRemove);
+    if !current_file.matches_current_path(path)? {
+        return match current_path_snapshot(path) {
+            CurrentPathSnapshot::Missing => Ok(()),
+            snapshot @ CurrentPathSnapshot::Present { .. } => {
+                Err(held_error_from_snapshot(owner.store_id, path, snapshot))
+            }
+        };
     }
     remove_lock_path_if_present(path)
 }
@@ -648,7 +930,96 @@ fn set_file_permissions(path: &Path, mode: u32) -> Result<(), StoreLockError> {
 }
 
 #[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LockMutationHookStage {
+    BeforeReclaimRemove,
+    BeforeHeartbeatWrite,
+    BeforeOwnerMatchedRemove,
+}
+
+#[cfg(test)]
+type LockMutationHookFn = Box<dyn FnOnce() + Send>;
+
+#[cfg(test)]
+struct LockMutationHook {
+    path: PathBuf,
+    stage: LockMutationHookStage,
+    hook: LockMutationHookFn,
+}
+
+#[cfg(test)]
+static LOCK_MUTATION_HOOK: std::sync::LazyLock<std::sync::Mutex<Option<LockMutationHook>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(None));
+
+#[cfg(test)]
+static LOCK_MUTATION_HOOK_INSTALL_LOCK: std::sync::LazyLock<std::sync::Mutex<()>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(()));
+
+#[cfg(test)]
+struct LockMutationHookGuard {
+    _install_guard: std::sync::MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for LockMutationHookGuard {
+    fn drop(&mut self) {
+        *lock_mutation_hook() = None;
+    }
+}
+
+#[cfg(test)]
+fn scoped_lock_mutation_hook(
+    path: PathBuf,
+    stage: LockMutationHookStage,
+    hook: impl FnOnce() + Send + 'static,
+) -> LockMutationHookGuard {
+    let install_guard = lock_mutation_hook_install();
+    let mut slot = lock_mutation_hook();
+    assert!(slot.is_none(), "lock mutation hook already installed");
+    *slot = Some(LockMutationHook {
+        path,
+        stage,
+        hook: Box::new(hook),
+    });
+    drop(slot);
+    LockMutationHookGuard {
+        _install_guard: install_guard,
+    }
+}
+
+#[cfg(test)]
+fn lock_mutation_hook() -> std::sync::MutexGuard<'static, Option<LockMutationHook>> {
+    LOCK_MUTATION_HOOK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+#[cfg(test)]
+fn lock_mutation_hook_install() -> std::sync::MutexGuard<'static, ()> {
+    LOCK_MUTATION_HOOK_INSTALL_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+#[cfg(test)]
+fn maybe_run_lock_mutation_hook(path: &Path, stage: LockMutationHookStage) {
+    let maybe_hook = {
+        let mut slot = lock_mutation_hook();
+        match slot.as_ref() {
+            Some(installed) if installed.path == path && installed.stage == stage => slot.take(),
+            _ => None,
+        }
+    };
+    if let Some(hook) = maybe_hook {
+        (hook.hook)();
+    }
+}
+
+#[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
     use super::*;
     use crate::paths;
     use tempfile::TempDir;
@@ -804,6 +1175,64 @@ mod tests {
     }
 
     #[test]
+    fn acquire_reclaim_rechecks_path_before_remove() {
+        with_test_data_dir(|_| {
+            let layout = crate::daemon_layout_from_paths();
+            let store_id = StoreId::new(Uuid::from_bytes([35u8; 16]));
+            let stale_meta = StoreLockMeta {
+                store_id,
+                replica_id: ReplicaId::new(Uuid::from_bytes([36u8; 16])),
+                pid: 7373,
+                started_at_ms: 1,
+                daemon_version: "old".to_string(),
+                lease_epoch: 5,
+                lease_token: Some(Uuid::from_bytes([37u8; 16])),
+                last_heartbeat_ms: Some(1),
+            };
+            let lock_path = paths::store_lock_path(store_id);
+            write_lock_meta(&lock_path, &stale_meta);
+
+            let replacement_meta = StoreLockMeta {
+                store_id,
+                replica_id: ReplicaId::new(Uuid::from_bytes([38u8; 16])),
+                pid: 8383,
+                started_at_ms: 200,
+                daemon_version: "new".to_string(),
+                lease_epoch: stale_meta.lease_epoch + 1,
+                lease_token: Some(Uuid::from_bytes([39u8; 16])),
+                last_heartbeat_ms: Some(200),
+            };
+            let replacement_path = lock_path.clone();
+            let replacement_meta_for_hook = replacement_meta.clone();
+            let _hook = scoped_lock_mutation_hook(
+                lock_path,
+                LockMutationHookStage::BeforeReclaimRemove,
+                move || {
+                    std::fs::remove_file(&replacement_path).expect("remove stale lock path");
+                    write_lock_meta(&replacement_path, &replacement_meta_for_hook);
+                },
+            );
+
+            let err = StoreLock::acquire_with_pid_check(
+                &layout,
+                store_id,
+                ReplicaId::new(Uuid::from_bytes([40u8; 16])),
+                STORE_LOCK_LEASE_TIMEOUT_MS + 10,
+                "newer",
+                |_| LockPidState::Alive,
+            )
+            .expect_err("reclaim must reject path swaps before unlink");
+            assert!(matches!(err, StoreLockError::Held { .. }));
+
+            let on_disk = read_lock_meta(store_id)
+                .expect("read lock")
+                .expect("replacement lock should remain on disk");
+            assert_eq!(on_disk.lease_epoch, replacement_meta.lease_epoch);
+            assert_eq!(on_disk.lease_token, replacement_meta.lease_token);
+        });
+    }
+
+    #[test]
     fn stale_owner_cannot_overwrite_or_remove_reclaimed_lock() {
         with_test_data_dir(|_| {
             let layout = crate::daemon_layout_from_paths();
@@ -839,6 +1268,234 @@ mod tests {
                 .expect("meta exists");
             assert_eq!(on_disk.lease_epoch, replacement_meta.lease_epoch);
             assert_eq!(on_disk.lease_token, replacement_meta.lease_token);
+        });
+    }
+
+    #[test]
+    fn stale_release_rechecks_path_after_owner_match_before_remove() {
+        with_test_data_dir(|_| {
+            let layout = crate::daemon_layout_from_paths();
+            let store_id = StoreId::new(Uuid::from_bytes([45u8; 16]));
+            let replica_id = ReplicaId::new(Uuid::from_bytes([46u8; 16]));
+            let old_lock = StoreLock::acquire(&layout, store_id, replica_id, 100, "old")
+                .expect("acquire old lock");
+            let old_path = old_lock.path().to_path_buf();
+
+            let replacement_meta = StoreLockMeta {
+                store_id,
+                replica_id: ReplicaId::new(Uuid::from_bytes([47u8; 16])),
+                pid: 8888,
+                started_at_ms: 200,
+                daemon_version: "new".to_string(),
+                lease_epoch: old_lock.meta().lease_epoch + 1,
+                lease_token: Some(Uuid::from_bytes([48u8; 16])),
+                last_heartbeat_ms: Some(200),
+            };
+            let replacement_path = old_path.clone();
+            let replacement_meta_for_hook = replacement_meta.clone();
+            let _hook = scoped_lock_mutation_hook(
+                old_path,
+                LockMutationHookStage::BeforeOwnerMatchedRemove,
+                move || {
+                    std::fs::remove_file(&replacement_path).expect("remove old lock path");
+                    write_lock_meta(&replacement_path, &replacement_meta_for_hook);
+                },
+            );
+
+            let release_err = old_lock
+                .release()
+                .expect_err("stale release must reject path swaps after owner match");
+            assert!(matches!(release_err, StoreLockError::Held { .. }));
+
+            let on_disk = read_lock_meta(store_id)
+                .expect("read lock")
+                .expect("replacement lock should remain on disk");
+            assert_eq!(on_disk.lease_epoch, replacement_meta.lease_epoch);
+            assert_eq!(on_disk.lease_token, replacement_meta.lease_token);
+        });
+    }
+
+    #[test]
+    fn stale_heartbeat_rechecks_path_after_owner_match_before_write() {
+        with_test_data_dir(|_| {
+            let layout = crate::daemon_layout_from_paths();
+            let store_id = StoreId::new(Uuid::from_bytes([49u8; 16]));
+            let replica_id = ReplicaId::new(Uuid::from_bytes([50u8; 16]));
+            let mut old_lock = StoreLock::acquire(&layout, store_id, replica_id, 100, "old")
+                .expect("acquire old lock");
+            let old_path = old_lock.path().to_path_buf();
+
+            let replacement_meta = StoreLockMeta {
+                store_id,
+                replica_id: ReplicaId::new(Uuid::from_bytes([51u8; 16])),
+                pid: 9999,
+                started_at_ms: 200,
+                daemon_version: "new".to_string(),
+                lease_epoch: old_lock.meta().lease_epoch + 1,
+                lease_token: Some(Uuid::from_bytes([52u8; 16])),
+                last_heartbeat_ms: Some(200),
+            };
+            let replacement_path = old_path.clone();
+            let replacement_meta_for_hook = replacement_meta.clone();
+            let _hook = scoped_lock_mutation_hook(
+                old_path,
+                LockMutationHookStage::BeforeHeartbeatWrite,
+                move || {
+                    std::fs::remove_file(&replacement_path).expect("remove old lock path");
+                    write_lock_meta(&replacement_path, &replacement_meta_for_hook);
+                },
+            );
+
+            let heartbeat_err = old_lock
+                .update_heartbeat(201)
+                .expect_err("stale heartbeat must reject path swaps after owner match");
+            assert!(matches!(heartbeat_err, StoreLockError::Held { .. }));
+
+            let on_disk = read_lock_meta(store_id)
+                .expect("read lock")
+                .expect("replacement lock should remain on disk");
+            assert_eq!(on_disk.lease_epoch, replacement_meta.lease_epoch);
+            assert_eq!(on_disk.lease_token, replacement_meta.lease_token);
+        });
+    }
+
+    #[test]
+    fn stale_release_cannot_delete_reclaimer_lock_between_owner_check_and_remove() {
+        with_test_data_dir(|_| {
+            let layout = crate::daemon_layout_from_paths();
+            let store_id = StoreId::new(Uuid::from_bytes([61u8; 16]));
+            let replica_id = ReplicaId::new(Uuid::from_bytes([62u8; 16]));
+            let old_lock = StoreLock::acquire(&layout, store_id, replica_id, 100, "old")
+                .expect("acquire old lock");
+            let old_path = old_lock.path().to_path_buf();
+            let replacement_layout = layout.clone();
+
+            let (pause_tx, pause_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            let _hook = scoped_lock_mutation_hook(
+                old_path,
+                LockMutationHookStage::BeforeOwnerMatchedRemove,
+                move || {
+                    pause_tx.send(()).expect("signal paused");
+                    resume_rx.recv().expect("resume release");
+                },
+            );
+
+            let release_handle = std::thread::spawn(move || old_lock.release());
+            pause_rx.recv().expect("wait for release pause");
+
+            let (replacement_done_tx, replacement_done_rx) = mpsc::channel();
+            let replacement_handle = std::thread::spawn(move || {
+                let result = StoreLock::acquire_with_pid_check(
+                    &replacement_layout,
+                    store_id,
+                    ReplicaId::new(Uuid::from_bytes([63u8; 16])),
+                    STORE_LOCK_LEASE_TIMEOUT_MS + 200,
+                    "new",
+                    |_| LockPidState::Alive,
+                );
+                replacement_done_tx
+                    .send(())
+                    .expect("signal replacement completion");
+                result
+            });
+
+            assert!(
+                replacement_done_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .is_err(),
+                "replacement should block until stale release finishes"
+            );
+
+            resume_tx.send(()).expect("resume release");
+            release_handle
+                .join()
+                .expect("join release")
+                .expect("release should complete");
+            let replacement = replacement_handle
+                .join()
+                .expect("join replacement acquire")
+                .expect("replacement should acquire after stale release finishes");
+
+            let on_disk = read_lock_meta(store_id)
+                .expect("read lock")
+                .expect("replacement lock should remain on disk");
+            assert_eq!(on_disk.lease_token, replacement.meta().lease_token);
+            assert_eq!(on_disk.lease_epoch, replacement.meta().lease_epoch);
+            replacement.release().expect("release replacement");
+        });
+    }
+
+    #[test]
+    fn stale_heartbeat_cannot_clobber_reclaimer_lock_between_owner_check_and_write() {
+        with_test_data_dir(|_| {
+            let layout = crate::daemon_layout_from_paths();
+            let store_id = StoreId::new(Uuid::from_bytes([71u8; 16]));
+            let replica_id = ReplicaId::new(Uuid::from_bytes([72u8; 16]));
+            let old_lock = StoreLock::acquire(&layout, store_id, replica_id, 100, "old")
+                .expect("acquire old lock");
+            let old_meta = old_lock.meta().clone();
+            let old_path = old_lock.path().to_path_buf();
+            let heartbeat_ms = STORE_LOCK_LEASE_TIMEOUT_MS + 200;
+            let replacement_layout = layout.clone();
+
+            let (pause_tx, pause_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            let _hook = scoped_lock_mutation_hook(
+                old_path,
+                LockMutationHookStage::BeforeHeartbeatWrite,
+                move || {
+                    pause_tx.send(()).expect("signal paused");
+                    resume_rx.recv().expect("resume heartbeat");
+                },
+            );
+
+            let heartbeat_handle = std::thread::spawn(move || {
+                let mut lock = old_lock;
+                let result = lock.update_heartbeat(heartbeat_ms);
+                (lock, result)
+            });
+            pause_rx.recv().expect("wait for heartbeat pause");
+
+            let (replacement_done_tx, replacement_done_rx) = mpsc::channel();
+            let replacement_handle = std::thread::spawn(move || {
+                let result = StoreLock::acquire_with_pid_check(
+                    &replacement_layout,
+                    store_id,
+                    ReplicaId::new(Uuid::from_bytes([73u8; 16])),
+                    heartbeat_ms + 1,
+                    "new",
+                    |_| LockPidState::Alive,
+                );
+                replacement_done_tx
+                    .send(())
+                    .expect("signal replacement completion");
+                result
+            });
+
+            assert!(
+                replacement_done_rx
+                    .recv_timeout(Duration::from_millis(100))
+                    .is_err(),
+                "reclaimer should block while stale heartbeat holds the current lock"
+            );
+
+            resume_tx.send(()).expect("resume heartbeat");
+            let (old_lock, heartbeat_result) = heartbeat_handle.join().expect("join heartbeat");
+            heartbeat_result.expect("stale heartbeat unexpectedly failed");
+            let replacement = replacement_handle.join().expect("join replacement acquire");
+            assert!(
+                matches!(replacement, Err(StoreLockError::Held { .. })),
+                "fresh heartbeat should keep the reclaimer out"
+            );
+
+            let on_disk = read_lock_meta(store_id)
+                .expect("read lock")
+                .expect("original lock should remain on disk");
+            assert_eq!(on_disk.lease_token, old_meta.lease_token);
+            assert_eq!(on_disk.lease_epoch, old_meta.lease_epoch);
+            assert_eq!(on_disk.last_heartbeat_ms, Some(heartbeat_ms));
+            old_lock.release().expect("release old lock");
         });
     }
 
