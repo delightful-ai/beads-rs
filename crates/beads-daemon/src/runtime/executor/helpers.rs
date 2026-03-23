@@ -20,6 +20,21 @@ pub(super) fn event_wal_error_with_path(err: EventWalError, path: &Path) -> OpEr
     OpError::from(err)
 }
 
+pub(super) fn enforce_exact_record_size(
+    record: &VerifiedRecord,
+    limits: &Limits,
+) -> Result<(), OpError> {
+    let exact_bytes = record.encoded_body_len()?;
+    let max_wal_record_bytes = limits.policy().max_wal_record_bytes();
+    if exact_bytes > max_wal_record_bytes {
+        return Err(OpError::WalRecordTooLarge {
+            max_wal_record_bytes,
+            estimated_bytes: exact_bytes,
+        });
+    }
+    Ok(())
+}
+
 pub(super) struct LocalAppendPlan {
     pub(super) origin_seq: Seq1,
     pub(super) prev_sha: Option<[u8; 32]>,

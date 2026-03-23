@@ -321,6 +321,7 @@ impl Daemon {
             tracing::error!(error = ?err, "record verification failed");
             OpError::Internal("record verification failed")
         })?;
+        enforce_exact_record_size(&record, &limits)?;
 
         let now_ms = sequenced.event_body.event_time_ms;
         let (append, wal_effect, segment_snapshot) = {
@@ -798,10 +799,11 @@ mod tests {
     use crate::clock::Clock;
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadType, CanonicalState, Claim, ClientRequestId,
-        DurabilityReceipt, EventId, Labels, Lww, NamespaceId, NamespacePolicy, NoteAppendV1,
-        NoteId, Priority, ReplicaDurabilityRole, ReplicaEntry, ReplicaRoster, Seq1, Stamp,
-        StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnId, TxnOpV1,
-        WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp,
+        DurabilityClass, DurabilityReceipt, EventId, Labels, Limits, Lww, NamespaceId,
+        NamespacePolicy, NoteAppendV1, NoteId, Priority, ReplicaDurabilityRole, ReplicaEntry,
+        ReplicaId, ReplicaRoster, Seq1, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta,
+        StoreMetaVersions, TraceId, TxnId, TxnOpV1, WireBeadPatch, WireNoteV1, WireStamp, Workflow,
+        WriteStamp,
     };
     use crate::remote::RemoteUrl;
     use crate::runtime::core::Daemon;
@@ -1166,6 +1168,196 @@ mod tests {
                 "mutation span missing {key}: {fields:?}"
             );
         }
+    }
+
+    #[test]
+    fn replicated_client_request_prechecks_exact_wal_record_size() {
+        let tmp = TempDir::new().expect("temp dir");
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let _override = crate::paths::override_data_dir_for_tests(Some(data_dir));
+
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo path");
+
+        let store_id = StoreId::new(Uuid::from_bytes([61u8; 16]));
+        let remote = RemoteUrl::new("example.com/test/repo");
+        {
+            let mut seed_daemon = Daemon::new(actor_id("wal-size-seed@test"));
+            insert_store_for_tests(&mut seed_daemon, store_id, remote.clone(), &repo_path)
+                .expect("seed store");
+        }
+
+        let (_index, meta) = open_index_for_store(store_id);
+        let store = StoreIdentity::new(meta.store_id(), meta.store_epoch());
+        let replica_id = meta.replica_id;
+        let peer = ReplicaId::new(Uuid::from_bytes([62u8; 16]));
+        let actor = actor_id("wal-size@test");
+        let client_request_id = ClientRequestId::new(Uuid::from_bytes([63u8; 16]));
+        let request = CreatePayload {
+            id: Some(BeadId::parse("bd-wal-size").expect("bead id")),
+            parent: None,
+            title: "replicated wal size precheck".to_string(),
+            bead_type: BeadType::Task,
+            priority: Priority::MEDIUM,
+            description: None,
+            design: None,
+            acceptance_criteria: None,
+            assignee: None,
+            external_ref: None,
+            estimated_minutes: None,
+            labels: Vec::new(),
+            dependencies: Vec::new(),
+        };
+
+        let limits = Limits::default();
+        let engine = MutationEngine::new(limits.clone());
+        let parsed_request =
+            ParsedMutationRequest::parse_create(request.clone(), &actor).expect("parse create");
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: Some(client_request_id),
+            trace_id: TraceId::from(client_request_id),
+        };
+        let mut clock = fixed_clock(1_700_000_300_000);
+        let now_ms = clock.wall_ms();
+        let stamp = Stamp::new(clock.tick(), actor.clone());
+        let stamped_ctx = StampedContext::new(ctx.clone(), stamp).expect("stamped ctx");
+        let mut dots = TestDotAllocator::new(replica_id);
+        let planned = engine
+            .plan(
+                &CanonicalState::default(),
+                now_ms,
+                stamped_ctx,
+                store,
+                Some(&IdContext {
+                    root_slug: None,
+                    remote_url: remote.clone(),
+                }),
+                parsed_request,
+                &mut dots,
+            )
+            .expect("plan mutation");
+        let (draft, _planning_effects) = planned.acknowledge_durability();
+        let origin_seq = Seq1::from_u64(1).expect("nonzero seq");
+        let sequenced = engine
+            .build_event(draft, store, ctx.namespace.clone(), replica_id, origin_seq)
+            .expect("build event");
+        let request_proof = RequestProof::Client {
+            client_request_id,
+            request_sha256: sequenced.request_sha256,
+            durability_claim: Some(DurabilityRequestClaim::Replicated(
+                crate::runtime::durability_coordinator::ReplicatedDurabilityClaim {
+                    k: std::num::NonZeroU32::new(1).expect("nonzero quorum"),
+                    eligible: [peer].into_iter().collect(),
+                },
+            )),
+        };
+        let record = VerifiedRecord::new(
+            RecordHeader {
+                origin_replica_id: replica_id,
+                origin_seq,
+                event_time_ms: sequenced.event_body.event_time_ms,
+                txn_id: sequenced.event_body.txn_id,
+                request_proof,
+                sha256: hash_event_body(&sequenced.event_bytes).0,
+                prev_sha256: None,
+            },
+            sequenced.event_bytes.clone(),
+            sequenced.event_body.clone(),
+        )
+        .expect("verified record");
+        let exact_record_bytes = record.encode_body().expect("encode record").len();
+        let legacy_estimate = crate::runtime::wal::record::RECORD_HEADER_BASE_LEN
+            + sequenced.event_bytes.len()
+            + 32
+            + 32
+            + 16;
+        assert!(
+            legacy_estimate < exact_record_bytes,
+            "legacy estimate should miss durability-claim bytes: legacy={legacy_estimate} exact={exact_record_bytes}"
+        );
+
+        let mut low_limits = Limits::default();
+        low_limits.max_wal_record_bytes = exact_record_bytes - 1;
+        let mut daemon = Daemon::new_with_limits(actor.clone(), low_limits.clone());
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("insert store");
+
+        let roster = ReplicaRoster {
+            replicas: vec![
+                ReplicaEntry {
+                    replica_id,
+                    name: "local".to_string(),
+                    role: ReplicaDurabilityRole::anchor(true),
+                    allowed_namespaces: None,
+                    expire_after_ms: None,
+                },
+                ReplicaEntry {
+                    replica_id: peer,
+                    name: "peer".to_string(),
+                    role: ReplicaDurabilityRole::peer(true),
+                    allowed_namespaces: None,
+                    expire_after_ms: None,
+                },
+            ],
+        };
+        let roster_path = daemon.layout().replicas_path(&store_id);
+        std::fs::write(
+            &roster_path,
+            toml::to_string(&roster).expect("serialize roster"),
+        )
+        .expect("write roster");
+
+        let mutation_meta = MutationMeta {
+            durability: Some(DurabilityClass::ReplicatedFsync {
+                k: std::num::NonZeroU32::new(1).expect("nonzero quorum"),
+            }),
+            client_request_id: Some(client_request_id),
+            ..MutationMeta::default()
+        };
+        let (git_tx, _git_rx) = crossbeam::channel::unbounded();
+        let err = match daemon.apply_mutation_request_with_inner(
+            &repo_path,
+            mutation_meta,
+            |actor| ParsedMutationRequest::parse_create(request.clone(), actor),
+            &git_tx,
+        ) {
+            Ok(_) => panic!("exact record precheck should reject oversize record"),
+            Err(err) => err,
+        };
+
+        match err {
+            OpError::WalRecordTooLarge {
+                max_wal_record_bytes,
+                estimated_bytes,
+            } => {
+                assert_eq!(max_wal_record_bytes, low_limits.max_wal_record_bytes);
+                assert_eq!(estimated_bytes, exact_record_bytes);
+            }
+            other => panic!("expected WalRecordTooLarge, got {other:?}"),
+        }
+
+        let loaded = daemon.loaded_store(store_id, remote);
+        assert!(
+            loaded
+                .runtime()
+                .event_wal
+                .segment_snapshot(&NamespaceId::core())
+                .is_none(),
+            "precheck should reject before creating an active WAL segment"
+        );
+        let segments = loaded
+            .runtime()
+            .wal_index
+            .reader()
+            .list_segments(&NamespaceId::core())
+            .expect("list wal segments");
+        assert!(
+            segments.is_empty(),
+            "precheck should reject before indexing a WAL segment"
+        );
     }
 
     #[test]

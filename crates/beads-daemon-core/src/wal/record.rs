@@ -138,6 +138,32 @@ pub enum RecordHeaderMismatch {
 }
 
 impl RecordHeader {
+    fn encoded_claim_bytes(&self) -> EventWalResult<Option<Vec<u8>>> {
+        self.durability_claim()
+            .map(encode_durability_claim)
+            .transpose()
+    }
+
+    fn encoded_header_len(&self, claim_bytes: Option<&[u8]>) -> EventWalResult<u16> {
+        let flags = self.flags();
+        let mut header_len = RECORD_HEADER_BASE_LEN;
+        if flags.has_client_request_id {
+            header_len += 16;
+        }
+        if flags.has_request_sha256 {
+            header_len += 32;
+        }
+        if let Some(bytes) = claim_bytes {
+            header_len += 2 + bytes.len();
+        }
+        if flags.has_prev_sha {
+            header_len += 32;
+        }
+        u16::try_from(header_len).map_err(|_| EventWalError::RecordHeaderInvalid {
+            reason: "record header too large".to_string(),
+        })
+    }
+
     pub fn flags(&self) -> RecordFlags {
         let (has_client_request_id, has_request_sha256, has_durability_claim) =
             self.request_proof.flags();
@@ -161,29 +187,18 @@ impl RecordHeader {
         self.request_proof.durability_claim()
     }
 
+    pub fn encoded_len(&self) -> EventWalResult<usize> {
+        let claim_bytes = self.encoded_claim_bytes()?;
+        Ok(usize::from(
+            self.encoded_header_len(claim_bytes.as_deref())?,
+        ))
+    }
+
     pub fn encode(&self) -> EventWalResult<Vec<u8>> {
         let flags = self.flags();
-        let claim_bytes = self
-            .durability_claim()
-            .map(encode_durability_claim)
-            .transpose()?;
-        let mut header_len = RECORD_HEADER_BASE_LEN;
-        if flags.has_client_request_id {
-            header_len += 16;
-        }
-        if flags.has_request_sha256 {
-            header_len += 32;
-        }
-        if let Some(bytes) = claim_bytes.as_ref() {
-            header_len += 2 + bytes.len();
-        }
-        if flags.has_prev_sha {
-            header_len += 32;
-        }
-        let header_len_u16 =
-            u16::try_from(header_len).map_err(|_| EventWalError::RecordHeaderInvalid {
-                reason: "record header too large".to_string(),
-            })?;
+        let claim_bytes = self.encoded_claim_bytes()?;
+        let header_len_u16 = self.encoded_header_len(claim_bytes.as_deref())?;
+        let header_len = usize::from(header_len_u16);
 
         let mut buf = Vec::with_capacity(header_len);
         buf.extend_from_slice(&RECORD_HEADER_VERSION.to_le_bytes());
@@ -502,6 +517,15 @@ impl VerifiedRecord {
 
     pub fn payload_bytes(&self) -> &[u8] {
         self.payload.as_ref()
+    }
+
+    pub fn encoded_body_len(&self) -> EventWalResult<usize> {
+        self.header
+            .encoded_len()?
+            .checked_add(self.payload.len())
+            .ok_or_else(|| EventWalError::RecordHeaderInvalid {
+                reason: "record body length overflow".to_string(),
+            })
     }
 
     pub fn encode_body(&self) -> EventWalResult<Vec<u8>> {
