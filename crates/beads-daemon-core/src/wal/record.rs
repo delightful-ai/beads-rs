@@ -496,6 +496,10 @@ impl VerifiedRecord {
         &self.payload
     }
 
+    pub fn body(&self) -> &ValidatedEventBody {
+        &self._body
+    }
+
     pub fn payload_bytes(&self) -> &[u8] {
         self.payload.as_ref()
     }

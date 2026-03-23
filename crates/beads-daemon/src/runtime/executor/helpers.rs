@@ -28,27 +28,30 @@ pub(super) struct LocalAppendPlan {
 
 pub(super) struct RuntimeDotAllocator<'a> {
     replica_id: ReplicaId,
-    runtime: &'a mut StoreRuntime,
+    wal_index_txn: &'a mut dyn WalIndexTxn,
 }
 
 impl<'a> RuntimeDotAllocator<'a> {
-    pub(super) fn new(replica_id: ReplicaId, runtime: &'a mut StoreRuntime) -> Self {
+    pub(super) fn new(replica_id: ReplicaId, wal_index_txn: &'a mut dyn WalIndexTxn) -> Self {
         Self {
             replica_id,
-            runtime,
+            wal_index_txn,
         }
     }
 }
 
 impl DotAllocator for RuntimeDotAllocator<'_> {
     fn next_dot(&mut self) -> Result<DotAllocation, OpError> {
-        let counter = self.runtime.next_orset_counter()?;
+        let counter = self
+            .wal_index_txn
+            .next_orset_counter()
+            .map_err(wal_index_to_op)?;
         Ok(DotAllocation {
             dot: Dot {
                 replica: self.replica_id,
                 counter,
             },
-            durability: DotDurabilityEffect::StoreMetaSyncBoundary,
+            durability: DotDurabilityEffect::WalIndexTxnMetadata,
         })
     }
 }

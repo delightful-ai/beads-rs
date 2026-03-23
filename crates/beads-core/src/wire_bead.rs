@@ -200,6 +200,16 @@ impl From<&Dvv> for WireDvvV1 {
     }
 }
 
+impl WireDvvV1 {
+    pub fn max_dot_counter(&self) -> Option<u64> {
+        self.max
+            .values()
+            .copied()
+            .chain(self.dots.iter().map(|dot| dot.counter))
+            .max()
+    }
+}
+
 impl From<Dvv> for WireDvvV1 {
     fn from(dvv: Dvv) -> Self {
         Self {
@@ -1440,6 +1450,18 @@ impl TxnOpV1 {
             },
         }
     }
+
+    pub fn max_dot_counter(&self) -> Option<u64> {
+        match self {
+            TxnOpV1::LabelAdd(op) => Some(op.dot.counter),
+            TxnOpV1::LabelRemove(op) => op.ctx.max_dot_counter(),
+            TxnOpV1::DepAdd(op) => Some(op.dot.counter),
+            TxnOpV1::ParentAdd(op) => Some(op.dot.counter),
+            TxnOpV1::DepRemove(op) => op.ctx.max_dot_counter(),
+            TxnOpV1::ParentRemove(op) => op.ctx.max_dot_counter(),
+            TxnOpV1::BeadUpsert(_) | TxnOpV1::BeadDelete(_) | TxnOpV1::NoteAppend(_) => None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -1673,6 +1695,10 @@ impl TxnDeltaV1 {
 
     pub fn iter(&self) -> impl Iterator<Item = &TxnOpV1> {
         self.ops.values()
+    }
+
+    pub fn max_dot_counter(&self) -> Option<u64> {
+        self.iter().filter_map(TxnOpV1::max_dot_counter).max()
     }
 }
 

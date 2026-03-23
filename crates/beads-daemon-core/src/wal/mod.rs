@@ -341,6 +341,8 @@ pub trait WalIndexWriter {
 }
 
 pub trait WalIndexTxn {
+    fn next_orset_counter(&mut self) -> Result<u64, WalIndexError>;
+    fn observe_orset_counter(&mut self, counter: u64) -> Result<(), WalIndexError>;
     fn next_origin_seq(
         &mut self,
         ns: &NamespaceId,
@@ -397,6 +399,7 @@ pub trait WalIndexTxn {
 }
 
 pub trait WalIndexReader {
+    fn load_orset_counter(&self) -> Result<u64, WalIndexError>;
     fn lookup_event_sha(
         &self,
         ns: &NamespaceId,

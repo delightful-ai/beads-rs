@@ -886,18 +886,6 @@ impl StoreRuntime {
             runtime_version: self.replication_runtime_version,
         })
     }
-
-    pub fn next_orset_counter(&mut self) -> Result<u64, StoreRuntimeError> {
-        let next = self
-            .meta
-            .orset_counter
-            .checked_add(1)
-            .expect("orset counter overflow");
-        self.meta.orset_counter = next;
-        let path = self.layout.store_meta_path(&self.meta.store_id());
-        write_store_meta(&path, &self.meta)?;
-        Ok(next)
-    }
 }
 
 #[derive(Debug, Error)]
@@ -2609,7 +2597,7 @@ mod tests {
         let namespace_defaults = crate::config::Config::default()
             .namespace_defaults
             .namespaces;
-        let mut runtime = StoreRuntime::open(
+        let runtime = StoreRuntime::open(
             &crate::daemon_layout_from_paths(),
             store_id,
             RemoteUrl::new("example.com/test/repo"),
@@ -2621,16 +2609,39 @@ mod tests {
         .expect("open runtime")
         .runtime;
 
-        let first = runtime.next_orset_counter().expect("increment");
-        let second = runtime.next_orset_counter().expect("increment");
+        let mut txn = runtime
+            .wal_index
+            .writer()
+            .begin_txn()
+            .expect("begin wal index txn");
+        let first = txn.next_orset_counter().expect("increment");
+        let second = txn.next_orset_counter().expect("increment");
+        txn.commit().expect("commit wal index txn");
         assert_eq!(first, 1);
         assert_eq!(second, 2);
 
         let meta_path = paths::store_meta_path(store_id);
+        let modified_before = std::fs::metadata(&meta_path)
+            .expect("meta metadata before readback")
+            .modified()
+            .expect("meta modified time before readback");
         let meta = read_store_meta_optional(&meta_path)
             .expect("read meta")
             .expect("meta exists");
-        assert_eq!(meta.orset_counter, 2);
+        let modified_after = std::fs::metadata(&meta_path)
+            .expect("meta metadata after readback")
+            .modified()
+            .expect("meta modified time after readback");
+        assert_eq!(meta.orset_counter, 0);
+        assert_eq!(modified_after, modified_before);
+        assert_eq!(
+            runtime
+                .wal_index
+                .reader()
+                .load_orset_counter()
+                .expect("load orset counter"),
+            2
+        );
     }
 
     #[test]

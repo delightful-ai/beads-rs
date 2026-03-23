@@ -64,8 +64,10 @@ pub trait DotAllocator {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub enum DotDurabilityEffect {
     StoreMetaSyncBoundary,
+    WalIndexTxnMetadata,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

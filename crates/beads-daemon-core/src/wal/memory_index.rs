@@ -30,6 +30,7 @@ struct EventEntry {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 struct MemoryWalIndexState {
+    orset_counter: u64,
     origin_next_seq: BTreeMap<(NamespaceId, ReplicaId), u64>,
     events: BTreeMap<EventKey, EventEntry>,
     segments: BTreeMap<(NamespaceId, SegmentId), SegmentRow>,
@@ -154,6 +155,22 @@ impl MemoryWalIndexTxn {
 }
 
 impl WalIndexTxn for MemoryWalIndexTxn {
+    fn next_orset_counter(&mut self) -> Result<u64, WalIndexError> {
+        self.ensure_live()?;
+        let next =
+            self.working.orset_counter.checked_add(1).ok_or_else(|| {
+                WalIndexError::EventIdDecode("orset counter overflow".to_string())
+            })?;
+        self.working.orset_counter = next;
+        Ok(next)
+    }
+
+    fn observe_orset_counter(&mut self, counter: u64) -> Result<(), WalIndexError> {
+        self.ensure_live()?;
+        self.working.orset_counter = self.working.orset_counter.max(counter);
+        Ok(())
+    }
+
     fn next_origin_seq(
         &mut self,
         ns: &NamespaceId,
@@ -422,6 +439,14 @@ impl MemoryWalIndexReader {
 }
 
 impl WalIndexReader for MemoryWalIndexReader {
+    fn load_orset_counter(&self) -> Result<u64, WalIndexError> {
+        Ok(self
+            .state
+            .read()
+            .expect("memory wal index lock poisoned")
+            .orset_counter)
+    }
+
     fn lookup_event_sha(
         &self,
         ns: &NamespaceId,

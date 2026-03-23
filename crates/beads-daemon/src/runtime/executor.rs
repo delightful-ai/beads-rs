@@ -29,7 +29,7 @@ use super::mutation_engine::{
     SequencedEvent, StampedContext,
 };
 use super::ops::OpError;
-use super::store::runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
+use super::store::runtime::{StoreRuntimeError, load_replica_roster};
 use super::wal::{
     ClientRequestEventIds, EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof,
     SegmentRow, VerifiedRecord, WalAppend, WalAppendDurabilityEffect, WalCursorOffset, WalIndex,
@@ -233,10 +233,17 @@ impl Daemon {
         };
         let stamped_ctx = StampedContext::new(ctx.clone(), stamp.clone())?;
         let mut proof = self.loaded_store(store_id, remote.clone());
+        let mut atomic_txn = AtomicWalDurabilityTxn::begin(
+            wal_index.as_ref(),
+            namespace.clone(),
+            origin_replica_id,
+            AtomicWalCommitPath::Mutation,
+        )
+        .map_err(wal_index_to_op)?;
         let planned = {
             let store_runtime = proof.runtime_mut();
             let state_snapshot = store_runtime.state.get_or_default(&namespace);
-            let mut dot_alloc = RuntimeDotAllocator::new(origin_replica_id, store_runtime);
+            let mut dot_alloc = RuntimeDotAllocator::new(origin_replica_id, atomic_txn.index_mut());
             engine.plan(
                 &state_snapshot,
                 now_ms,
@@ -248,14 +255,6 @@ impl Daemon {
             )
         }?;
         let (draft, planning_effects) = planned.acknowledge_durability();
-
-        let mut atomic_txn = AtomicWalDurabilityTxn::begin(
-            wal_index.as_ref(),
-            namespace.clone(),
-            origin_replica_id,
-            AtomicWalCommitPath::Mutation,
-        )
-        .map_err(wal_index_to_op)?;
         let LocalAppendPlan {
             origin_seq,
             prev_sha,
@@ -291,6 +290,9 @@ impl Daemon {
 
         let sha = hash_event_body(&sequenced.event_bytes);
         let sha_bytes = sha.0;
+        let max_dot_counter = match &sequenced.event_body.kind {
+            EventKindV1::TxnV1(txn) => txn.delta.max_dot_counter(),
+        };
         let commit_watermarks =
             tip_watermark_pair(origin_seq, sha_bytes).map_err(wal_index_to_op)?;
         let request_proof = sequenced
@@ -400,6 +402,10 @@ impl Daemon {
                 ctx.client_request_id,
             )
             .map_err(wal_index_to_op)?;
+            if let Some(counter) = max_dot_counter {
+                txn.observe_orset_counter(counter)
+                    .map_err(wal_index_to_op)?;
+            }
             if let Some(client_request_id) = ctx.client_request_id {
                 txn.upsert_client_request(
                     &namespace,
@@ -840,6 +846,16 @@ mod tests {
         }
     }
 
+    fn add_labels_request(repo: &Path, id: &str, labels: &[&str]) -> Request {
+        Request::AddLabels {
+            ctx: MutationCtx::new(repo.to_path_buf(), MutationMeta::default()),
+            payload: LabelsPayload {
+                id: BeadId::parse(id).expect("valid bead id"),
+                labels: labels.iter().map(|label| (*label).to_string()).collect(),
+            },
+        }
+    }
+
     fn open_index_for_store(store_id: StoreId) -> (SqliteWalIndex, StoreMeta) {
         let store_dir = crate::paths::store_dir(store_id);
         let meta_path = crate::paths::store_meta_path(store_id);
@@ -857,6 +873,7 @@ mod tests {
         durable_seq: Option<u64>,
         durable_head: Option<[u8; 32]>,
         max_origin_seq: u64,
+        orset_counter: u64,
     }
 
     fn wal_index_snapshot(
@@ -882,11 +899,13 @@ mod tests {
             .max_origin_seq(namespace, &origin)
             .expect("max origin seq")
             .get();
+        let orset_counter = reader.load_orset_counter().expect("load orset counter");
         WalIndexSnapshot {
             event_sha,
             durable_seq,
             durable_head,
             max_origin_seq,
+            orset_counter,
         }
     }
 
@@ -1119,10 +1138,7 @@ mod tests {
             panic!("mutation failed: {err:?}");
         }
 
-        let captured = spans.lock().expect("span capture");
-        let fields = captured.last().cloned().unwrap_or_default();
-
-        for key in [
+        let expected_keys = [
             schema::STORE_ID,
             schema::STORE_EPOCH,
             schema::REPLICA_ID,
@@ -1135,7 +1151,16 @@ mod tests {
             schema::ORIGIN_SEQ,
             "planning_dot_meta_sync_boundaries",
             "wal_durability_effect",
-        ] {
+        ];
+
+        let captured = spans.lock().expect("span capture");
+        let fields = captured
+            .iter()
+            .find(|fields| fields.contains_key(schema::STORE_ID))
+            .cloned()
+            .unwrap_or_default();
+
+        for key in expected_keys {
             assert!(
                 fields.contains_key(key),
                 "mutation span missing {key}: {fields:?}"
@@ -1188,6 +1213,7 @@ mod tests {
                 durable_seq: None,
                 durable_head: None,
                 max_origin_seq: 0,
+                orset_counter: 0,
             }
         );
 
@@ -1212,6 +1238,78 @@ mod tests {
         assert_eq!(after.durable_seq, Some(1));
         let event_sha = after.event_sha.expect("event row present");
         assert_eq!(after.durable_head, Some(event_sha));
+        assert_eq!(after.orset_counter, 0);
+    }
+
+    #[test]
+    fn mutation_allocates_dot_counter_in_wal_index_without_rewriting_store_meta() {
+        let tmp = TempDir::new().expect("temp dir");
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let _override = crate::paths::override_data_dir_for_tests(Some(data_dir));
+
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo path");
+
+        let mut daemon = Daemon::new(actor_id("orset-counter@test"));
+        let store_id = StoreId::new(Uuid::from_bytes([41u8; 16]));
+        let remote = RemoteUrl::new("example.com/test/repo");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+        let (index, meta) = open_index_for_store(store_id);
+        let namespace = NamespaceId::core();
+        let origin = meta.replica_id;
+        let seq = Seq1::from_u64(1).expect("nonzero seq");
+        let (git_tx, _git_rx) = crossbeam::channel::unbounded();
+        let meta_path = crate::paths::store_meta_path(store_id);
+        let meta_before = std::fs::read_to_string(&meta_path).expect("read meta before mutation");
+        let modified_before = std::fs::metadata(&meta_path)
+            .expect("meta metadata before mutation")
+            .modified()
+            .expect("meta modified time before mutation");
+
+        let response = daemon.handle_request(
+            create_request(
+                &repo_path,
+                "bd-wal-counter",
+                "allocator counter lives in wal index",
+            ),
+            &git_tx,
+        );
+        let HandleOutcome::Response(crate::runtime::ipc::Response::Ok { ok }) = response else {
+            panic!("expected successful mutation response");
+        };
+        assert!(
+            matches!(ok, ResponsePayload::Op(_)),
+            "expected op response payload"
+        );
+
+        let response = daemon.handle_request(
+            add_labels_request(&repo_path, "bd-wal-counter", &["hotpath"]),
+            &git_tx,
+        );
+        let HandleOutcome::Response(crate::runtime::ipc::Response::Ok { ok }) = response else {
+            panic!("expected successful label mutation response");
+        };
+        assert!(
+            matches!(ok, ResponsePayload::Op(_)),
+            "expected op response payload"
+        );
+
+        let snapshot = wal_index_snapshot(&index, &namespace, origin, seq);
+        assert_eq!(snapshot.max_origin_seq, 2);
+        assert_eq!(snapshot.orset_counter, 1);
+
+        let meta_after = std::fs::read_to_string(&meta_path).expect("read meta after mutation");
+        let modified_after = std::fs::metadata(&meta_path)
+            .expect("meta metadata after mutation")
+            .modified()
+            .expect("meta modified time after mutation");
+        assert_eq!(meta_after, meta_before);
+        assert_eq!(modified_after, modified_before);
+
+        let persisted_meta: StoreMeta =
+            serde_json::from_str(&meta_after).expect("parse store meta");
+        assert_eq!(persisted_meta.orset_counter, 0);
     }
 
     #[test]
