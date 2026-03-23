@@ -343,16 +343,17 @@ fn admin_reload_policies_reports_safe_and_restart_changes() {
             .iter()
             .any(|change| change.field == "ready_eligible")
     );
-
-    let restart_core = requires_restart
-        .iter()
-        .find(|diff| diff.namespace == NamespaceId::core())
-        .expect("restart core diff");
-    let restart_changes = &restart_core.changes;
     assert!(
-        restart_changes
+        applied_changes
             .iter()
             .any(|change| change.field == "replicate_mode")
+    );
+
+    assert!(
+        requires_restart
+            .iter()
+            .all(|diff| diff.namespace != NamespaceId::core()),
+        "core replicate_mode should hot-reload instead of requiring restart"
     );
 }
 

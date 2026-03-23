@@ -456,12 +456,13 @@ mod tests {
     use crate::core::{
         ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, CanonicalState,
         CheckpointContentSha256, Claim, ContentHash, DepKey, DepKind, Durable, EventBody,
-        EventKindV1, HeadStatus, HlcMax, Limits, Lww, NamespaceId, NamespacePolicy, NoteAppendV1,
-        NoteId, PrevVerified, Priority, ReplicaDurabilityRole, ReplicaEntry, ReplicaId,
-        ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity,
-        StoreMeta, StoreMetaVersions, StoreState, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, VerifiedEvent,
-        WallClock, Watermarks, WireBeadPatch, WireDepAddV1, WireDotV1, WireNoteV1, WireStamp,
-        Workflow, WriteStamp, encode_event_body_canonical, hash_event_body, sha256_bytes,
+        EventKindV1, HeadStatus, HlcMax, Limits, Lww, NamespaceId, NamespacePolicies,
+        NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaDurabilityRole,
+        ReplicaEntry, ReplicaId, ReplicaRoster, ReplicateMode, SegmentId, Seq0, Seq1, Sha256,
+        Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, StoreState,
+        TxnDeltaV1, TxnId, TxnOpV1, TxnV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch,
+        WireDepAddV1, WireDotV1, WireNoteV1, WireStamp, Workflow, WriteStamp,
+        encode_event_body_canonical, hash_event_body, sha256_bytes,
     };
     use crate::git::checkpoint::{
         CHECKPOINT_FORMAT_VERSION, CheckpointExport, CheckpointExportInput, CheckpointFileKind,
@@ -620,9 +621,11 @@ mod tests {
         std::fs::write(path, toml).expect("write replicas.toml");
     }
 
-    fn build_repl_hello(
+    fn build_repl_hello_with_namespaces(
         identity: StoreIdentity,
         replica_id: ReplicaId,
+        requested_namespaces: Vec<NamespaceId>,
+        offered_namespaces: Vec<NamespaceId>,
         limits: &Limits,
     ) -> ReplMessage {
         ReplMessage::Hello(Hello {
@@ -633,8 +636,8 @@ mod tests {
             sender_replica_id: replica_id,
             hello_nonce: 1,
             max_frame_bytes: limits.max_frame_bytes as u32,
-            requested_namespaces: vec![NamespaceId::core()].into(),
-            offered_namespaces: vec![NamespaceId::core()].into(),
+            requested_namespaces: requested_namespaces.into(),
+            offered_namespaces: offered_namespaces.into(),
             seen_durable: BTreeMap::new(),
             seen_applied: Some(BTreeMap::new()),
             capabilities: Capabilities {
@@ -666,6 +669,24 @@ mod tests {
         replica_id: ReplicaId,
         limits: &Limits,
     ) -> WireReplMessage {
+        inbound_handshake_response_with_namespaces(
+            listen_addr,
+            identity,
+            replica_id,
+            vec![NamespaceId::core()],
+            vec![NamespaceId::core()],
+            limits,
+        )
+    }
+
+    fn inbound_handshake_response_with_namespaces(
+        listen_addr: &str,
+        identity: StoreIdentity,
+        replica_id: ReplicaId,
+        requested_namespaces: Vec<NamespaceId>,
+        offered_namespaces: Vec<NamespaceId>,
+        limits: &Limits,
+    ) -> WireReplMessage {
         let stream = TcpStream::connect(listen_addr).expect("connect replication server");
         let mut writer =
             FrameWriter::new(stream.try_clone().expect("clone"), limits.max_frame_bytes);
@@ -673,7 +694,16 @@ mod tests {
             stream,
             FrameLimitState::unnegotiated(limits.max_frame_bytes),
         );
-        send_repl_message(&mut writer, build_repl_hello(identity, replica_id, limits));
+        send_repl_message(
+            &mut writer,
+            build_repl_hello_with_namespaces(
+                identity,
+                replica_id,
+                requested_namespaces,
+                offered_namespaces,
+                limits,
+            ),
+        );
         read_repl_message(&mut reader, limits)
     }
 
@@ -1977,6 +2007,195 @@ mod tests {
             WireReplMessage::Welcome(_) => {}
             other => panic!("replacement roster peer should be admitted: {other:?}"),
         }
+    }
+
+    #[test]
+    fn admin_reload_policies_reconfigures_live_replication_namespaces() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let tmp_ns = NamespaceId::parse("tmp").expect("tmp namespace");
+        {
+            let store = daemon
+                .store_sessions
+                .get_mut(&store_id)
+                .expect("store session")
+                .runtime_mut();
+            let mut tmp_policy = NamespacePolicy::tmp_default();
+            tmp_policy.replicate_mode = ReplicateMode::Peers;
+            store.policies.insert(tmp_ns.clone(), tmp_policy);
+        }
+
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("initial bind");
+
+        let runtime_version_before = bound_repl_runtime_version(&daemon, store_id);
+        let server_addr = daemon
+            .replication_server_local_addr(store_id)
+            .expect("server addr");
+        let local_identity = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store session")
+            .runtime()
+            .meta
+            .identity;
+        let limits = daemon.limits().clone();
+        let peer_replica = ReplicaId::new(Uuid::from_bytes([75u8; 16]));
+
+        let before = inbound_handshake_response_with_namespaces(
+            &server_addr,
+            local_identity,
+            peer_replica,
+            vec![NamespaceId::core(), tmp_ns.clone()],
+            vec![NamespaceId::core(), tmp_ns.clone()],
+            &limits,
+        );
+        let WireReplMessage::Welcome(before) = before else {
+            panic!("expected welcome before policy reload");
+        };
+        assert!(
+            before.accepted_namespaces.contains(&tmp_ns),
+            "tmp should be replicated before reload"
+        );
+
+        let mut core_policy = NamespacePolicy::core_default();
+        core_policy.ready_eligible = false;
+        let mut tmp_policy = NamespacePolicy::tmp_default();
+        tmp_policy.replicate_mode = ReplicateMode::None;
+        let mut namespaces = BTreeMap::new();
+        namespaces.insert(NamespaceId::core(), core_policy);
+        namespaces.insert(tmp_ns.clone(), tmp_policy);
+        let policies = NamespacePolicies { namespaces };
+        let policy_path = daemon.layout.namespaces_path(&store_id);
+        let toml = toml::to_string(&policies).expect("serialize policies");
+        std::fs::write(&policy_path, toml).expect("write policies");
+
+        let (git_tx, _git_rx) = crossbeam::channel::bounded(1);
+        let response = daemon.admin_reload_policies(&repo_path, &git_tx);
+        let Response::Ok { ok } = response else {
+            panic!("policy reload should succeed");
+        };
+        let ResponsePayload::Query(QueryResult::AdminReloadPolicies(output)) = ok else {
+            panic!("expected reload policies output");
+        };
+        assert!(
+            output.applied.iter().any(|diff| {
+                diff.namespace == tmp_ns
+                    && diff
+                        .changes
+                        .iter()
+                        .any(|change| change.field == "replicate_mode")
+            }),
+            "replicate_mode should be reported as hot-applied"
+        );
+        assert!(
+            output.requires_restart.iter().all(|diff| {
+                !diff
+                    .changes
+                    .iter()
+                    .any(|change| change.field == "replicate_mode")
+            }),
+            "replicate_mode should not remain in requires_restart after live reconfigure"
+        );
+
+        let runtime_version_after = bound_repl_runtime_version(&daemon, store_id);
+        assert_ne!(runtime_version_after, runtime_version_before);
+        let server_addr_after = daemon
+            .replication_server_local_addr(store_id)
+            .expect("server addr after reload");
+
+        let after = inbound_handshake_response_with_namespaces(
+            &server_addr_after,
+            local_identity,
+            peer_replica,
+            vec![NamespaceId::core(), tmp_ns.clone()],
+            vec![NamespaceId::core(), tmp_ns.clone()],
+            &limits,
+        );
+        let WireReplMessage::Welcome(after) = after else {
+            panic!("expected welcome after policy reload");
+        };
+        assert!(
+            !after.accepted_namespaces.contains(&tmp_ns),
+            "tmp should be removed from replication after reload"
+        );
+    }
+
+    #[test]
+    fn admin_reload_policies_restores_replication_state_when_rebind_fails() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let tmp_ns = NamespaceId::parse("tmp").expect("tmp namespace");
+        {
+            let store = daemon
+                .store_sessions
+                .get_mut(&store_id)
+                .expect("store session")
+                .runtime_mut();
+            let mut tmp_policy = NamespacePolicy::tmp_default();
+            tmp_policy.replicate_mode = ReplicateMode::Peers;
+            store.policies.insert(tmp_ns.clone(), tmp_policy);
+        }
+
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("initial bind");
+
+        let runtime_version_before = bound_repl_runtime_version(&daemon, store_id);
+        let server_addr_before = daemon
+            .replication_server_local_addr(store_id)
+            .expect("server addr before reload");
+
+        let roster_path = daemon.layout.replicas_path(&store_id);
+        std::fs::write(&roster_path, "not valid toml = [").expect("write invalid roster");
+
+        let mut namespaces = BTreeMap::new();
+        namespaces.insert(NamespaceId::core(), NamespacePolicy::core_default());
+        let mut tmp_policy = NamespacePolicy::tmp_default();
+        tmp_policy.replicate_mode = ReplicateMode::None;
+        namespaces.insert(tmp_ns.clone(), tmp_policy);
+        let policies = NamespacePolicies { namespaces };
+        let policy_path = daemon.layout.namespaces_path(&store_id);
+        let toml = toml::to_string(&policies).expect("serialize policies");
+        std::fs::write(&policy_path, toml).expect("write policies");
+
+        let (git_tx, _git_rx) = crossbeam::channel::bounded(1);
+        let response = daemon.admin_reload_policies(&repo_path, &git_tx);
+        assert!(matches!(response, Response::Err { .. }));
+        assert_eq!(
+            bound_repl_runtime_version(&daemon, store_id),
+            runtime_version_before
+        );
+        assert_eq!(
+            daemon.replication_server_local_addr(store_id),
+            Some(server_addr_before)
+        );
+        let tmp_policy = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store session")
+            .runtime()
+            .policies
+            .get(&tmp_ns)
+            .expect("tmp policy");
+        assert_eq!(tmp_policy.replicate_mode, ReplicateMode::Peers);
     }
 
     #[test]

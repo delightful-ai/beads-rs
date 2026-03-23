@@ -415,8 +415,23 @@ impl Daemon {
             }
         };
 
-        let reload = diff_policy_reload(&store.policies, &policies.namespaces);
-        store.policies = reload.updated;
+        let previous_policies = store.policies.clone();
+        let previous_runtime_version = store.replication_runtime_version();
+        let reload = diff_policy_reload(&previous_policies, &policies.namespaces);
+        store.reload_policies(reload.updated.clone(), reload.reload_replication_runtime);
+        let store_id = store.meta.store_id();
+        drop(proof);
+
+        if reload.reload_replication_runtime
+            && let Err(err) = self.reload_replication_runtime(store_id)
+        {
+            if let Ok(mut proof) = self.ensure_repo_loaded_strict(repo, git_tx) {
+                proof
+                    .runtime_mut()
+                    .restore_policies(previous_policies, previous_runtime_version);
+            }
+            return Response::err_from(err);
+        }
 
         let output = AdminReloadPoliciesOutput {
             applied: reload.applied,

@@ -84,6 +84,11 @@ pub(crate) struct ReplicaIdRotation {
     pub runtime_version: ReplicationRuntimeVersion,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PolicyReloadOutcome {
+    pub reload_replication_runtime: bool,
+}
+
 pub struct StoreRuntime {
     layout: DaemonLayout,
     pub primary_remote: RemoteUrl,
@@ -799,6 +804,29 @@ impl StoreRuntime {
 
     pub(crate) fn replication_runtime_version(&self) -> ReplicationRuntimeVersion {
         self.replication_runtime_version
+    }
+
+    pub(crate) fn reload_policies(
+        &mut self,
+        policies: BTreeMap<NamespaceId, NamespacePolicy>,
+        reload_replication_runtime: bool,
+    ) -> PolicyReloadOutcome {
+        self.policies = policies;
+        if reload_replication_runtime {
+            self.replication_runtime_version = self.replication_runtime_version.next();
+        }
+        PolicyReloadOutcome {
+            reload_replication_runtime,
+        }
+    }
+
+    pub(crate) fn restore_policies(
+        &mut self,
+        policies: BTreeMap<NamespaceId, NamespacePolicy>,
+        runtime_version: ReplicationRuntimeVersion,
+    ) {
+        self.policies = policies;
+        self.replication_runtime_version = runtime_version;
     }
 
     pub(crate) fn rollback_checkpoint_dirty_shards(&mut self, checkpoint_group: &str) {
