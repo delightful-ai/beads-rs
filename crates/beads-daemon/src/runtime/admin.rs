@@ -320,7 +320,7 @@ mod tests {
                 false,
                 None,
                 |_| OfflinePidState::Missing,
-                3,
+                crate::runtime::store::lock::STORE_LOCK_LEASE_TIMEOUT_MS + 10,
             )
             .unwrap();
             assert_eq!(output.action, UnlockAction::RemovedStale);
@@ -393,6 +393,42 @@ mod tests {
                 OpError::InvalidRequest { field, reason } => {
                     assert_eq!(field.as_deref(), Some("force"));
                     assert!(reason.contains("live_daemon"));
+                }
+                other => panic!("unexpected error: {other}"),
+            }
+            assert!(lock_path.exists());
+        });
+    }
+
+    #[test]
+    fn offline_unlock_requires_force_for_fresh_missing_pid_lock() {
+        with_test_data_dir(|_| {
+            let store_id = StoreId::new(Uuid::from_bytes([18u8; 16]));
+            let lock_path = paths::store_lock_path(store_id);
+            let meta = crate::runtime::store::lock::StoreLockMeta {
+                store_id,
+                replica_id: ReplicaId::new(Uuid::from_bytes([19u8; 16])),
+                pid: 6262,
+                started_at_ms: 1,
+                daemon_version: "test".to_string(),
+                lease_epoch: 1,
+                lease_token: Some(Uuid::from_bytes([20u8; 16])),
+                last_heartbeat_ms: Some(2),
+            };
+            write_lock_meta(&lock_path, &meta);
+
+            let err = offline_store_unlock_with_pid_check_at(
+                store_id,
+                false,
+                None,
+                |_| OfflinePidState::Missing,
+                3,
+            )
+            .unwrap_err();
+            match err {
+                OpError::InvalidRequest { field, reason } => {
+                    assert_eq!(field.as_deref(), Some("force"));
+                    assert!(reason.contains("pid_missing"));
                 }
                 other => panic!("unexpected error: {other}"),
             }

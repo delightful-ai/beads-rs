@@ -315,11 +315,19 @@ fn decide_offline_unlock(
     force: bool,
 ) -> OfflineUnlockAction {
     match pid_state {
-        OfflinePidState::Missing => OfflineUnlockAction::Removed {
-            forced: false,
-            reason: OfflineUnlockReason::PidMissing,
-            removed: false,
-        },
+        OfflinePidState::Missing => {
+            if force || !lease_is_fresh {
+                OfflineUnlockAction::Removed {
+                    forced: force,
+                    reason: OfflineUnlockReason::PidMissing,
+                    removed: false,
+                }
+            } else {
+                OfflineUnlockAction::RequireForce {
+                    reason: OfflineUnlockReason::PidMissing,
+                }
+            }
+        }
         OfflinePidState::Alive => {
             if daemon_pid == Some(lock_pid) || lease_is_fresh {
                 if force {
