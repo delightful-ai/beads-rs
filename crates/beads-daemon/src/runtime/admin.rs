@@ -218,7 +218,7 @@ fn fsck_evidence_code_to_api(c: crate::runtime::wal::fsck::FsckEvidenceCode) -> 
 mod tests {
     use super::fsck_repair_to_api;
     use super::offline_store::{
-        OfflinePidState, offline_store_lock_info_output, offline_store_unlock_with_pid_check,
+        OfflinePidState, offline_store_lock_info_output, offline_store_unlock_with_pid_check_at,
     };
     use super::reporting::{WalSegmentStats, build_wal_growth, wal_guardrail_warnings};
     use crate::core::{Limits, NamespaceId, ReplicaId, StoreId};
@@ -309,13 +309,19 @@ mod tests {
                 pid: 4242,
                 started_at_ms: 1,
                 daemon_version: "test".to_string(),
+                lease_epoch: 1,
+                lease_token: Some(Uuid::from_bytes([6u8; 16])),
                 last_heartbeat_ms: Some(2),
             };
             write_lock_meta(&lock_path, &meta);
 
-            let output = offline_store_unlock_with_pid_check(store_id, false, None, |_| {
-                OfflinePidState::Missing
-            })
+            let output = offline_store_unlock_with_pid_check_at(
+                store_id,
+                false,
+                None,
+                |_| OfflinePidState::Missing,
+                3,
+            )
             .unwrap();
             assert_eq!(output.action, UnlockAction::RemovedStale);
             assert!(!lock_path.exists());
@@ -333,13 +339,19 @@ mod tests {
                 pid: 5151,
                 started_at_ms: 1,
                 daemon_version: "test".to_string(),
+                lease_epoch: 1,
+                lease_token: Some(Uuid::from_bytes([7u8; 16])),
                 last_heartbeat_ms: Some(2),
             };
             write_lock_meta(&lock_path, &meta);
 
-            let err = offline_store_unlock_with_pid_check(store_id, false, Some(5151), |_| {
-                OfflinePidState::Alive
-            })
+            let err = offline_store_unlock_with_pid_check_at(
+                store_id,
+                false,
+                Some(5151),
+                |_| OfflinePidState::Alive,
+                3,
+            )
             .unwrap_err();
             match err {
                 OpError::InvalidRequest { field, reason } => {
@@ -349,6 +361,118 @@ mod tests {
                 other => panic!("unexpected error: {other}"),
             }
             assert!(lock_path.exists());
+        });
+    }
+
+    #[test]
+    fn offline_unlock_requires_force_for_fresh_foreign_lock() {
+        with_test_data_dir(|_| {
+            let store_id = StoreId::new(Uuid::from_bytes([8u8; 16]));
+            let lock_path = paths::store_lock_path(store_id);
+            let meta = crate::runtime::store::lock::StoreLockMeta {
+                store_id,
+                replica_id: ReplicaId::new(Uuid::from_bytes([9u8; 16])),
+                pid: 6161,
+                started_at_ms: 1,
+                daemon_version: "test".to_string(),
+                lease_epoch: 1,
+                lease_token: Some(Uuid::from_bytes([10u8; 16])),
+                last_heartbeat_ms: Some(2),
+            };
+            write_lock_meta(&lock_path, &meta);
+
+            let err = offline_store_unlock_with_pid_check_at(
+                store_id,
+                false,
+                Some(5151),
+                |_| OfflinePidState::Alive,
+                3,
+            )
+            .unwrap_err();
+            match err {
+                OpError::InvalidRequest { field, reason } => {
+                    assert_eq!(field.as_deref(), Some("force"));
+                    assert!(reason.contains("live_daemon"));
+                }
+                other => panic!("unexpected error: {other}"),
+            }
+            assert!(lock_path.exists());
+        });
+    }
+
+    #[test]
+    fn offline_unlock_does_not_remove_replacement_lock_after_stale_decision() {
+        with_test_data_dir(|_| {
+            let store_id = StoreId::new(Uuid::from_bytes([11u8; 16]));
+            let lock_path = paths::store_lock_path(store_id);
+            let stale_meta = crate::runtime::store::lock::StoreLockMeta {
+                store_id,
+                replica_id: ReplicaId::new(Uuid::from_bytes([12u8; 16])),
+                pid: 7171,
+                started_at_ms: 1,
+                daemon_version: "old".to_string(),
+                lease_epoch: 1,
+                lease_token: Some(Uuid::from_bytes([13u8; 16])),
+                last_heartbeat_ms: Some(1),
+            };
+            write_lock_meta(&lock_path, &stale_meta);
+
+            let replacement_meta = crate::runtime::store::lock::StoreLockMeta {
+                store_id,
+                replica_id: ReplicaId::new(Uuid::from_bytes([14u8; 16])),
+                pid: 8181,
+                started_at_ms: 2,
+                daemon_version: "new".to_string(),
+                lease_epoch: 2,
+                lease_token: Some(Uuid::from_bytes([15u8; 16])),
+                last_heartbeat_ms: Some(2),
+            };
+
+            let err = offline_store_unlock_with_pid_check_at(
+                store_id,
+                false,
+                None,
+                |_| {
+                    write_lock_meta(&lock_path, &replacement_meta);
+                    OfflinePidState::Missing
+                },
+                crate::runtime::store::lock::STORE_LOCK_LEASE_TIMEOUT_MS + 10,
+            )
+            .unwrap_err();
+            assert!(matches!(err, OpError::StoreRuntime(_)));
+            let on_disk = crate::runtime::store::lock::read_lock_meta(store_id)
+                .expect("read lock meta")
+                .expect("replacement lock remains");
+            assert_eq!(on_disk.lease_epoch, replacement_meta.lease_epoch);
+            assert_eq!(on_disk.lease_token, replacement_meta.lease_token);
+        });
+    }
+
+    #[test]
+    fn offline_unlock_accepts_legacy_stale_lock_file() {
+        with_test_data_dir(|_| {
+            let store_id = StoreId::new(Uuid::from_bytes([16u8; 16]));
+            let lock_path = paths::store_lock_path(store_id);
+            write_legacy_lock_meta(
+                &lock_path,
+                store_id,
+                ReplicaId::new(Uuid::from_bytes([17u8; 16])),
+                9191,
+                1,
+                "legacy",
+                Some(1),
+            );
+
+            let output = offline_store_unlock_with_pid_check_at(
+                store_id,
+                false,
+                None,
+                |_| OfflinePidState::Alive,
+                crate::runtime::store::lock::STORE_LOCK_LEASE_TIMEOUT_MS + 10,
+            )
+            .unwrap();
+            assert_eq!(output.action, UnlockAction::RemovedStale);
+            assert!(!lock_path.exists());
         });
     }
 
@@ -412,6 +536,30 @@ mod tests {
     fn write_lock_meta(path: &Path, meta: &crate::runtime::store::lock::StoreLockMeta) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         let data = serde_json::to_vec(meta).unwrap();
+        std::fs::write(path, data).unwrap();
+    }
+
+    fn write_legacy_lock_meta(
+        path: &Path,
+        store_id: StoreId,
+        replica_id: ReplicaId,
+        pid: u32,
+        started_at_ms: u64,
+        daemon_version: &str,
+        last_heartbeat_ms: Option<u64>,
+    ) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut value = serde_json::json!({
+            "store_id": store_id,
+            "replica_id": replica_id,
+            "pid": pid,
+            "started_at_ms": started_at_ms,
+            "daemon_version": daemon_version,
+        });
+        if let Some(last_heartbeat_ms) = last_heartbeat_ms {
+            value["last_heartbeat_ms"] = serde_json::json!(last_heartbeat_ms);
+        }
+        let data = serde_json::to_vec(&value).unwrap();
         std::fs::write(path, data).unwrap();
     }
 }

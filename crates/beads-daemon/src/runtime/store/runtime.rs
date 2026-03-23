@@ -2015,6 +2015,8 @@ mod tests {
             pid: i32::MAX as u32,
             started_at_ms,
             daemon_version: daemon_version.to_string(),
+            lease_epoch: 1,
+            lease_token: Some(Uuid::from_bytes([201u8; 16])),
             last_heartbeat_ms: Some(started_at_ms),
         };
         let data = serde_json::to_vec(&lock_meta).expect("serialize stale lock meta");

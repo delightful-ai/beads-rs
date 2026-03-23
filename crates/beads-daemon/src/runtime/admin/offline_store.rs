@@ -151,7 +151,13 @@ pub fn offline_store_unlock_output(
     force: bool,
     daemon_pid: Option<u32>,
 ) -> Result<AdminStoreUnlockOutput, OpError> {
-    offline_store_unlock_with_pid_check(store_id, force, daemon_pid, pid_state_for_unlock)
+    offline_store_unlock_with_pid_check_at(
+        store_id,
+        force,
+        daemon_pid,
+        pid_state_for_unlock,
+        WallClock::now().0,
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -227,6 +233,25 @@ pub(super) fn offline_store_unlock_with_pid_check<F>(
 where
     F: FnOnce(u32) -> OfflinePidState,
 {
+    offline_store_unlock_with_pid_check_at(
+        store_id,
+        force,
+        daemon_pid,
+        check_pid,
+        WallClock::now().0,
+    )
+}
+
+pub(super) fn offline_store_unlock_with_pid_check_at<F>(
+    store_id: StoreId,
+    force: bool,
+    daemon_pid: Option<u32>,
+    check_pid: F,
+    now_ms: u64,
+) -> Result<AdminStoreUnlockOutput, OpError>
+where
+    F: FnOnce(u32) -> OfflinePidState,
+{
     let lock_path = crate::daemon_layout_from_paths().store_lock_path(&store_id);
     let meta =
         crate::runtime::store::lock::read_lock_meta(store_id).map_err(store_lock_op_error)?;
@@ -241,11 +266,15 @@ where
     };
 
     let pid_state = check_pid(meta.pid);
-    let mut action = decide_offline_unlock(pid_state, daemon_pid, meta.pid, force);
+    let lease_is_fresh = meta.lease_is_fresh(now_ms);
+    let mut action = decide_offline_unlock(pid_state, daemon_pid, meta.pid, lease_is_fresh, force);
     let forced = matches!(action, OfflineUnlockAction::Removed { forced: true, .. });
     if let OfflineUnlockAction::Removed { removed, .. } = &mut action {
-        *removed =
-            crate::runtime::store::lock::remove_lock_file(store_id).map_err(store_lock_op_error)?;
+        *removed = crate::runtime::store::lock::remove_lock_file_if_meta_matches_with_layout(
+            &crate::daemon_layout_from_paths(),
+            &meta,
+        )
+        .map_err(store_lock_op_error)?;
         tracing::info!(
             store_id = %store_id,
             lock_path = %lock_path.display(),
@@ -282,6 +311,7 @@ fn decide_offline_unlock(
     pid_state: OfflinePidState,
     daemon_pid: Option<u32>,
     lock_pid: u32,
+    lease_is_fresh: bool,
     force: bool,
 ) -> OfflineUnlockAction {
     match pid_state {
@@ -291,7 +321,7 @@ fn decide_offline_unlock(
             removed: false,
         },
         OfflinePidState::Alive => {
-            if daemon_pid == Some(lock_pid) {
+            if daemon_pid == Some(lock_pid) || lease_is_fresh {
                 if force {
                     OfflineUnlockAction::Removed {
                         forced: true,
@@ -312,9 +342,9 @@ fn decide_offline_unlock(
             }
         }
         OfflinePidState::Unknown => {
-            if force {
+            if force || !lease_is_fresh {
                 OfflineUnlockAction::Removed {
-                    forced: true,
+                    forced: force,
                     reason: OfflineUnlockReason::PidUnknown,
                     removed: false,
                 }
