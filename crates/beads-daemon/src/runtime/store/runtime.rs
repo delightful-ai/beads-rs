@@ -327,7 +327,14 @@ fn recover_pending_store_meta_transition(
                 got: meta.store_id(),
             });
         }
-        if meta == &pending.meta {
+        if meta.versions() == expected_versions {
+            if meta != &pending.meta {
+                tracing::warn!(
+                    store_id = %store_id,
+                    pending_path = %pending_path.display(),
+                    "ignoring stale pending store meta transition after committed meta advanced"
+                );
+            }
             if let Err(err) = remove_pending_store_meta_transition(&pending_path) {
                 tracing::warn!(
                     pending_path = %pending_path.display(),
@@ -2439,6 +2446,84 @@ mod tests {
             "recovery must clear the pending marker after committed meta survives"
         );
         assert_eq!(persisted_before_recovery, open.runtime.meta);
+    }
+
+    #[test]
+    fn stale_pending_marker_does_not_rollback_later_committed_meta() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([47u8; 16]));
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let mut runtime = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_000,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("open runtime")
+        .runtime;
+
+        let mut txn = runtime
+            .wal_index
+            .writer()
+            .begin_txn()
+            .expect("begin wal index txn");
+        txn.next_orset_counter().expect("increment orset counter");
+        txn.next_orset_counter().expect("increment orset counter");
+        txn.commit().expect("commit wal index txn");
+
+        let stale_pending = runtime.meta.clone();
+        write_pending_store_meta_transition(
+            &paths::store_meta_pending_path(store_id),
+            &PendingStoreMetaTransitionRecord {
+                meta: stale_pending.clone(),
+            },
+        )
+        .expect("write stale pending marker");
+
+        let rotation = runtime.rotate_replica_id().expect("rotate replica id");
+        drop(runtime);
+
+        let persisted_meta = read_store_meta_optional(&paths::store_meta_path(store_id))
+            .expect("read committed meta after rotation")
+            .expect("committed meta exists after rotation");
+        assert_eq!(persisted_meta.replica_id, rotation.new_replica_id);
+        assert_ne!(persisted_meta.replica_id, stale_pending.replica_id);
+
+        let reopened = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_001,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("reopen runtime after stale pending marker");
+
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after recovery")
+                .is_none(),
+            "recovery must clear stale pending markers once committed meta is authoritative"
+        );
+        assert_eq!(reopened.runtime.meta.replica_id, rotation.new_replica_id);
+        assert_eq!(
+            reopened
+                .runtime
+                .wal_index
+                .reader()
+                .load_orset_counter()
+                .expect("load orset counter after recovery"),
+            2,
+            "stale pending recovery must preserve committed wal index state"
+        );
     }
 
     #[test]
