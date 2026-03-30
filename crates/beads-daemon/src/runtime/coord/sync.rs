@@ -2,6 +2,57 @@ use super::*;
 use crate::runtime::core::StoreSessionToken;
 
 impl Daemon {
+    pub(in crate::runtime) fn start_sync_with_gate(
+        &mut self,
+        gate: crate::scheduler::SyncGateToken,
+        git_tx: &Sender<GitOp>,
+    ) -> bool {
+        if !self.scheduler().gate_is_current(&gate) {
+            return false;
+        }
+        let git_sync_policy = self.git_sync_policy();
+        if !git_sync_policy.allows_sync() {
+            return false;
+        }
+        let remote = gate.remote().clone();
+        let store_id = match self.store_id_for_remote(&remote) {
+            Some(id) => id,
+            None => return false,
+        };
+        let actor = self.actor().clone();
+        let Some(mut loaded) = self.try_loaded_store(store_id, remote.clone()) else {
+            return false;
+        };
+        loaded.maybe_start_sync(git_sync_policy, actor, git_tx, gate)
+    }
+
+    pub(in crate::runtime) fn force_start_sync(
+        &mut self,
+        remote: &RemoteUrl,
+        git_tx: &Sender<GitOp>,
+    ) -> bool {
+        let git_sync_policy = self.git_sync_policy();
+        if !git_sync_policy.allows_sync() {
+            return false;
+        }
+        let store_id = match self.store_id_for_remote(remote) {
+            Some(id) => id,
+            None => return false,
+        };
+        let actor = self.actor().clone();
+        let remote = remote.clone();
+        let Some(mut loaded) = self.try_loaded_store(store_id, remote) else {
+            return false;
+        };
+        let started = loaded.force_start_sync(git_sync_policy, actor, git_tx);
+        let remote = loaded.remote().clone();
+        drop(loaded);
+        if started {
+            self.scheduler_mut().cancel(&remote);
+        }
+        started
+    }
+
     /// Get the next scheduled sync deadline for a remote, if any.
     pub(crate) fn next_sync_deadline_for(&self, remote: &RemoteUrl) -> Option<Instant> {
         self.scheduler().deadline_for(remote)
@@ -188,33 +239,51 @@ impl Daemon {
         &mut self,
         remote: &RemoteUrl,
         git_tx: &Sender<GitOp>,
-    ) {
-        let git_sync_policy = self.git_sync_policy();
-        if !git_sync_policy.allows_sync() {
-            return;
-        }
-        let store_id = match self.store_id_for_remote(remote) {
-            Some(id) => id,
-            None => return,
+    ) -> bool {
+        let Some(gate) = self
+            .scheduler_mut()
+            .issue_immediate_gate(remote, Instant::now())
+        else {
+            return false;
         };
-        let actor = self.actor().clone();
-        let remote = remote.clone();
-        let Some(mut loaded) = self.try_loaded_store(store_id, remote) else {
-            return;
-        };
-        loaded.maybe_start_sync(git_sync_policy, actor, git_tx);
+        self.start_sync_with_gate(gate, git_tx)
     }
 
     pub(crate) fn ensure_loaded_and_maybe_start_sync(
         &mut self,
         repo: &Path,
         git_tx: &Sender<GitOp>,
+    ) -> Result<(LoadedStore<'_>, bool), OpError> {
+        let loaded = self.ensure_repo_loaded(repo, git_tx)?;
+        let store_id = loaded.store_id();
+        let remote = loaded.remote().clone();
+        drop(loaded);
+
+        let started = if let Some(gate) = self
+            .scheduler_mut()
+            .issue_immediate_gate(&remote, Instant::now())
+        {
+            self.start_sync_with_gate(gate, git_tx)
+        } else {
+            false
+        };
+
+        Ok((self.loaded_store(store_id, remote), started))
+    }
+
+    pub(crate) fn ensure_loaded_and_force_start_sync(
+        &mut self,
+        repo: &Path,
+        git_tx: &Sender<GitOp>,
     ) -> Result<LoadedStore<'_>, OpError> {
-        let actor = self.actor().clone();
-        let git_sync_policy = self.git_sync_policy();
-        let mut loaded = self.ensure_repo_loaded(repo, git_tx)?;
-        loaded.maybe_start_sync(git_sync_policy, actor, git_tx);
-        Ok(loaded)
+        let loaded = self.ensure_repo_loaded(repo, git_tx)?;
+        let store_id = loaded.store_id();
+        let remote = loaded.remote().clone();
+        drop(loaded);
+
+        let _ = self.force_start_sync(&remote, git_tx);
+
+        Ok(self.loaded_store(store_id, remote))
     }
 
     /// Complete a sync operation.

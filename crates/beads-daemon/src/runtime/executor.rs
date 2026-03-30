@@ -15,7 +15,9 @@ use std::time::{Duration, Instant};
 use crossbeam::channel::Sender;
 
 use super::core::{Daemon, HandleOutcome, ParsedMutationMeta, detect_clock_skew};
-use super::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
+use super::durability_coordinator::{
+    DurabilityCoordinator, DurabilityRequestClaim, ReplicatedPoll,
+};
 use super::git_worker::GitOp;
 use super::ipc::{
     AddNotePayload, ClaimPayload, ClosePayload, CreatePayload, DeletePayload, DepPayload,
@@ -27,7 +29,7 @@ use super::mutation_engine::{
     SequencedEvent, StampedContext,
 };
 use super::ops::OpError;
-use super::store::runtime::{StoreRuntime, StoreRuntimeError, load_replica_roster};
+use super::store::runtime::{StoreRuntimeError, load_replica_roster};
 use super::wal::{
     ClientRequestEventIds, EventWalError, FrameReader, HlcRow, RecordHeader, RequestProof,
     SegmentRow, VerifiedRecord, WalAppend, WalAppendDurabilityEffect, WalCursorOffset, WalIndex,
@@ -56,7 +58,7 @@ pub struct DurabilityWait {
     pub namespace: NamespaceId,
     pub origin: ReplicaId,
     pub seq: Seq1,
-    pub requested: DurabilityClass,
+    pub claim: DurabilityRequestClaim,
     pub wait_timeout: Duration,
     pub response: OpResponse,
 }
@@ -203,7 +205,7 @@ impl Daemon {
             return Ok(outcome);
         }
 
-        coordinator.ensure_available(&namespace, durability)?;
+        let durability_claim = coordinator.request_claim(&namespace, durability)?;
 
         let id_ctx = if matches!(parsed_request, ParsedMutationRequest::Create { .. }) {
             let repo_state = proof.lane();
@@ -231,10 +233,17 @@ impl Daemon {
         };
         let stamped_ctx = StampedContext::new(ctx.clone(), stamp.clone())?;
         let mut proof = self.loaded_store(store_id, remote.clone());
+        let mut atomic_txn = AtomicWalDurabilityTxn::begin(
+            wal_index.as_ref(),
+            namespace.clone(),
+            origin_replica_id,
+            AtomicWalCommitPath::Mutation,
+        )
+        .map_err(wal_index_to_op)?;
         let planned = {
             let store_runtime = proof.runtime_mut();
             let state_snapshot = store_runtime.state.get_or_default(&namespace);
-            let mut dot_alloc = RuntimeDotAllocator::new(origin_replica_id, store_runtime);
+            let mut dot_alloc = RuntimeDotAllocator::new(origin_replica_id, atomic_txn.index_mut());
             engine.plan(
                 &state_snapshot,
                 now_ms,
@@ -246,14 +255,6 @@ impl Daemon {
             )
         }?;
         let (draft, planning_effects) = planned.acknowledge_durability();
-
-        let mut atomic_txn = AtomicWalDurabilityTxn::begin(
-            wal_index.as_ref(),
-            namespace.clone(),
-            origin_replica_id,
-            AtomicWalCommitPath::Mutation,
-        )
-        .map_err(wal_index_to_op)?;
         let LocalAppendPlan {
             origin_seq,
             prev_sha,
@@ -289,6 +290,9 @@ impl Daemon {
 
         let sha = hash_event_body(&sequenced.event_bytes);
         let sha_bytes = sha.0;
+        let max_dot_counter = match &sequenced.event_body.kind {
+            EventKindV1::TxnV1(txn) => txn.delta.max_dot_counter(),
+        };
         let commit_watermarks =
             tip_watermark_pair(origin_seq, sha_bytes).map_err(wal_index_to_op)?;
         let request_proof = sequenced
@@ -296,6 +300,7 @@ impl Daemon {
             .map(|client_request_id| RequestProof::Client {
                 client_request_id,
                 request_sha256: sequenced.request_sha256,
+                durability_claim: Some(durability_claim.clone()),
             })
             .unwrap_or(RequestProof::None);
 
@@ -316,6 +321,7 @@ impl Daemon {
             tracing::error!(error = ?err, "record verification failed");
             OpError::Internal("record verification failed")
         })?;
+        enforce_exact_record_size(&record, &limits)?;
 
         let now_ms = sequenced.event_body.event_time_ms;
         let (append, wal_effect, segment_snapshot) = {
@@ -397,6 +403,10 @@ impl Daemon {
                 ctx.client_request_id,
             )
             .map_err(wal_index_to_op)?;
+            if let Some(counter) = max_dot_counter {
+                txn.observe_orset_counter(counter)
+                    .map_err(wal_index_to_op)?;
+            }
             if let Some(client_request_id) = ctx.client_request_id {
                 txn.upsert_client_request(
                     &namespace,
@@ -406,6 +416,7 @@ impl Daemon {
                     sequenced.event_body.txn_id,
                     &event_ids,
                     now_ms,
+                    Some(&durability_claim),
                 )
                 .map_err(wal_index_to_op)?;
             }
@@ -492,14 +503,15 @@ impl Daemon {
         );
 
         let mut response = OpResponse::new(result, receipt);
-        let mut outcome = match durability {
-            DurabilityClass::ReplicatedFsync { k } => {
-                match coordinator.poll_replicated(&namespace, origin_replica_id, origin_seq, k) {
+        let mut outcome = match durability_claim.clone() {
+            DurabilityRequestClaim::Replicated(claim) => {
+                let requested = DurabilityClass::ReplicatedFsync { k: claim.k };
+                match coordinator.poll_claim(&namespace, origin_replica_id, origin_seq, &claim) {
                     Ok(ReplicatedPoll::Satisfied { acked_by }) => {
                         response.receipt = DurabilityCoordinator::achieved_receipt(
                             response.receipt,
-                            durability,
-                            k,
+                            requested,
+                            claim.k,
                             acked_by,
                         );
                         MutationOutcome::Immediate(response)
@@ -510,11 +522,11 @@ impl Daemon {
                                 DurabilityCoordinator::pending_replica_ids(&eligible, &acked_by);
                             let pending_receipt = DurabilityCoordinator::pending_receipt(
                                 response.receipt,
-                                durability,
+                                requested,
                                 acked_by,
                             );
                             return Err(OpError::DurabilityTimeout {
-                                requested: durability,
+                                requested,
                                 waited_ms: 0,
                                 pending_replica_ids: Some(pending),
                                 receipt: Box::new(pending_receipt),
@@ -525,7 +537,7 @@ impl Daemon {
                             namespace: namespace.clone(),
                             origin: origin_replica_id,
                             seq: origin_seq,
-                            requested: durability,
+                            claim: DurabilityRequestClaim::Replicated(claim),
                             wait_timeout,
                             response,
                         })
@@ -533,7 +545,7 @@ impl Daemon {
                     Err(err) => return Err(err),
                 }
             }
-            DurabilityClass::LocalFsync => MutationOutcome::Immediate(response),
+            DurabilityRequestClaim::LocalFsync => MutationOutcome::Immediate(response),
         };
 
         tracing::info!("mutation committed");
@@ -787,9 +799,11 @@ mod tests {
     use crate::clock::Clock;
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadType, CanonicalState, Claim, ClientRequestId,
-        DurabilityReceipt, EventId, Labels, Lww, NamespaceId, NoteAppendV1, NoteId, Priority, Seq1,
-        Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TraceId, TxnId,
-        TxnOpV1, WireBeadPatch, WireNoteV1, WireStamp, Workflow, WriteStamp,
+        DurabilityClass, DurabilityReceipt, EventId, Labels, Limits, Lww, NamespaceId,
+        NamespacePolicy, NoteAppendV1, NoteId, Priority, ReplicaDurabilityRole, ReplicaEntry,
+        ReplicaId, ReplicaRoster, Seq1, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta,
+        StoreMetaVersions, TraceId, TxnId, TxnOpV1, WireBeadPatch, WireNoteV1, WireStamp, Workflow,
+        WriteStamp,
     };
     use crate::remote::RemoteUrl;
     use crate::runtime::core::Daemon;
@@ -834,6 +848,16 @@ mod tests {
         }
     }
 
+    fn add_labels_request(repo: &Path, id: &str, labels: &[&str]) -> Request {
+        Request::AddLabels {
+            ctx: MutationCtx::new(repo.to_path_buf(), MutationMeta::default()),
+            payload: LabelsPayload {
+                id: BeadId::parse(id).expect("valid bead id"),
+                labels: labels.iter().map(|label| (*label).to_string()).collect(),
+            },
+        }
+    }
+
     fn open_index_for_store(store_id: StoreId) -> (SqliteWalIndex, StoreMeta) {
         let store_dir = crate::paths::store_dir(store_id);
         let meta_path = crate::paths::store_meta_path(store_id);
@@ -851,6 +875,7 @@ mod tests {
         durable_seq: Option<u64>,
         durable_head: Option<[u8; 32]>,
         max_origin_seq: u64,
+        orset_counter: u64,
     }
 
     fn wal_index_snapshot(
@@ -876,11 +901,13 @@ mod tests {
             .max_origin_seq(namespace, &origin)
             .expect("max origin seq")
             .get();
+        let orset_counter = reader.load_orset_counter().expect("load orset counter");
         WalIndexSnapshot {
             event_sha,
             durable_seq,
             durable_head,
             max_origin_seq,
+            orset_counter,
         }
     }
 
@@ -1113,10 +1140,7 @@ mod tests {
             panic!("mutation failed: {err:?}");
         }
 
-        let captured = spans.lock().expect("span capture");
-        let fields = captured.last().cloned().unwrap_or_default();
-
-        for key in [
+        let expected_keys = [
             schema::STORE_ID,
             schema::STORE_EPOCH,
             schema::REPLICA_ID,
@@ -1129,12 +1153,211 @@ mod tests {
             schema::ORIGIN_SEQ,
             "planning_dot_meta_sync_boundaries",
             "wal_durability_effect",
-        ] {
+        ];
+
+        let captured = spans.lock().expect("span capture");
+        let fields = captured
+            .iter()
+            .find(|fields| fields.contains_key(schema::STORE_ID))
+            .cloned()
+            .unwrap_or_default();
+
+        for key in expected_keys {
             assert!(
                 fields.contains_key(key),
                 "mutation span missing {key}: {fields:?}"
             );
         }
+    }
+
+    #[test]
+    fn replicated_client_request_prechecks_exact_wal_record_size() {
+        let tmp = TempDir::new().expect("temp dir");
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let _override = crate::paths::override_data_dir_for_tests(Some(data_dir));
+
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo path");
+
+        let store_id = StoreId::new(Uuid::from_bytes([61u8; 16]));
+        let remote = RemoteUrl::new("example.com/test/repo");
+        {
+            let mut seed_daemon = Daemon::new(actor_id("wal-size-seed@test"));
+            insert_store_for_tests(&mut seed_daemon, store_id, remote.clone(), &repo_path)
+                .expect("seed store");
+        }
+
+        let (_index, meta) = open_index_for_store(store_id);
+        let store = StoreIdentity::new(meta.store_id(), meta.store_epoch());
+        let replica_id = meta.replica_id;
+        let peer = ReplicaId::new(Uuid::from_bytes([62u8; 16]));
+        let actor = actor_id("wal-size@test");
+        let client_request_id = ClientRequestId::new(Uuid::from_bytes([63u8; 16]));
+        let request = CreatePayload {
+            id: Some(BeadId::parse("bd-wal-size").expect("bead id")),
+            parent: None,
+            title: "replicated wal size precheck".to_string(),
+            bead_type: BeadType::Task,
+            priority: Priority::MEDIUM,
+            description: None,
+            design: None,
+            acceptance_criteria: None,
+            assignee: None,
+            external_ref: None,
+            estimated_minutes: None,
+            labels: Vec::new(),
+            dependencies: Vec::new(),
+        };
+
+        let limits = Limits::default();
+        let engine = MutationEngine::new(limits.clone());
+        let parsed_request =
+            ParsedMutationRequest::parse_create(request.clone(), &actor).expect("parse create");
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: Some(client_request_id),
+            trace_id: TraceId::from(client_request_id),
+        };
+        let mut clock = fixed_clock(1_700_000_300_000);
+        let now_ms = clock.wall_ms();
+        let stamp = Stamp::new(clock.tick(), actor.clone());
+        let stamped_ctx = StampedContext::new(ctx.clone(), stamp).expect("stamped ctx");
+        let mut dots = TestDotAllocator::new(replica_id);
+        let planned = engine
+            .plan(
+                &CanonicalState::default(),
+                now_ms,
+                stamped_ctx,
+                store,
+                Some(&IdContext {
+                    root_slug: None,
+                    remote_url: remote.clone(),
+                }),
+                parsed_request,
+                &mut dots,
+            )
+            .expect("plan mutation");
+        let (draft, _planning_effects) = planned.acknowledge_durability();
+        let origin_seq = Seq1::from_u64(1).expect("nonzero seq");
+        let sequenced = engine
+            .build_event(draft, store, ctx.namespace.clone(), replica_id, origin_seq)
+            .expect("build event");
+        let request_proof = RequestProof::Client {
+            client_request_id,
+            request_sha256: sequenced.request_sha256,
+            durability_claim: Some(DurabilityRequestClaim::Replicated(
+                crate::runtime::durability_coordinator::ReplicatedDurabilityClaim {
+                    k: std::num::NonZeroU32::new(1).expect("nonzero quorum"),
+                    eligible: [peer].into_iter().collect(),
+                },
+            )),
+        };
+        let record = VerifiedRecord::new(
+            RecordHeader {
+                origin_replica_id: replica_id,
+                origin_seq,
+                event_time_ms: sequenced.event_body.event_time_ms,
+                txn_id: sequenced.event_body.txn_id,
+                request_proof,
+                sha256: hash_event_body(&sequenced.event_bytes).0,
+                prev_sha256: None,
+            },
+            sequenced.event_bytes.clone(),
+            sequenced.event_body.clone(),
+        )
+        .expect("verified record");
+        let exact_record_bytes = record.encode_body().expect("encode record").len();
+        let legacy_estimate = crate::runtime::wal::record::RECORD_HEADER_BASE_LEN
+            + sequenced.event_bytes.len()
+            + 32
+            + 32
+            + 16;
+        assert!(
+            legacy_estimate < exact_record_bytes,
+            "legacy estimate should miss durability-claim bytes: legacy={legacy_estimate} exact={exact_record_bytes}"
+        );
+
+        let mut low_limits = Limits::default();
+        low_limits.max_wal_record_bytes = exact_record_bytes - 1;
+        let mut daemon = Daemon::new_with_limits(actor.clone(), low_limits.clone());
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("insert store");
+
+        let roster = ReplicaRoster {
+            replicas: vec![
+                ReplicaEntry {
+                    replica_id,
+                    name: "local".to_string(),
+                    role: ReplicaDurabilityRole::anchor(true),
+                    allowed_namespaces: None,
+                    expire_after_ms: None,
+                },
+                ReplicaEntry {
+                    replica_id: peer,
+                    name: "peer".to_string(),
+                    role: ReplicaDurabilityRole::peer(true),
+                    allowed_namespaces: None,
+                    expire_after_ms: None,
+                },
+            ],
+        };
+        let roster_path = daemon.layout().replicas_path(&store_id);
+        std::fs::write(
+            &roster_path,
+            toml::to_string(&roster).expect("serialize roster"),
+        )
+        .expect("write roster");
+
+        let mutation_meta = MutationMeta {
+            durability: Some(DurabilityClass::ReplicatedFsync {
+                k: std::num::NonZeroU32::new(1).expect("nonzero quorum"),
+            }),
+            client_request_id: Some(client_request_id),
+            ..MutationMeta::default()
+        };
+        let (git_tx, _git_rx) = crossbeam::channel::unbounded();
+        let err = match daemon.apply_mutation_request_with_inner(
+            &repo_path,
+            mutation_meta,
+            |actor| ParsedMutationRequest::parse_create(request.clone(), actor),
+            &git_tx,
+        ) {
+            Ok(_) => panic!("exact record precheck should reject oversize record"),
+            Err(err) => err,
+        };
+
+        match err {
+            OpError::WalRecordTooLarge {
+                max_wal_record_bytes,
+                estimated_bytes,
+            } => {
+                assert_eq!(max_wal_record_bytes, low_limits.max_wal_record_bytes);
+                assert_eq!(estimated_bytes, exact_record_bytes);
+            }
+            other => panic!("expected WalRecordTooLarge, got {other:?}"),
+        }
+
+        let loaded = daemon.loaded_store(store_id, remote);
+        assert!(
+            loaded
+                .runtime()
+                .event_wal
+                .segment_snapshot(&NamespaceId::core())
+                .is_none(),
+            "precheck should reject before creating an active WAL segment"
+        );
+        let segments = loaded
+            .runtime()
+            .wal_index
+            .reader()
+            .list_segments(&NamespaceId::core())
+            .expect("list wal segments");
+        assert!(
+            segments.is_empty(),
+            "precheck should reject before indexing a WAL segment"
+        );
     }
 
     #[test]
@@ -1182,6 +1405,7 @@ mod tests {
                 durable_seq: None,
                 durable_head: None,
                 max_origin_seq: 0,
+                orset_counter: 0,
             }
         );
 
@@ -1206,6 +1430,78 @@ mod tests {
         assert_eq!(after.durable_seq, Some(1));
         let event_sha = after.event_sha.expect("event row present");
         assert_eq!(after.durable_head, Some(event_sha));
+        assert_eq!(after.orset_counter, 0);
+    }
+
+    #[test]
+    fn mutation_allocates_dot_counter_in_wal_index_without_rewriting_store_meta() {
+        let tmp = TempDir::new().expect("temp dir");
+        let data_dir = tmp.path().join("data");
+        std::fs::create_dir_all(&data_dir).expect("create data dir");
+        let _override = crate::paths::override_data_dir_for_tests(Some(data_dir));
+
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo path");
+
+        let mut daemon = Daemon::new(actor_id("orset-counter@test"));
+        let store_id = StoreId::new(Uuid::from_bytes([41u8; 16]));
+        let remote = RemoteUrl::new("example.com/test/repo");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+        let (index, meta) = open_index_for_store(store_id);
+        let namespace = NamespaceId::core();
+        let origin = meta.replica_id;
+        let seq = Seq1::from_u64(1).expect("nonzero seq");
+        let (git_tx, _git_rx) = crossbeam::channel::unbounded();
+        let meta_path = crate::paths::store_meta_path(store_id);
+        let meta_before = std::fs::read_to_string(&meta_path).expect("read meta before mutation");
+        let modified_before = std::fs::metadata(&meta_path)
+            .expect("meta metadata before mutation")
+            .modified()
+            .expect("meta modified time before mutation");
+
+        let response = daemon.handle_request(
+            create_request(
+                &repo_path,
+                "bd-wal-counter",
+                "allocator counter lives in wal index",
+            ),
+            &git_tx,
+        );
+        let HandleOutcome::Response(crate::runtime::ipc::Response::Ok { ok }) = response else {
+            panic!("expected successful mutation response");
+        };
+        assert!(
+            matches!(ok, ResponsePayload::Op(_)),
+            "expected op response payload"
+        );
+
+        let response = daemon.handle_request(
+            add_labels_request(&repo_path, "bd-wal-counter", &["hotpath"]),
+            &git_tx,
+        );
+        let HandleOutcome::Response(crate::runtime::ipc::Response::Ok { ok }) = response else {
+            panic!("expected successful label mutation response");
+        };
+        assert!(
+            matches!(ok, ResponsePayload::Op(_)),
+            "expected op response payload"
+        );
+
+        let snapshot = wal_index_snapshot(&index, &namespace, origin, seq);
+        assert_eq!(snapshot.max_origin_seq, 2);
+        assert_eq!(snapshot.orset_counter, 1);
+
+        let meta_after = std::fs::read_to_string(&meta_path).expect("read meta after mutation");
+        let modified_after = std::fs::metadata(&meta_path)
+            .expect("meta metadata after mutation")
+            .modified()
+            .expect("meta modified time after mutation");
+        assert_eq!(meta_after, meta_before);
+        assert_eq!(modified_after, modified_before);
+
+        let persisted_meta: StoreMeta =
+            serde_json::from_str(&meta_after).expect("parse store meta");
+        assert_eq!(persisted_meta.orset_counter, 0);
     }
 
     #[test]
@@ -1332,7 +1628,13 @@ mod tests {
         let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
         let store = StoreIdentity::new(store_id, StoreEpoch::new(0));
         let replica_id = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
-        let versions = StoreMetaVersions::new(1, 2, 1, 1, StoreMetaVersions::INDEX_SCHEMA_VERSION);
+        let versions = StoreMetaVersions::new(
+            1,
+            StoreMetaVersions::WAL_FORMAT_VERSION,
+            1,
+            1,
+            StoreMetaVersions::INDEX_SCHEMA_VERSION,
+        );
         let meta = StoreMeta::new(store, replica_id, versions, 1_700_000_000_000);
 
         let index = SqliteWalIndex::open(&store_dir, &meta, IndexDurabilityMode::Cache).unwrap();
@@ -1375,7 +1677,6 @@ mod tests {
         let sequenced = engine
             .build_event(draft, store, ctx.namespace.clone(), replica_id, origin_seq)
             .unwrap();
-
         let sha = hash_event_body(&sequenced.event_bytes).0;
         let request_proof = sequenced
             .event_body
@@ -1383,6 +1684,7 @@ mod tests {
             .map(|client_request_id| RequestProof::Client {
                 client_request_id,
                 request_sha256: sequenced.request_sha256,
+                durability_claim: None,
             })
             .unwrap_or(RequestProof::None);
         let record = VerifiedRecord::new(
@@ -1450,6 +1752,387 @@ mod tests {
         assert_eq!(
             response.receipt.event_ids(),
             vec![EventId::new(replica_id, ctx.namespace.clone(), origin_seq)]
+        );
+    }
+
+    #[test]
+    fn idempotent_retry_keeps_original_replicated_cohort_semantics() {
+        let temp = TempDir::new().unwrap();
+        let store_dir = temp.path().join("store");
+        std::fs::create_dir_all(&store_dir).unwrap();
+
+        let store_id = StoreId::new(Uuid::from_bytes([11u8; 16]));
+        let store = StoreIdentity::new(store_id, StoreEpoch::new(0));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([12u8; 16]));
+        let peer_a = ReplicaId::new(Uuid::from_bytes([13u8; 16]));
+        let peer_b = ReplicaId::new(Uuid::from_bytes([14u8; 16]));
+        let versions = StoreMetaVersions::new(
+            1,
+            StoreMetaVersions::WAL_FORMAT_VERSION,
+            1,
+            1,
+            StoreMetaVersions::INDEX_SCHEMA_VERSION,
+        );
+        let meta = StoreMeta::new(store, replica_id, versions, 1_700_000_100_000);
+
+        let index = SqliteWalIndex::open(&store_dir, &meta, IndexDurabilityMode::Cache).unwrap();
+        let limits = Limits::default();
+        let engine = MutationEngine::new(limits.clone());
+        let actor = actor_id("alice");
+        let state = make_state_with_bead("bd-123", &actor);
+
+        let client_request_id = ClientRequestId::new(Uuid::from_bytes([15u8; 16]));
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: Some(client_request_id),
+            trace_id: TraceId::from(client_request_id),
+        };
+        let request = ParsedMutationRequest::parse_add_labels(LabelsPayload {
+            id: BeadId::parse("bd-123").expect("bead id"),
+            labels: vec!["alpha".into()],
+        })
+        .unwrap();
+
+        let origin_seq = Seq1::new(std::num::NonZeroU64::new(1).unwrap());
+        let mut clock = fixed_clock(1_700_000_100_000);
+        let now_ms = clock.wall_ms();
+        let stamp = Stamp::new(clock.tick(), actor.clone());
+        let stamped_ctx = StampedContext::new(ctx.clone(), stamp.clone()).unwrap();
+        let mut dots = TestDotAllocator::new(replica_id);
+        let planned = engine
+            .plan(
+                &state,
+                now_ms,
+                stamped_ctx,
+                store,
+                None,
+                request.clone(),
+                &mut dots,
+            )
+            .unwrap();
+        let (draft, _planning_effects) = planned.acknowledge_durability();
+        let sequenced = engine
+            .build_event(draft, store, ctx.namespace.clone(), replica_id, origin_seq)
+            .unwrap();
+        let frozen_claim = DurabilityRequestClaim::Replicated(
+            crate::runtime::durability_coordinator::ReplicatedDurabilityClaim {
+                k: std::num::NonZeroU32::new(2).unwrap(),
+                eligible: [peer_a, peer_b].into_iter().collect(),
+            },
+        );
+
+        let sha = hash_event_body(&sequenced.event_bytes).0;
+        let request_proof = sequenced
+            .event_body
+            .client_request_id
+            .map(|client_request_id| RequestProof::Client {
+                client_request_id,
+                request_sha256: sequenced.request_sha256,
+                durability_claim: Some(frozen_claim.clone()),
+            })
+            .unwrap_or(RequestProof::None);
+        let record = VerifiedRecord::new(
+            RecordHeader {
+                origin_replica_id: replica_id,
+                origin_seq,
+                event_time_ms: sequenced.event_body.event_time_ms,
+                txn_id: sequenced.event_body.txn_id,
+                request_proof,
+                sha256: sha,
+                prev_sha256: None,
+            },
+            sequenced.event_bytes.clone(),
+            sequenced.event_body.clone(),
+        )
+        .unwrap();
+
+        let mut writer = SegmentWriter::open(
+            &store_dir,
+            &meta,
+            &ctx.namespace,
+            sequenced.event_body.event_time_ms,
+            SegmentConfig::from_limits(&limits),
+        )
+        .unwrap();
+        writer
+            .append(&record, sequenced.event_body.event_time_ms)
+            .unwrap();
+
+        rebuild_index(&store_dir, &meta, &index, &limits).unwrap();
+
+        let mut policies = std::collections::BTreeMap::new();
+        policies.insert(ctx.namespace.clone(), NamespacePolicy::core_default());
+        let original_roster = ReplicaRoster {
+            replicas: vec![
+                ReplicaEntry {
+                    replica_id,
+                    name: "local".to_string(),
+                    role: ReplicaDurabilityRole::anchor(true),
+                    allowed_namespaces: None,
+                    expire_after_ms: None,
+                },
+                ReplicaEntry {
+                    replica_id: peer_a,
+                    name: "peer-a".to_string(),
+                    role: ReplicaDurabilityRole::peer(true),
+                    allowed_namespaces: None,
+                    expire_after_ms: None,
+                },
+                ReplicaEntry {
+                    replica_id: peer_b,
+                    name: "peer-b".to_string(),
+                    role: ReplicaDurabilityRole::peer(true),
+                    allowed_namespaces: None,
+                    expire_after_ms: None,
+                },
+            ],
+        };
+        let peer_acks = Arc::new(std::sync::Mutex::new(
+            crate::runtime::repl::PeerAckTable::new(),
+        ));
+        let original = DurabilityCoordinator::new(
+            replica_id,
+            policies.clone(),
+            Some(original_roster),
+            Arc::clone(&peer_acks),
+        );
+        original
+            .ensure_available(
+                &ctx.namespace,
+                DurabilityClass::ReplicatedFsync {
+                    k: std::num::NonZeroU32::new(2).unwrap(),
+                },
+            )
+            .unwrap();
+
+        let retry_roster = ReplicaRoster {
+            replicas: vec![
+                ReplicaEntry {
+                    replica_id,
+                    name: "local".to_string(),
+                    role: ReplicaDurabilityRole::anchor(true),
+                    allowed_namespaces: None,
+                    expire_after_ms: None,
+                },
+                ReplicaEntry {
+                    replica_id: peer_a,
+                    name: "peer-a".to_string(),
+                    role: ReplicaDurabilityRole::peer(true),
+                    allowed_namespaces: None,
+                    expire_after_ms: None,
+                },
+            ],
+        };
+        let retry = DurabilityCoordinator::new(replica_id, policies, Some(retry_roster), peer_acks);
+
+        let outcome = try_reuse_idempotent_response(
+            &engine,
+            &ctx,
+            &request,
+            &index,
+            &store_dir,
+            store,
+            replica_id,
+            Watermarks::new(),
+            Watermarks::new(),
+            &limits,
+            DurabilityClass::ReplicatedFsync {
+                k: std::num::NonZeroU32::new(2).unwrap(),
+            },
+            &retry,
+            Duration::from_millis(50),
+        )
+        .unwrap()
+        .expect("expected idempotent response");
+
+        let wait = match outcome {
+            MutationOutcome::Pending(wait) => wait,
+            MutationOutcome::Immediate(_) => panic!("retry should stay pending on original cohort"),
+        };
+        assert_eq!(wait.seq, origin_seq);
+        assert_eq!(
+            wait.claim,
+            DurabilityRequestClaim::Replicated(
+                crate::runtime::durability_coordinator::ReplicatedDurabilityClaim {
+                    k: std::num::NonZeroU32::new(2).unwrap(),
+                    eligible: [peer_a, peer_b].into_iter().collect(),
+                }
+            )
+        );
+    }
+
+    #[test]
+    fn idempotent_retry_legacy_row_freezes_current_replicated_claim_once() {
+        let temp = TempDir::new().unwrap();
+        let store_dir = temp.path().join("store");
+        std::fs::create_dir_all(&store_dir).unwrap();
+
+        let store_id = StoreId::new(Uuid::from_bytes([21u8; 16]));
+        let store = StoreIdentity::new(store_id, StoreEpoch::new(0));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([22u8; 16]));
+        let peer_a = ReplicaId::new(Uuid::from_bytes([23u8; 16]));
+        let peer_b = ReplicaId::new(Uuid::from_bytes([24u8; 16]));
+        let versions = StoreMetaVersions::new(
+            1,
+            StoreMetaVersions::WAL_FORMAT_VERSION,
+            1,
+            1,
+            StoreMetaVersions::INDEX_SCHEMA_VERSION,
+        );
+        let meta = StoreMeta::new(store, replica_id, versions, 1_700_000_200_000);
+
+        let index = SqliteWalIndex::open(&store_dir, &meta, IndexDurabilityMode::Cache).unwrap();
+        let limits = Limits::default();
+        let engine = MutationEngine::new(limits.clone());
+        let actor = actor_id("alice");
+        let state = make_state_with_bead("bd-123", &actor);
+
+        let client_request_id = ClientRequestId::new(Uuid::from_bytes([25u8; 16]));
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: Some(client_request_id),
+            trace_id: TraceId::from(client_request_id),
+        };
+        let request = ParsedMutationRequest::parse_add_labels(LabelsPayload {
+            id: BeadId::parse("bd-123").expect("bead id"),
+            labels: vec!["alpha".into()],
+        })
+        .unwrap();
+
+        let origin_seq = Seq1::new(std::num::NonZeroU64::new(1).unwrap());
+        let mut clock = fixed_clock(1_700_000_200_000);
+        let now_ms = clock.wall_ms();
+        let stamp = Stamp::new(clock.tick(), actor.clone());
+        let stamped_ctx = StampedContext::new(ctx.clone(), stamp.clone()).unwrap();
+        let mut dots = TestDotAllocator::new(replica_id);
+        let planned = engine
+            .plan(
+                &state,
+                now_ms,
+                stamped_ctx,
+                store,
+                None,
+                request.clone(),
+                &mut dots,
+            )
+            .unwrap();
+        let (draft, _planning_effects) = planned.acknowledge_durability();
+        let sequenced = engine
+            .build_event(draft, store, ctx.namespace.clone(), replica_id, origin_seq)
+            .unwrap();
+
+        let sha = hash_event_body(&sequenced.event_bytes).0;
+        let request_proof = sequenced
+            .event_body
+            .client_request_id
+            .map(|client_request_id| RequestProof::Client {
+                client_request_id,
+                request_sha256: sequenced.request_sha256,
+                durability_claim: None,
+            })
+            .unwrap_or(RequestProof::None);
+        let record = VerifiedRecord::new(
+            RecordHeader {
+                origin_replica_id: replica_id,
+                origin_seq,
+                event_time_ms: sequenced.event_body.event_time_ms,
+                txn_id: sequenced.event_body.txn_id,
+                request_proof,
+                sha256: sha,
+                prev_sha256: None,
+            },
+            sequenced.event_bytes.clone(),
+            sequenced.event_body.clone(),
+        )
+        .unwrap();
+
+        let mut writer = SegmentWriter::open(
+            &store_dir,
+            &meta,
+            &ctx.namespace,
+            sequenced.event_body.event_time_ms,
+            SegmentConfig::from_limits(&limits),
+        )
+        .unwrap();
+        writer
+            .append(&record, sequenced.event_body.event_time_ms)
+            .unwrap();
+
+        rebuild_index(&store_dir, &meta, &index, &limits).unwrap();
+
+        let mut policies = std::collections::BTreeMap::new();
+        policies.insert(ctx.namespace.clone(), NamespacePolicy::core_default());
+        let retry_roster = ReplicaRoster {
+            replicas: vec![
+                ReplicaEntry {
+                    replica_id,
+                    name: "local".to_string(),
+                    role: ReplicaDurabilityRole::anchor(true),
+                    allowed_namespaces: None,
+                    expire_after_ms: None,
+                },
+                ReplicaEntry {
+                    replica_id: peer_a,
+                    name: "peer-a".to_string(),
+                    role: ReplicaDurabilityRole::peer(true),
+                    allowed_namespaces: None,
+                    expire_after_ms: None,
+                },
+                ReplicaEntry {
+                    replica_id: peer_b,
+                    name: "peer-b".to_string(),
+                    role: ReplicaDurabilityRole::peer(true),
+                    allowed_namespaces: None,
+                    expire_after_ms: None,
+                },
+            ],
+        };
+        let retry = DurabilityCoordinator::new(
+            replica_id,
+            policies,
+            Some(retry_roster),
+            Arc::new(std::sync::Mutex::new(
+                crate::runtime::repl::PeerAckTable::new(),
+            )),
+        );
+
+        let outcome = try_reuse_idempotent_response(
+            &engine,
+            &ctx,
+            &request,
+            &index,
+            &store_dir,
+            store,
+            replica_id,
+            Watermarks::new(),
+            Watermarks::new(),
+            &limits,
+            DurabilityClass::ReplicatedFsync {
+                k: std::num::NonZeroU32::new(2).unwrap(),
+            },
+            &retry,
+            Duration::from_millis(50),
+        )
+        .unwrap()
+        .expect("expected idempotent response");
+
+        let wait = match outcome {
+            MutationOutcome::Pending(wait) => wait,
+            MutationOutcome::Immediate(_) => {
+                panic!("legacy retry should freeze the current cohort and remain pending")
+            }
+        };
+        assert_eq!(wait.seq, origin_seq);
+        assert_eq!(
+            wait.claim,
+            DurabilityRequestClaim::Replicated(
+                crate::runtime::durability_coordinator::ReplicatedDurabilityClaim {
+                    k: std::num::NonZeroU32::new(2).unwrap(),
+                    eligible: [peer_a, peer_b].into_iter().collect(),
+                }
+            )
         );
     }
 }

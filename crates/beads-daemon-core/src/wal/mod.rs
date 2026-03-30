@@ -12,6 +12,7 @@ use crate::core::{
     StoreId, Transience, TxnId, Watermark, WatermarkPair,
 };
 pub use crate::core::{ReplicaDurabilityRole, ReplicaDurabilityRoleError};
+use crate::durability::DurabilityRequestClaim;
 
 #[cfg(any(feature = "test-harness", test))]
 pub mod contract;
@@ -115,8 +116,6 @@ pub enum WalIndexError {
         namespace: String,
         origin: ReplicaId,
     },
-    #[error("wal index txn conflict: expected version {expected}, got {got}")]
-    ConcurrentWrite { expected: u64, got: u64 },
     #[error("equivocation for {namespace} {origin} seq {seq}")]
     Equivocation {
         namespace: NamespaceId,
@@ -176,7 +175,6 @@ impl WalIndexError {
             | WalIndexError::ReplicaLivenessRowDecode(_)
             | WalIndexError::CborDecode(_)
             | WalIndexError::CborEncode(_)
-            | WalIndexError::ConcurrentWrite { .. }
             | WalIndexError::OriginSeqOverflow { .. } => ProtocolErrorCode::IndexCorrupt.into(),
             WalIndexError::Sql { .. } => ProtocolErrorCode::IndexCorrupt.into(),
             WalIndexError::Io { .. } => CliErrorCode::IoError.into(),
@@ -195,7 +193,6 @@ impl WalIndexError {
             WalIndexError::Equivocation { .. }
             | WalIndexError::EventConflict { .. }
             | WalIndexError::ClientRequestIdReuseMismatch { .. } => Transience::Permanent,
-            WalIndexError::ConcurrentWrite { .. } => Transience::Retryable,
             _ => Transience::Retryable,
         }
     }
@@ -312,7 +309,6 @@ impl WalIndexError {
             | WalIndexError::ReplicaLivenessRowDecode(_)
             | WalIndexError::CborDecode(_)
             | WalIndexError::CborEncode(_)
-            | WalIndexError::ConcurrentWrite { .. }
             | WalIndexError::OriginSeqOverflow { .. }
             | WalIndexError::Sql { .. } => ErrorPayload::new(
                 ProtocolErrorCode::IndexCorrupt.into(),
@@ -345,6 +341,8 @@ pub trait WalIndexWriter {
 }
 
 pub trait WalIndexTxn {
+    fn next_orset_counter(&mut self) -> Result<u64, WalIndexError>;
+    fn observe_orset_counter(&mut self, counter: u64) -> Result<(), WalIndexError>;
     fn next_origin_seq(
         &mut self,
         ns: &NamespaceId,
@@ -393,6 +391,7 @@ pub trait WalIndexTxn {
         txn_id: TxnId,
         event_ids: &ClientRequestEventIds,
         created_at_ms: u64,
+        durability_claim: Option<&DurabilityRequestClaim>,
     ) -> Result<(), WalIndexError>;
     fn upsert_replica_liveness(&mut self, row: &ReplicaLivenessRow) -> Result<(), WalIndexError>;
     fn commit(self: Box<Self>) -> Result<(), WalIndexError>;
@@ -400,6 +399,7 @@ pub trait WalIndexTxn {
 }
 
 pub trait WalIndexReader {
+    fn load_orset_counter(&self) -> Result<u64, WalIndexError>;
     fn lookup_event_sha(
         &self,
         ns: &NamespaceId,
@@ -518,6 +518,7 @@ pub struct ClientRequestRow {
     pub txn_id: TxnId,
     pub event_ids: ClientRequestEventIds,
     pub created_at_ms: u64,
+    pub durability_claim: Option<DurabilityRequestClaim>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]

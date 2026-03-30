@@ -411,8 +411,8 @@ impl Daemon {
 
     pub(in crate::runtime) fn fire_due_syncs(&mut self, git_tx: &Sender<GitOp>) {
         let due = self.scheduler.drain_due(Instant::now());
-        for remote in due {
-            self.maybe_start_sync(&remote, git_tx);
+        for gate in due {
+            self.start_sync_with_gate(gate, git_tx);
         }
     }
 
@@ -456,12 +456,13 @@ mod tests {
     use crate::core::{
         ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, CanonicalState,
         CheckpointContentSha256, Claim, ContentHash, DepKey, DepKind, Durable, EventBody,
-        EventKindV1, HeadStatus, HlcMax, Limits, Lww, NamespaceId, NamespacePolicy, NoteAppendV1,
-        NoteId, PrevVerified, Priority, ReplicaDurabilityRole, ReplicaEntry, ReplicaId,
-        ReplicaRoster, SegmentId, Seq0, Seq1, Sha256, Stamp, StoreEpoch, StoreId, StoreIdentity,
-        StoreMeta, StoreMetaVersions, StoreState, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, VerifiedEvent,
-        WallClock, Watermarks, WireBeadPatch, WireDepAddV1, WireDotV1, WireNoteV1, WireStamp,
-        Workflow, WriteStamp, encode_event_body_canonical, hash_event_body, sha256_bytes,
+        EventKindV1, HeadStatus, HlcMax, Limits, Lww, NamespaceId, NamespacePolicies,
+        NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaDurabilityRole,
+        ReplicaEntry, ReplicaId, ReplicaRoster, ReplicateMode, SegmentId, Seq0, Seq1, Sha256,
+        Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, StoreState,
+        TxnDeltaV1, TxnId, TxnOpV1, TxnV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch,
+        WireDepAddV1, WireDotV1, WireNoteV1, WireStamp, Workflow, WriteStamp,
+        encode_event_body_canonical, hash_event_body, sha256_bytes,
     };
     use crate::git::checkpoint::{
         CHECKPOINT_FORMAT_VERSION, CheckpointExport, CheckpointExportInput, CheckpointFileKind,
@@ -475,7 +476,7 @@ mod tests {
         FrameLimitState, FrameReader, FrameWriter, ReplEnvelope, ReplMessage, WireReplMessage,
         decode_envelope, encode_envelope,
     };
-    use crate::runtime::store::lock::read_lock_meta;
+    use crate::runtime::store::lock::{StoreLockMeta, read_lock_meta};
     use crate::runtime::store::runtime::StoreRuntime;
     use crate::runtime::wal::frame::encode_frame;
     use crate::runtime::wal::{HlcRow, RecordHeader, RequestProof, SegmentHeader, VerifiedRecord};
@@ -620,9 +621,11 @@ mod tests {
         std::fs::write(path, toml).expect("write replicas.toml");
     }
 
-    fn build_repl_hello(
+    fn build_repl_hello_with_namespaces(
         identity: StoreIdentity,
         replica_id: ReplicaId,
+        requested_namespaces: Vec<NamespaceId>,
+        offered_namespaces: Vec<NamespaceId>,
         limits: &Limits,
     ) -> ReplMessage {
         ReplMessage::Hello(Hello {
@@ -633,8 +636,8 @@ mod tests {
             sender_replica_id: replica_id,
             hello_nonce: 1,
             max_frame_bytes: limits.max_frame_bytes as u32,
-            requested_namespaces: vec![NamespaceId::core()].into(),
-            offered_namespaces: vec![NamespaceId::core()].into(),
+            requested_namespaces: requested_namespaces.into(),
+            offered_namespaces: offered_namespaces.into(),
             seen_durable: BTreeMap::new(),
             seen_applied: Some(BTreeMap::new()),
             capabilities: Capabilities {
@@ -666,6 +669,24 @@ mod tests {
         replica_id: ReplicaId,
         limits: &Limits,
     ) -> WireReplMessage {
+        inbound_handshake_response_with_namespaces(
+            listen_addr,
+            identity,
+            replica_id,
+            vec![NamespaceId::core()],
+            vec![NamespaceId::core()],
+            limits,
+        )
+    }
+
+    fn inbound_handshake_response_with_namespaces(
+        listen_addr: &str,
+        identity: StoreIdentity,
+        replica_id: ReplicaId,
+        requested_namespaces: Vec<NamespaceId>,
+        offered_namespaces: Vec<NamespaceId>,
+        limits: &Limits,
+    ) -> WireReplMessage {
         let stream = TcpStream::connect(listen_addr).expect("connect replication server");
         let mut writer =
             FrameWriter::new(stream.try_clone().expect("clone"), limits.max_frame_bytes);
@@ -673,7 +694,16 @@ mod tests {
             stream,
             FrameLimitState::unnegotiated(limits.max_frame_bytes),
         );
-        send_repl_message(&mut writer, build_repl_hello(identity, replica_id, limits));
+        send_repl_message(
+            &mut writer,
+            build_repl_hello_with_namespaces(
+                identity,
+                replica_id,
+                requested_namespaces,
+                offered_namespaces,
+                limits,
+            ),
+        );
         read_repl_message(&mut reader, limits)
     }
 
@@ -1081,6 +1111,55 @@ mod tests {
             .expect("read lock meta")
             .expect("lock meta");
         assert_eq!(after.last_heartbeat_ms, Some(now_ms));
+    }
+
+    #[test]
+    fn store_lock_heartbeat_losing_ownership_drops_store_state() {
+        let _tmp = test_store_dir();
+        let mut daemon = Daemon::new_with_limits(test_actor(), Limits::default());
+        let remote = test_remote();
+        let store_id = insert_store(&mut daemon, &remote);
+        let current = read_lock_meta(store_id)
+            .expect("read current lock meta")
+            .expect("lock meta");
+        let replacement = StoreLockMeta {
+            store_id,
+            replica_id: ReplicaId::new(Uuid::from_bytes([91u8; 16])),
+            pid: current.pid.saturating_add(1),
+            started_at_ms: current.started_at_ms.saturating_add(1),
+            daemon_version: "replacement".to_string(),
+            lease_epoch: current.lease_epoch.saturating_add(1),
+            lease_token: Some(Uuid::from_bytes([92u8; 16])),
+            last_heartbeat_ms: Some(
+                current
+                    .last_heartbeat_ms
+                    .unwrap_or(current.started_at_ms)
+                    .saturating_add(1),
+            ),
+        };
+        let lock_path = crate::paths::store_lock_path(store_id);
+        std::fs::write(
+            &lock_path,
+            serde_json::to_vec(&replacement).expect("encode replacement lock"),
+        )
+        .expect("write replacement lock");
+
+        let now = Instant::now() + Duration::from_millis(5);
+        let now_ms = replacement
+            .last_heartbeat_ms
+            .unwrap_or(replacement.started_at_ms)
+            .saturating_add(1);
+        daemon.fire_due_lock_heartbeats_at(now, Duration::from_millis(1), now_ms);
+
+        assert!(
+            !daemon.store_sessions.contains_key(&store_id),
+            "store session should drop once it no longer owns the lease"
+        );
+        let after = read_lock_meta(store_id)
+            .expect("read replacement lock")
+            .expect("replacement lock remains");
+        assert_eq!(after.lease_epoch, replacement.lease_epoch);
+        assert_eq!(after.lease_token, replacement.lease_token);
     }
 
     #[cfg(unix)]
@@ -1980,6 +2059,195 @@ mod tests {
     }
 
     #[test]
+    fn admin_reload_policies_reconfigures_live_replication_namespaces() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let tmp_ns = NamespaceId::parse("tmp").expect("tmp namespace");
+        {
+            let store = daemon
+                .store_sessions
+                .get_mut(&store_id)
+                .expect("store session")
+                .runtime_mut();
+            let mut tmp_policy = NamespacePolicy::tmp_default();
+            tmp_policy.replicate_mode = ReplicateMode::Peers;
+            store.policies.insert(tmp_ns.clone(), tmp_policy);
+        }
+
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("initial bind");
+
+        let runtime_version_before = bound_repl_runtime_version(&daemon, store_id);
+        let server_addr = daemon
+            .replication_server_local_addr(store_id)
+            .expect("server addr");
+        let local_identity = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store session")
+            .runtime()
+            .meta
+            .identity;
+        let limits = daemon.limits().clone();
+        let peer_replica = ReplicaId::new(Uuid::from_bytes([75u8; 16]));
+
+        let before = inbound_handshake_response_with_namespaces(
+            &server_addr,
+            local_identity,
+            peer_replica,
+            vec![NamespaceId::core(), tmp_ns.clone()],
+            vec![NamespaceId::core(), tmp_ns.clone()],
+            &limits,
+        );
+        let WireReplMessage::Welcome(before) = before else {
+            panic!("expected welcome before policy reload");
+        };
+        assert!(
+            before.accepted_namespaces.contains(&tmp_ns),
+            "tmp should be replicated before reload"
+        );
+
+        let mut core_policy = NamespacePolicy::core_default();
+        core_policy.ready_eligible = false;
+        let mut tmp_policy = NamespacePolicy::tmp_default();
+        tmp_policy.replicate_mode = ReplicateMode::None;
+        let mut namespaces = BTreeMap::new();
+        namespaces.insert(NamespaceId::core(), core_policy);
+        namespaces.insert(tmp_ns.clone(), tmp_policy);
+        let policies = NamespacePolicies { namespaces };
+        let policy_path = daemon.layout.namespaces_path(&store_id);
+        let toml = toml::to_string(&policies).expect("serialize policies");
+        std::fs::write(&policy_path, toml).expect("write policies");
+
+        let (git_tx, _git_rx) = crossbeam::channel::bounded(1);
+        let response = daemon.admin_reload_policies(&repo_path, &git_tx);
+        let Response::Ok { ok } = response else {
+            panic!("policy reload should succeed");
+        };
+        let ResponsePayload::Query(QueryResult::AdminReloadPolicies(output)) = ok else {
+            panic!("expected reload policies output");
+        };
+        assert!(
+            output.applied.iter().any(|diff| {
+                diff.namespace == tmp_ns
+                    && diff
+                        .changes
+                        .iter()
+                        .any(|change| change.field == "replicate_mode")
+            }),
+            "replicate_mode should be reported as hot-applied"
+        );
+        assert!(
+            output.requires_restart.iter().all(|diff| {
+                !diff
+                    .changes
+                    .iter()
+                    .any(|change| change.field == "replicate_mode")
+            }),
+            "replicate_mode should not remain in requires_restart after live reconfigure"
+        );
+
+        let runtime_version_after = bound_repl_runtime_version(&daemon, store_id);
+        assert_ne!(runtime_version_after, runtime_version_before);
+        let server_addr_after = daemon
+            .replication_server_local_addr(store_id)
+            .expect("server addr after reload");
+
+        let after = inbound_handshake_response_with_namespaces(
+            &server_addr_after,
+            local_identity,
+            peer_replica,
+            vec![NamespaceId::core(), tmp_ns.clone()],
+            vec![NamespaceId::core(), tmp_ns.clone()],
+            &limits,
+        );
+        let WireReplMessage::Welcome(after) = after else {
+            panic!("expected welcome after policy reload");
+        };
+        assert!(
+            !after.accepted_namespaces.contains(&tmp_ns),
+            "tmp should be removed from replication after reload"
+        );
+    }
+
+    #[test]
+    fn admin_reload_policies_restores_replication_state_when_rebind_fails() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let tmp_ns = NamespaceId::parse("tmp").expect("tmp namespace");
+        {
+            let store = daemon
+                .store_sessions
+                .get_mut(&store_id)
+                .expect("store session")
+                .runtime_mut();
+            let mut tmp_policy = NamespacePolicy::tmp_default();
+            tmp_policy.replicate_mode = ReplicateMode::Peers;
+            store.policies.insert(tmp_ns.clone(), tmp_policy);
+        }
+
+        let (repl_tx, _repl_rx) = crossbeam::channel::bounded(8);
+        daemon.set_repl_ingest_tx(repl_tx);
+        daemon
+            .ensure_replication_runtime(store_id)
+            .expect("initial bind");
+
+        let runtime_version_before = bound_repl_runtime_version(&daemon, store_id);
+        let server_addr_before = daemon
+            .replication_server_local_addr(store_id)
+            .expect("server addr before reload");
+
+        let roster_path = daemon.layout.replicas_path(&store_id);
+        std::fs::write(&roster_path, "not valid toml = [").expect("write invalid roster");
+
+        let mut namespaces = BTreeMap::new();
+        namespaces.insert(NamespaceId::core(), NamespacePolicy::core_default());
+        let mut tmp_policy = NamespacePolicy::tmp_default();
+        tmp_policy.replicate_mode = ReplicateMode::None;
+        namespaces.insert(tmp_ns.clone(), tmp_policy);
+        let policies = NamespacePolicies { namespaces };
+        let policy_path = daemon.layout.namespaces_path(&store_id);
+        let toml = toml::to_string(&policies).expect("serialize policies");
+        std::fs::write(&policy_path, toml).expect("write policies");
+
+        let (git_tx, _git_rx) = crossbeam::channel::bounded(1);
+        let response = daemon.admin_reload_policies(&repo_path, &git_tx);
+        assert!(matches!(response, Response::Err { .. }));
+        assert_eq!(
+            bound_repl_runtime_version(&daemon, store_id),
+            runtime_version_before
+        );
+        assert_eq!(
+            daemon.replication_server_local_addr(store_id),
+            Some(server_addr_before)
+        );
+        let tmp_policy = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store session")
+            .runtime()
+            .policies
+            .get(&tmp_ns)
+            .expect("tmp policy");
+        assert_eq!(tmp_policy.replicate_mode, ReplicateMode::Peers);
+    }
+
+    #[test]
     fn ping_reports_daemon_started_at_ms() {
         let mut daemon = Daemon::new(test_actor());
         daemon.set_started_at_ms(Some(1));
@@ -2175,6 +2443,169 @@ mod tests {
             .expect("core state");
         assert!(core_state.get_live(&live.core.id).is_some());
         assert!(loaded.lane().sync_in_progress);
+    }
+
+    #[test]
+    fn maybe_start_sync_does_not_bypass_backoff_schedule_after_failure() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("insert store");
+
+        {
+            let mut loaded = daemon.loaded_store(store_id, remote.clone());
+            let repo_state = loaded.lane_mut();
+            repo_state.dirty = true;
+            repo_state.sync_in_progress = true;
+        }
+
+        daemon.complete_sync(
+            session_token(&daemon, store_id),
+            &remote,
+            Err(SyncError::NoLocalRef("sync failed".to_string())),
+        );
+
+        assert!(
+            daemon.scheduler.is_pending(&remote),
+            "failed sync should schedule a retry through the scheduler"
+        );
+
+        let (git_tx, git_rx) = crossbeam::channel::bounded(1);
+        daemon.maybe_start_sync(&remote, &git_tx);
+
+        assert!(
+            git_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+            "sync retry must wait for the scheduler-issued backoff window"
+        );
+        assert!(
+            !daemon
+                .loaded_store(store_id, remote)
+                .lane()
+                .sync_in_progress,
+            "direct maybe_start_sync must not mark sync in progress while backoff is pending"
+        );
+    }
+
+    #[test]
+    fn stale_gate_token_cannot_start_sync_after_scheduler_state_changes() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("insert store");
+
+        {
+            let mut loaded = daemon.loaded_store(store_id, remote.clone());
+            loaded.lane_mut().dirty = true;
+        }
+
+        let gate = daemon
+            .scheduler
+            .issue_immediate_gate(&remote, Instant::now())
+            .expect("initial immediate gate");
+        daemon
+            .scheduler
+            .schedule_after(remote.clone(), Duration::from_secs(30));
+
+        let (git_tx, git_rx) = crossbeam::channel::bounded(1);
+        daemon.start_sync_with_gate(gate, &git_tx);
+
+        assert!(
+            git_rx.recv_timeout(Duration::from_millis(20)).is_err(),
+            "stale gate token must not remain valid after scheduler state changes"
+        );
+        assert!(
+            !daemon
+                .loaded_store(store_id, remote)
+                .lane()
+                .sync_in_progress,
+            "stale gate token must not flip sync state"
+        );
+    }
+
+    #[test]
+    fn force_start_sync_bypasses_backoff_for_explicit_and_shutdown_syncs() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("insert store");
+
+        {
+            let mut loaded = daemon.loaded_store(store_id, remote.clone());
+            let repo_state = loaded.lane_mut();
+            repo_state.dirty = true;
+            repo_state.sync_in_progress = true;
+        }
+
+        daemon.complete_sync(
+            session_token(&daemon, store_id),
+            &remote,
+            Err(SyncError::NoLocalRef("sync failed".to_string())),
+        );
+
+        let (git_tx, git_rx) = crossbeam::channel::bounded(1);
+        assert!(
+            daemon.force_start_sync(&remote, &git_tx),
+            "forced sync should ignore scheduler backoff for explicit sync/shutdown flows"
+        );
+        assert!(
+            git_rx.recv_timeout(Duration::from_millis(20)).is_ok(),
+            "forced sync should enqueue a git sync op despite pending backoff"
+        );
+        assert!(
+            daemon
+                .loaded_store(store_id, remote)
+                .lane()
+                .sync_in_progress,
+            "forced sync should mark sync in progress"
+        );
+    }
+
+    #[test]
+    fn force_start_sync_clears_stale_pending_backoff() {
+        let tmp = TempStoreDir::new();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+        let store_id = store_id_from_remote(&remote);
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo");
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), &repo_path)
+            .expect("insert store");
+
+        {
+            let mut loaded = daemon.loaded_store(store_id, remote.clone());
+            let repo_state = loaded.lane_mut();
+            repo_state.dirty = true;
+            repo_state.sync_in_progress = true;
+        }
+
+        daemon.complete_sync(
+            session_token(&daemon, store_id),
+            &remote,
+            Err(SyncError::NoLocalRef("sync failed".to_string())),
+        );
+        assert!(
+            daemon.scheduler.is_pending(&remote),
+            "failed sync should leave a pending retry backoff"
+        );
+
+        let (git_tx, _git_rx) = crossbeam::channel::bounded(1);
+        assert!(daemon.force_start_sync(&remote, &git_tx));
+        assert!(
+            !daemon.scheduler.is_pending(&remote),
+            "forced sync should clear the obsolete retry backoff it bypassed"
+        );
     }
 
     #[test]
@@ -3187,7 +3618,7 @@ mod tests {
         let event1 = verified_event_for_seq(store, &namespace, origin, 1, None);
         let record1 = record_for_event(&event1);
 
-        let versions = StoreMetaVersions::new(1, 2, 3, 4, 5);
+        let versions = StoreMetaVersions::new(1, StoreMetaVersions::WAL_FORMAT_VERSION, 3, 4, 5);
         let meta = StoreMeta::new(
             store,
             ReplicaId::new(Uuid::from_bytes([8u8; 16])),

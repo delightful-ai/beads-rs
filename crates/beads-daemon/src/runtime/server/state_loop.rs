@@ -63,9 +63,7 @@ pub(in crate::runtime) fn run_state_loop(
                         let _guard = span.enter();
 
                         if let Some((Some(repo), read)) = read_gate {
-                            let git_sync_policy = daemon.git_sync_policy();
-                            let actor = daemon.actor().clone();
-                            let mut loaded = match daemon.ensure_repo_fresh(&repo, &git_tx) {
+                                let loaded = match daemon.ensure_repo_fresh(&repo, &git_tx) {
                                 Ok(loaded) => loaded,
                                 Err(err) => {
                                     let _ = respond.send(ServerReply::Response(Response::err_from(err)));
@@ -114,7 +112,9 @@ pub(in crate::runtime) fn run_state_loop(
                                         // If this request is waiting on remote-applied watermarks,
                                         // start sync immediately when local state is dirty instead of
                                         // waiting for the debounce window.
-                                        loaded.maybe_start_sync(git_sync_policy, actor, &git_tx);
+                                        let remote = loaded.remote().clone();
+                                        drop(loaded);
+                                        daemon.maybe_start_sync(&remote, &git_tx);
 
                                         let started_at = Instant::now();
                                         let timeout = Duration::from_millis(read.wait_timeout_ms());
@@ -179,7 +179,7 @@ pub(in crate::runtime) fn run_state_loop(
                                 })
                                 .collect();
                             for remote in remotes_to_sync {
-                                daemon.maybe_start_sync(&remote, &git_tx);
+                                let _ = daemon.force_start_sync(&remote, &git_tx);
                             }
 
                             // Wait for in-flight syncs

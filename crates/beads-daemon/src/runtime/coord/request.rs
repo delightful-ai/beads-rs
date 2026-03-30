@@ -307,7 +307,7 @@ impl Daemon {
 
             Request::Sync { ctx, .. } => {
                 // Force immediate sync (used for graceful shutdown)
-                match self.ensure_loaded_and_maybe_start_sync(&ctx.path, git_tx) {
+                match self.ensure_loaded_and_force_start_sync(&ctx.path, git_tx) {
                     Ok(_) => Response::ok(ResponsePayload::synced()),
                     Err(e) => Response::err_from(e),
                 }

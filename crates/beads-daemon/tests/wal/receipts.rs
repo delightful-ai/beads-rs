@@ -82,6 +82,7 @@ fn receipt_survives_restart() {
         txn_id,
         &event_ids,
         created_at_ms,
+        None,
     )
     .expect("upsert client request");
     txn.commit().expect("commit");

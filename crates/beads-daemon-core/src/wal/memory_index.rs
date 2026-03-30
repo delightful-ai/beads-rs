@@ -6,6 +6,7 @@ use crate::core::{
     ActorId, ClientRequestId, EventId, NamespaceId, ReplicaId, SegmentId, Seq0, Seq1, TxnId,
     WatermarkPair,
 };
+use crate::durability::DurabilityRequestClaim;
 
 use super::{
     ClientRequestEventIds, ClientRequestRow, HlcRow, IndexDurabilityMode, IndexedRangeItem,
@@ -29,7 +30,7 @@ struct EventEntry {
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 struct MemoryWalIndexState {
-    version: u64,
+    orset_counter: u64,
     origin_next_seq: BTreeMap<(NamespaceId, ReplicaId), u64>,
     events: BTreeMap<EventKey, EventEntry>,
     segments: BTreeMap<(NamespaceId, SegmentId), SegmentRow>,
@@ -126,12 +127,10 @@ impl WalIndexWriter for MemoryWalIndexWriter {
             .read()
             .expect("memory wal index lock poisoned")
             .clone();
-        let base_version = snapshot.version;
         Ok(Box::new(MemoryWalIndexTxn {
             state: Arc::clone(&self.state),
             txn_gate: Arc::clone(&self.txn_gate),
             working: snapshot,
-            base_version,
             committed: false,
         }))
     }
@@ -141,7 +140,6 @@ struct MemoryWalIndexTxn {
     state: Arc<RwLock<MemoryWalIndexState>>,
     txn_gate: Arc<AtomicBool>,
     working: MemoryWalIndexState,
-    base_version: u64,
     committed: bool,
 }
 
@@ -157,6 +155,22 @@ impl MemoryWalIndexTxn {
 }
 
 impl WalIndexTxn for MemoryWalIndexTxn {
+    fn next_orset_counter(&mut self) -> Result<u64, WalIndexError> {
+        self.ensure_live()?;
+        let next =
+            self.working.orset_counter.checked_add(1).ok_or_else(|| {
+                WalIndexError::EventIdDecode("orset counter overflow".to_string())
+            })?;
+        self.working.orset_counter = next;
+        Ok(next)
+    }
+
+    fn observe_orset_counter(&mut self, counter: u64) -> Result<(), WalIndexError> {
+        self.ensure_live()?;
+        self.working.orset_counter = self.working.orset_counter.max(counter);
+        Ok(())
+    }
+
     fn next_origin_seq(
         &mut self,
         ns: &NamespaceId,
@@ -322,6 +336,7 @@ impl WalIndexTxn for MemoryWalIndexTxn {
         txn_id: TxnId,
         event_ids: &ClientRequestEventIds,
         created_at_ms: u64,
+        durability_claim: Option<&DurabilityRequestClaim>,
     ) -> Result<(), WalIndexError> {
         self.ensure_live()?;
         event_ids.ensure_matches(ns, origin)?;
@@ -346,6 +361,7 @@ impl WalIndexTxn for MemoryWalIndexTxn {
                 txn_id,
                 event_ids: event_ids.clone(),
                 created_at_ms,
+                durability_claim: durability_claim.cloned(),
             },
         );
         Ok(())
@@ -370,10 +386,7 @@ impl WalIndexTxn for MemoryWalIndexTxn {
             return Ok(());
         }
         let mut guard = self.state.write().expect("memory wal index lock poisoned");
-        let _ = self.base_version;
-        let mut working = std::mem::take(&mut self.working);
-        working.version = guard.version.wrapping_add(1);
-        *guard = working;
+        *guard = std::mem::take(&mut self.working);
         self.committed = true;
         self.txn_gate.store(false, Ordering::Release);
         Ok(())
@@ -426,6 +439,14 @@ impl MemoryWalIndexReader {
 }
 
 impl WalIndexReader for MemoryWalIndexReader {
+    fn load_orset_counter(&self) -> Result<u64, WalIndexError> {
+        Ok(self
+            .state
+            .read()
+            .expect("memory wal index lock poisoned")
+            .orset_counter)
+    }
+
     fn lookup_event_sha(
         &self,
         ns: &NamespaceId,
@@ -642,6 +663,7 @@ mod tests {
                 TxnId::new(Uuid::from_bytes([6u8; 16])),
                 &event_ids,
                 10,
+                None,
             )
             .expect("upsert client request");
         first.commit().expect("commit");
@@ -656,12 +678,71 @@ mod tests {
                 TxnId::new(Uuid::from_bytes([7u8; 16])),
                 &event_ids,
                 11,
+                None,
             )
             .expect_err("reuse mismatch");
         assert!(matches!(
             err,
             WalIndexError::ClientRequestIdReuseMismatch { .. }
         ));
+    }
+
+    #[test]
+    fn model_snapshot_ignores_transaction_history() {
+        let namespace = NamespaceId::core();
+        let segment = SegmentRow::open(
+            namespace.clone(),
+            SegmentId::new(Uuid::from_bytes([8u8; 16])),
+            "seg-0".into(),
+            10,
+            crate::wal::WalCursorOffset::new(1),
+        );
+
+        let once = MemoryWalIndex::new();
+        let mut txn = once.writer().begin_txn().expect("begin txn");
+        txn.upsert_segment(&segment).expect("upsert segment");
+        txn.commit().expect("commit");
+
+        let twice = MemoryWalIndex::new();
+        let mut txn = twice.writer().begin_txn().expect("begin txn");
+        txn.upsert_segment(&segment).expect("upsert segment");
+        txn.commit().expect("commit first");
+        let mut txn = twice.writer().begin_txn().expect("begin txn");
+        txn.upsert_segment(&segment)
+            .expect("upsert segment idempotent");
+        txn.commit().expect("commit second");
+
+        assert_eq!(
+            once.reader()
+                .list_segments(&namespace)
+                .expect("list segments"),
+            twice
+                .reader()
+                .list_segments(&namespace)
+                .expect("list segments"),
+            "logical index state should match"
+        );
+        assert_eq!(
+            once.model_snapshot(),
+            twice.model_snapshot(),
+            "snapshot should not encode transaction history"
+        );
+
+        let snapshot = twice.model_snapshot();
+        let restored = MemoryWalIndex::from_snapshot(snapshot.clone());
+        assert_eq!(
+            restored.model_snapshot(),
+            snapshot,
+            "snapshot round-trip should preserve logical state"
+        );
+        assert_eq!(
+            restored
+                .reader()
+                .list_segments(&namespace)
+                .expect("list restored segments"),
+            vec![segment],
+            "restored index should expose the same reader-visible state"
+        );
     }
 
     #[test]

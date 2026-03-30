@@ -173,7 +173,7 @@ mod tests {
 
     fn test_meta(store_id: StoreId) -> StoreMeta {
         let identity = StoreIdentity::new(store_id, StoreEpoch::new(1));
-        let versions = StoreMetaVersions::new(1, 2, 3, 4, 5);
+        let versions = StoreMetaVersions::new(1, StoreMetaVersions::WAL_FORMAT_VERSION, 3, 4, 5);
         StoreMeta::new(
             identity,
             ReplicaId::new(Uuid::from_bytes([9u8; 16])),

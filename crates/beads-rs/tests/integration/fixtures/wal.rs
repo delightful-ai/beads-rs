@@ -238,6 +238,7 @@ pub fn sample_record(meta: &StoreMeta, namespace: &NamespaceId, seed: u8) -> Ver
             .map(|client_request_id| RequestProof::Client {
                 client_request_id,
                 request_sha256: [seed.wrapping_add(3); 32],
+                durability_claim: None,
             })
             .unwrap_or(RequestProof::None),
         sha256: sha,

@@ -26,7 +26,7 @@ pub(super) fn process_request_message(
     // Sync barrier: wait until repo is clean.
     if let Request::SyncWait { ctx, .. } = request {
         match daemon.ensure_loaded_and_maybe_start_sync(&ctx.path, git_tx) {
-            Ok(loaded) => {
+            Ok((loaded, _started)) => {
                 let repo_state = loaded.lane();
                 let clean = !repo_state.dirty && !repo_state.sync_in_progress;
 

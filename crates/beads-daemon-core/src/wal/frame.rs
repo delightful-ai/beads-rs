@@ -184,6 +184,7 @@ mod tests {
             request_proof: RequestProof::Client {
                 client_request_id: ClientRequestId::new(Uuid::from_bytes([3u8; 16])),
                 request_sha256: [4u8; 32],
+                durability_claim: None,
             },
             sha256: [0u8; 32],
             prev_sha256: Some([6u8; 32]),

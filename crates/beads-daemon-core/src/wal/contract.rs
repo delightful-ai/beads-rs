@@ -273,10 +273,25 @@ where
     let event_id = EventId::new(origin, ns.clone(), Seq1::from_u64(1).unwrap());
     let event_ids = ClientRequestEventIds::single(event_id.clone());
     let sha = [3u8; 32];
+    let claim = crate::durability::DurabilityRequestClaim::Replicated(
+        crate::durability::ReplicatedDurabilityClaim {
+            k: std::num::NonZeroU32::new(1).unwrap(),
+            eligible: [ReplicaId::new(Uuid::new_v4())].into_iter().collect(),
+        },
+    );
 
     let mut txn = index.writer().begin_txn().expect("begin txn");
-    txn.upsert_client_request(&ns, &origin, req_id, sha, txn_id, &event_ids, 1000)
-        .expect("upsert");
+    txn.upsert_client_request(
+        &ns,
+        &origin,
+        req_id,
+        sha,
+        txn_id,
+        &event_ids,
+        1000,
+        Some(&claim),
+    )
+    .expect("upsert");
     txn.commit().expect("commit");
 
     let reader = index.reader();
@@ -286,12 +301,15 @@ where
         .expect("found");
     assert_eq!(row.request_sha256, sha);
     assert_eq!(row.txn_id, txn_id);
+    assert_eq!(row.durability_claim, Some(claim.clone()));
 
     // Mismatch detection
     let mut txn = index.writer().begin_txn().expect("begin txn");
     let other_sha = [4u8; 32];
     let err = txn
-        .upsert_client_request(&ns, &origin, req_id, other_sha, txn_id, &event_ids, 2000)
+        .upsert_client_request(
+            &ns, &origin, req_id, other_sha, txn_id, &event_ids, 2000, None,
+        )
         .expect_err("mismatch");
 
     match err {

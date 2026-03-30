@@ -9,6 +9,7 @@ use crate::core::{
     ClientRequestId, EncodeError, EventBody, EventBytes, ReplicaId, Seq1, TxnId,
     ValidatedEventBody, encode_event_body_canonical, hash_event_body, sha256_bytes,
 };
+use crate::durability::DurabilityRequestClaim;
 
 use super::{EventWalError, EventWalResult};
 
@@ -20,6 +21,7 @@ pub struct RecordFlags {
     pub has_prev_sha: bool,
     pub has_client_request_id: bool,
     pub has_request_sha256: bool,
+    pub has_durability_claim: bool,
 }
 
 impl RecordFlags {
@@ -34,11 +36,14 @@ impl RecordFlags {
         if self.has_request_sha256 {
             bits |= 1 << 2;
         }
+        if self.has_durability_claim {
+            bits |= 1 << 3;
+        }
         bits
     }
 
     fn from_bits(bits: u16) -> EventWalResult<Self> {
-        if bits & !0b111 != 0 {
+        if bits & !0b1111 != 0 {
             return Err(EventWalError::RecordHeaderInvalid {
                 reason: format!("unknown flags bits {bits:#x}"),
             });
@@ -47,21 +52,8 @@ impl RecordFlags {
             has_prev_sha: bits & (1 << 0) != 0,
             has_client_request_id: bits & (1 << 1) != 0,
             has_request_sha256: bits & (1 << 2) != 0,
+            has_durability_claim: bits & (1 << 3) != 0,
         })
-    }
-
-    fn expected_len(self) -> usize {
-        let mut len = RECORD_HEADER_BASE_LEN;
-        if self.has_client_request_id {
-            len += 16;
-        }
-        if self.has_request_sha256 {
-            len += 32;
-        }
-        if self.has_prev_sha {
-            len += 32;
-        }
-        len
     }
 }
 
@@ -76,12 +68,13 @@ pub struct RecordHeader {
     pub prev_sha256: Option<[u8; 32]>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RequestProof {
     None,
     Client {
         client_request_id: ClientRequestId,
         request_sha256: [u8; 32],
+        durability_claim: Option<DurabilityRequestClaim>,
     },
     ClientNoHash {
         client_request_id: ClientRequestId,
@@ -89,27 +82,41 @@ pub enum RequestProof {
 }
 
 impl RequestProof {
-    fn client_request_id(self) -> Option<ClientRequestId> {
+    fn client_request_id(&self) -> Option<ClientRequestId> {
         match self {
             RequestProof::None => None,
             RequestProof::Client {
                 client_request_id, ..
-            } => Some(client_request_id),
-            RequestProof::ClientNoHash { client_request_id } => Some(client_request_id),
+            } => Some(*client_request_id),
+            RequestProof::ClientNoHash { client_request_id } => Some(*client_request_id),
         }
     }
 
-    fn request_sha256(self) -> Option<[u8; 32]> {
+    fn request_sha256(&self) -> Option<[u8; 32]> {
         match self {
-            RequestProof::Client { request_sha256, .. } => Some(request_sha256),
+            RequestProof::Client { request_sha256, .. } => Some(*request_sha256),
             RequestProof::None | RequestProof::ClientNoHash { .. } => None,
         }
     }
 
-    fn flags(self) -> (bool, bool) {
+    fn durability_claim(&self) -> Option<&DurabilityRequestClaim> {
+        match self {
+            RequestProof::Client {
+                durability_claim, ..
+            } => durability_claim.as_ref(),
+            RequestProof::None | RequestProof::ClientNoHash { .. } => None,
+        }
+    }
+
+    fn flags(&self) -> (bool, bool, bool) {
         let has_client_request_id = self.client_request_id().is_some();
         let has_request_sha256 = self.request_sha256().is_some();
-        (has_client_request_id, has_request_sha256)
+        let has_durability_claim = self.durability_claim().is_some();
+        (
+            has_client_request_id,
+            has_request_sha256,
+            has_durability_claim,
+        )
     }
 }
 
@@ -131,12 +138,40 @@ pub enum RecordHeaderMismatch {
 }
 
 impl RecordHeader {
+    fn encoded_claim_bytes(&self) -> EventWalResult<Option<Vec<u8>>> {
+        self.durability_claim()
+            .map(encode_durability_claim)
+            .transpose()
+    }
+
+    fn encoded_header_len(&self, claim_bytes: Option<&[u8]>) -> EventWalResult<u16> {
+        let flags = self.flags();
+        let mut header_len = RECORD_HEADER_BASE_LEN;
+        if flags.has_client_request_id {
+            header_len += 16;
+        }
+        if flags.has_request_sha256 {
+            header_len += 32;
+        }
+        if let Some(bytes) = claim_bytes {
+            header_len += 2 + bytes.len();
+        }
+        if flags.has_prev_sha {
+            header_len += 32;
+        }
+        u16::try_from(header_len).map_err(|_| EventWalError::RecordHeaderInvalid {
+            reason: "record header too large".to_string(),
+        })
+    }
+
     pub fn flags(&self) -> RecordFlags {
-        let (has_client_request_id, has_request_sha256) = self.request_proof.flags();
+        let (has_client_request_id, has_request_sha256, has_durability_claim) =
+            self.request_proof.flags();
         RecordFlags {
             has_prev_sha: self.prev_sha256.is_some(),
             has_client_request_id,
             has_request_sha256,
+            has_durability_claim,
         }
     }
 
@@ -148,13 +183,22 @@ impl RecordHeader {
         self.request_proof.request_sha256()
     }
 
+    pub fn durability_claim(&self) -> Option<&DurabilityRequestClaim> {
+        self.request_proof.durability_claim()
+    }
+
+    pub fn encoded_len(&self) -> EventWalResult<usize> {
+        let claim_bytes = self.encoded_claim_bytes()?;
+        Ok(usize::from(
+            self.encoded_header_len(claim_bytes.as_deref())?,
+        ))
+    }
+
     pub fn encode(&self) -> EventWalResult<Vec<u8>> {
         let flags = self.flags();
-        let header_len = flags.expected_len();
-        let header_len_u16 =
-            u16::try_from(header_len).map_err(|_| EventWalError::RecordHeaderInvalid {
-                reason: "record header too large".to_string(),
-            })?;
+        let claim_bytes = self.encoded_claim_bytes()?;
+        let header_len_u16 = self.encoded_header_len(claim_bytes.as_deref())?;
+        let header_len = usize::from(header_len_u16);
 
         let mut buf = Vec::with_capacity(header_len);
         buf.extend_from_slice(&RECORD_HEADER_VERSION.to_le_bytes());
@@ -166,14 +210,24 @@ impl RecordHeader {
         buf.extend_from_slice(&self.event_time_ms.to_le_bytes());
         buf.extend_from_slice(self.txn_id.as_uuid().as_bytes());
 
-        match self.request_proof {
+        match &self.request_proof {
             RequestProof::None => {}
             RequestProof::Client {
                 client_request_id,
                 request_sha256,
+                ..
             } => {
                 buf.extend_from_slice(client_request_id.as_uuid().as_bytes());
-                buf.extend_from_slice(&request_sha256);
+                buf.extend_from_slice(request_sha256);
+                if let Some(bytes) = claim_bytes.as_ref() {
+                    let len = u16::try_from(bytes.len()).map_err(|_| {
+                        EventWalError::RecordHeaderInvalid {
+                            reason: "durability claim too large".to_string(),
+                        }
+                    })?;
+                    buf.extend_from_slice(&len.to_le_bytes());
+                    buf.extend_from_slice(bytes);
+                }
             }
             RequestProof::ClientNoHash { client_request_id } => {
                 buf.extend_from_slice(client_request_id.as_uuid().as_bytes());
@@ -230,14 +284,6 @@ impl RecordHeader {
                 reason: "request_sha256 flag set without client_request_id".to_string(),
             });
         }
-        let expected_len = flags.expected_len();
-        if header_len != expected_len {
-            return Err(EventWalError::RecordHeaderInvalid {
-                reason: format!(
-                    "record header length {header_len} does not match flags-implied length {expected_len}"
-                ),
-            });
-        }
 
         let origin_replica_id = ReplicaId::new(read_uuid(bytes, &mut offset)?);
         let origin_seq_raw = read_u64_le(bytes, &mut offset)?;
@@ -252,14 +298,35 @@ impl RecordHeader {
             let client_request_id = ClientRequestId::new(read_uuid(bytes, &mut offset)?);
             if flags.has_request_sha256 {
                 let request_sha256 = read_array::<32>(bytes, &mut offset)?;
+                let durability_claim = if flags.has_durability_claim {
+                    let claim_len = read_u16_le(bytes, &mut offset)? as usize;
+                    Some(decode_durability_claim(read_bytes(
+                        bytes,
+                        &mut offset,
+                        claim_len,
+                    )?)?)
+                } else {
+                    None
+                };
                 RequestProof::Client {
                     client_request_id,
                     request_sha256,
+                    durability_claim,
                 }
             } else {
+                if flags.has_durability_claim {
+                    return Err(EventWalError::RecordHeaderInvalid {
+                        reason: "durability claim flag set without request_sha256".to_string(),
+                    });
+                }
                 RequestProof::ClientNoHash { client_request_id }
             }
         } else {
+            if flags.has_durability_claim {
+                return Err(EventWalError::RecordHeaderInvalid {
+                    reason: "durability claim flag set without client_request_id".to_string(),
+                });
+            }
             RequestProof::None
         };
 
@@ -273,6 +340,13 @@ impl RecordHeader {
         if offset > header_len {
             return Err(EventWalError::RecordHeaderInvalid {
                 reason: "record header overran declared length".to_string(),
+            });
+        }
+        if offset != header_len {
+            return Err(EventWalError::RecordHeaderInvalid {
+                reason: format!(
+                    "record header length {header_len} does not match decoded length {offset}"
+                ),
             });
         }
 
@@ -437,8 +511,21 @@ impl VerifiedRecord {
         &self.payload
     }
 
+    pub fn body(&self) -> &ValidatedEventBody {
+        &self._body
+    }
+
     pub fn payload_bytes(&self) -> &[u8] {
         self.payload.as_ref()
+    }
+
+    pub fn encoded_body_len(&self) -> EventWalResult<usize> {
+        self.header
+            .encoded_len()?
+            .checked_add(self.payload.len())
+            .ok_or_else(|| EventWalError::RecordHeaderInvalid {
+                reason: "record body length overflow".to_string(),
+            })
     }
 
     pub fn encode_body(&self) -> EventWalResult<Vec<u8>> {
@@ -490,6 +577,22 @@ fn take<'a>(bytes: &'a [u8], offset: &mut usize, len: usize) -> EventWalResult<&
     Ok(slice)
 }
 
+fn read_bytes<'a>(bytes: &'a [u8], offset: &mut usize, len: usize) -> EventWalResult<&'a [u8]> {
+    take(bytes, offset, len)
+}
+
+fn encode_durability_claim(claim: &DurabilityRequestClaim) -> EventWalResult<Vec<u8>> {
+    serde_json::to_vec(claim).map_err(|err| EventWalError::RecordHeaderInvalid {
+        reason: err.to_string(),
+    })
+}
+
+fn decode_durability_claim(bytes: &[u8]) -> EventWalResult<DurabilityRequestClaim> {
+    serde_json::from_slice(bytes).map_err(|err| EventWalError::RecordHeaderInvalid {
+        reason: err.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,6 +626,17 @@ mod tests {
     #[test]
     fn record_roundtrip_with_optional_fields() {
         let limits = Limits::default();
+        let claim = crate::durability::DurabilityRequestClaim::Replicated(
+            crate::durability::ReplicatedDurabilityClaim {
+                k: std::num::NonZeroU32::new(2).unwrap(),
+                eligible: [
+                    ReplicaId::new(Uuid::from_bytes([7u8; 16])),
+                    ReplicaId::new(Uuid::from_bytes([8u8; 16])),
+                ]
+                .into_iter()
+                .collect(),
+            },
+        );
         let header = RecordHeader {
             origin_replica_id: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             origin_seq: Seq1::from_u64(42).unwrap(),
@@ -531,6 +645,7 @@ mod tests {
             request_proof: RequestProof::Client {
                 client_request_id: ClientRequestId::new(Uuid::from_bytes([3u8; 16])),
                 request_sha256: [4u8; 32],
+                durability_claim: Some(claim),
             },
             sha256: [0u8; 32],
             prev_sha256: Some([6u8; 32]),

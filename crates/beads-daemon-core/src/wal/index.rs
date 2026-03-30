@@ -12,8 +12,9 @@ use uuid::Uuid;
 use crate::core::{
     ActorId, Applied, ClientRequestId, Durable, EventId, HeadStatus, NamespaceId,
     ReplicaDurabilityRole, ReplicaDurabilityRoleError, ReplicaId, ReplicaRole, SegmentId, Seq0,
-    Seq1, StoreMeta, StoreMetaVersions, TxnId, Watermark, WatermarkPair,
+    Seq1, StoreId, StoreMeta, StoreMetaVersions, TxnId, Watermark, WatermarkPair,
 };
+use crate::durability::DurabilityRequestClaim;
 
 pub use super::{
     ClientRequestEventIds, ClientRequestEventIdsError, ClientRequestRow, HlcRow,
@@ -203,6 +204,23 @@ struct SqliteWalIndexTxn {
 }
 
 impl WalIndexTxn for SqliteWalIndexTxn {
+    fn next_orset_counter(&mut self) -> Result<u64, WalIndexError> {
+        let current = read_u64_meta(&self.conn, "orset_counter")?;
+        let next = current
+            .checked_add(1)
+            .ok_or_else(|| WalIndexError::EventIdDecode("orset counter overflow".to_string()))?;
+        set_meta(&self.conn, "orset_counter", next.to_string())?;
+        Ok(next)
+    }
+
+    fn observe_orset_counter(&mut self, counter: u64) -> Result<(), WalIndexError> {
+        let current = read_u64_meta(&self.conn, "orset_counter")?;
+        if counter > current {
+            set_meta(&self.conn, "orset_counter", counter.to_string())?;
+        }
+        Ok(())
+    }
+
     fn next_origin_seq(
         &mut self,
         ns: &NamespaceId,
@@ -515,6 +533,7 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         txn_id: TxnId,
         event_ids: &ClientRequestEventIds,
         created_at_ms: u64,
+        durability_claim: Option<&DurabilityRequestClaim>,
     ) -> Result<(), WalIndexError> {
         event_ids.ensure_matches(ns, origin)?;
         let namespace = ns.as_str();
@@ -523,11 +542,12 @@ impl WalIndexTxn for SqliteWalIndexTxn {
         let request_blob = request_sha256.to_vec();
         let txn_blob = uuid_blob(txn_id.as_uuid());
         let event_ids_blob = encode_event_ids(event_ids)?;
+        let durability_claim_json = encode_durability_claim(durability_claim)?;
 
         let inserted = {
             let mut stmt = self.conn.prepare_cached(
-                "INSERT INTO client_requests (namespace, origin_replica_id, client_request_id, created_at_ms, request_sha256, txn_id, event_ids) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
+                "INSERT INTO client_requests (namespace, origin_replica_id, client_request_id, created_at_ms, request_sha256, txn_id, event_ids, durability_claim) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8) \
                  ON CONFLICT(namespace, origin_replica_id, client_request_id) DO NOTHING",
             ).map_err(map_sqlite_error)?;
             stmt.execute(params![
@@ -538,6 +558,7 @@ impl WalIndexTxn for SqliteWalIndexTxn {
                 &request_blob,
                 &txn_blob,
                 &event_ids_blob,
+                durability_claim_json,
             ])
             .map_err(map_sqlite_error)?
         };
@@ -645,6 +666,10 @@ impl SqliteWalIndexReader {
 }
 
 impl WalIndexReader for SqliteWalIndexReader {
+    fn load_orset_counter(&self) -> Result<u64, WalIndexError> {
+        self.with_conn(|conn| read_u64_meta(conn, "orset_counter"))
+    }
+
     fn lookup_event_sha(
         &self,
         ns: &NamespaceId,
@@ -965,7 +990,7 @@ impl WalIndexReader for SqliteWalIndexReader {
 
             let mut stmt = conn
                 .prepare_cached(
-                    "SELECT request_sha256, txn_id, event_ids, created_at_ms FROM client_requests \
+                    "SELECT request_sha256, txn_id, event_ids, created_at_ms, durability_claim FROM client_requests \
                  WHERE namespace = ?1 AND origin_replica_id = ?2 AND client_request_id = ?3",
                 )
                 .map_err(map_sqlite_error)?;
@@ -976,13 +1001,14 @@ impl WalIndexReader for SqliteWalIndexReader {
                         row.get::<_, Vec<u8>>(1)?,
                         row.get::<_, Vec<u8>>(2)?,
                         row.get::<_, i64>(3)?,
+                        row.get::<_, Option<String>>(4)?,
                     ))
                 })
                 .optional()
                 .map_err(map_sqlite_error)?;
 
             match row {
-                Some((request_sha, txn_id, event_ids, created_at_ms)) => {
+                Some((request_sha, txn_id, event_ids, created_at_ms, durability_claim)) => {
                     Ok(Some(ClientRequestRow {
                         request_sha256: blob_32(request_sha)?,
                         txn_id: TxnId::new(blob_uuid(txn_id)?),
@@ -990,6 +1016,7 @@ impl WalIndexReader for SqliteWalIndexReader {
                         created_at_ms: u64::try_from(created_at_ms).map_err(|_| {
                             WalIndexError::EventIdDecode("created_at_ms out of range".to_string())
                         })?,
+                        durability_claim: decode_durability_claim(durability_claim)?,
                     }))
                 }
                 None => Ok(None),
@@ -1079,6 +1106,7 @@ fn initialize_schema(conn: &Connection) -> Result<(), WalIndexError> {
            request_sha256 BLOB NOT NULL,
            txn_id BLOB NOT NULL,
            event_ids BLOB NOT NULL,
+           durability_claim TEXT,
            PRIMARY KEY (namespace, origin_replica_id, client_request_id)
          );
          CREATE TABLE IF NOT EXISTS origin_seq (
@@ -1133,6 +1161,7 @@ fn write_meta(conn: &Connection, meta: &StoreMeta) -> Result<(), WalIndexError> 
         "wal_format_version",
         meta.wal_format_version.to_string(),
     )?;
+    set_meta(conn, "orset_counter", meta.orset_counter.to_string())?;
     Ok(())
 }
 
@@ -1191,7 +1220,32 @@ fn validate_meta(conn: &Connection, meta: &StoreMeta) -> Result<(), WalIndexErro
         });
     }
 
+    read_u64_meta(conn, "orset_counter")?;
+
     Ok(())
+}
+
+fn read_u64_meta(conn: &Connection, key: &'static str) -> Result<u64, WalIndexError> {
+    let row: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT value, (SELECT value FROM meta WHERE key = 'store_id') \
+             FROM meta WHERE key = ?1",
+            params![key],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    let (raw, store_id_raw) = row.ok_or(WalIndexError::MetaMissing { key })?;
+    let store_id_raw = store_id_raw.ok_or(WalIndexError::MetaMissing { key: "store_id" })?;
+    let store_id = StoreId::parse_str(&store_id_raw).map_err(|_| {
+        WalIndexError::EventIdDecode(format!("invalid store_id meta: {store_id_raw}"))
+    })?;
+    raw.parse::<u64>().map_err(|_| WalIndexError::MetaMismatch {
+        key,
+        expected: "u64".to_string(),
+        got: raw,
+        store_id,
+    })
 }
 
 fn set_meta(conn: &Connection, key: &'static str, value: String) -> Result<(), WalIndexError> {
@@ -1393,6 +1447,28 @@ fn decode_event_ids(bytes: &[u8]) -> Result<ClientRequestEventIds, WalIndexError
     Ok(ClientRequestEventIds::new(ids)?)
 }
 
+fn encode_durability_claim(
+    claim: Option<&DurabilityRequestClaim>,
+) -> Result<Option<String>, WalIndexError> {
+    claim
+        .map(|claim| {
+            serde_json::to_string(claim)
+                .map_err(|err| WalIndexError::EventIdDecode(err.to_string()))
+        })
+        .transpose()
+}
+
+fn decode_durability_claim(
+    claim: Option<String>,
+) -> Result<Option<DurabilityRequestClaim>, WalIndexError> {
+    claim
+        .map(|claim| {
+            serde_json::from_str(&claim)
+                .map_err(|err| WalIndexError::EventIdDecode(err.to_string()))
+        })
+        .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1403,7 +1479,13 @@ mod tests {
     fn test_meta() -> StoreMeta {
         let store_id = crate::core::StoreId::new(Uuid::from_bytes([7u8; 16]));
         let identity = crate::core::StoreIdentity::new(store_id, crate::core::StoreEpoch::new(1));
-        let versions = crate::core::StoreMetaVersions::new(1, 2, 3, 4, INDEX_SCHEMA_VERSION);
+        let versions = crate::core::StoreMetaVersions::new(
+            1,
+            crate::core::StoreMetaVersions::WAL_FORMAT_VERSION,
+            3,
+            4,
+            INDEX_SCHEMA_VERSION,
+        );
         StoreMeta::new(
             identity,
             crate::core::ReplicaId::new(Uuid::from_bytes([8u8; 16])),
@@ -1525,6 +1607,68 @@ mod tests {
         assert!(index_exists(&conn, "events_by_client_request"));
         assert!(index_exists(&conn, "events_by_origin_seq"));
         assert!(index_exists(&conn, "segments_by_ns_created"));
+        assert_eq!(read_u64_meta(&conn, "orset_counter").unwrap(), 0);
+    }
+
+    #[test]
+    fn sqlite_index_orset_counter_round_trips_through_txn_and_reopen() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+
+        let mut txn = index.writer().begin_txn().unwrap();
+        assert_eq!(txn.next_orset_counter().unwrap(), 1);
+        assert_eq!(txn.next_orset_counter().unwrap(), 2);
+        txn.observe_orset_counter(5).unwrap();
+        txn.commit().unwrap();
+
+        assert_eq!(index.reader().load_orset_counter().unwrap(), 5);
+
+        let reopened =
+            SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        assert_eq!(reopened.reader().load_orset_counter().unwrap(), 5);
+    }
+
+    #[test]
+    fn sqlite_index_invalid_orset_counter_still_reports_store_id() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let db_path = temp.path().join("index").join("wal.sqlite");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        initialize_schema(&conn).unwrap();
+        write_meta(&conn, &meta).unwrap();
+        set_meta(&conn, "orset_counter", "not-a-u64".to_string()).unwrap();
+
+        let err = read_u64_meta(&conn, "orset_counter").unwrap_err();
+        assert!(matches!(
+            err,
+            WalIndexError::MetaMismatch {
+                key: "orset_counter",
+                expected,
+                got,
+                store_id,
+            } if expected == "u64" && got == "not-a-u64" && store_id == meta.store_id()
+        ));
+    }
+
+    #[test]
+    fn sqlite_index_valid_orset_counter_still_requires_valid_store_id() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let db_path = temp.path().join("index").join("wal.sqlite");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        initialize_schema(&conn).unwrap();
+        write_meta(&conn, &meta).unwrap();
+        set_meta(&conn, "store_id", "not-a-store-id".to_string()).unwrap();
+
+        let err = read_u64_meta(&conn, "orset_counter").unwrap_err();
+        assert!(matches!(
+            err,
+            WalIndexError::EventIdDecode(message)
+                if message == "invalid store_id meta: not-a-store-id"
+        ));
     }
 
     #[test]
@@ -1630,6 +1774,7 @@ mod tests {
             txn_id,
             &event_ids,
             1_700_000,
+            None,
         )
         .unwrap();
         txn.commit().unwrap();
@@ -2011,6 +2156,7 @@ mod tests {
             first_txn_id,
             &first_event_ids,
             1_700_000,
+            None,
         )
         .unwrap();
         txn.commit().unwrap();
@@ -2024,6 +2170,7 @@ mod tests {
             second_txn_id,
             &second_event_ids,
             1_800_000,
+            None,
         )
         .unwrap();
         txn.commit().unwrap();
@@ -2048,6 +2195,7 @@ mod tests {
                 second_txn_id,
                 &second_event_ids,
                 1_900_000,
+                None,
             )
             .unwrap_err();
         assert!(matches!(

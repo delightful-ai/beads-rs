@@ -4,6 +4,7 @@ pub(super) struct PolicyReloadSummary {
     pub(super) applied: Vec<AdminPolicyDiff>,
     pub(super) requires_restart: Vec<AdminPolicyDiff>,
     pub(super) updated: BTreeMap<NamespaceId, NamespacePolicy>,
+    pub(super) reload_replication_runtime: bool,
 }
 
 pub(super) fn diff_policy_reload(
@@ -13,6 +14,7 @@ pub(super) fn diff_policy_reload(
     let mut applied = Vec::new();
     let mut requires_restart = Vec::new();
     let mut updated = current.clone();
+    let mut reload_replication_runtime = false;
 
     let mut namespaces = BTreeSet::new();
     namespaces.extend(current.keys().cloned());
@@ -22,7 +24,9 @@ pub(super) fn diff_policy_reload(
         match (current.get(&namespace), desired.get(&namespace)) {
             (Some(old), Some(new)) => {
                 let mut updated_policy = old.clone();
-                let (safe, restart) = diff_namespace_policy(old, new, &mut updated_policy);
+                let (safe, restart, policy_reload_replication_runtime) =
+                    diff_namespace_policy(old, new, &mut updated_policy);
+                reload_replication_runtime |= policy_reload_replication_runtime;
                 if !safe.is_empty() {
                     applied.push(AdminPolicyDiff {
                         namespace: namespace.clone(),
@@ -65,6 +69,7 @@ pub(super) fn diff_policy_reload(
         applied,
         requires_restart,
         updated,
+        reload_replication_runtime,
     }
 }
 
@@ -72,9 +77,10 @@ fn diff_namespace_policy(
     current: &NamespacePolicy,
     desired: &NamespacePolicy,
     updated: &mut NamespacePolicy,
-) -> (Vec<AdminPolicyChange>, Vec<AdminPolicyChange>) {
+) -> (Vec<AdminPolicyChange>, Vec<AdminPolicyChange>, bool) {
     let mut safe = Vec::new();
     let mut restart = Vec::new();
+    let mut reload_replication_runtime = false;
 
     if current.visibility != desired.visibility {
         safe.push(policy_change(
@@ -121,11 +127,13 @@ fn diff_namespace_policy(
     }
 
     if current.replicate_mode != desired.replicate_mode {
-        restart.push(policy_change(
+        safe.push(policy_change(
             "replicate_mode",
             format_replicate_mode(current.replicate_mode),
             format_replicate_mode(desired.replicate_mode),
         ));
+        updated.replicate_mode = desired.replicate_mode;
+        reload_replication_runtime = true;
     }
 
     if current.gc_authority != desired.gc_authority {
@@ -136,7 +144,7 @@ fn diff_namespace_policy(
         ));
     }
 
-    (safe, restart)
+    (safe, restart, reload_replication_runtime)
 }
 
 fn policy_change(field: &str, before: String, after: String) -> AdminPolicyChange {

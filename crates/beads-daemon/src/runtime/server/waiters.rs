@@ -164,8 +164,9 @@ pub(super) fn flush_durability_waiters(waiters: &mut Vec<DurabilityWaiter>) {
     for waiter in waiters.drain(..) {
         let span = waiter.span.clone();
         let _guard = span.enter();
-        let requested = waiter.wait.requested;
-        let DurabilityClass::ReplicatedFsync { k } = requested else {
+        let crate::runtime::durability_coordinator::DurabilityRequestClaim::Replicated(claim) =
+            waiter.wait.claim.clone()
+        else {
             let _ = waiter
                 .respond
                 .send(ServerReply::Response(Response::ok(ResponsePayload::Op(
@@ -173,19 +174,20 @@ pub(super) fn flush_durability_waiters(waiters: &mut Vec<DurabilityWaiter>) {
                 ))));
             continue;
         };
+        let requested = DurabilityClass::ReplicatedFsync { k: claim.k };
 
-        match waiter.wait.coordinator.poll_replicated(
+        match waiter.wait.coordinator.poll_claim(
             &waiter.wait.namespace,
             waiter.wait.origin,
             waiter.wait.seq,
-            k,
+            &claim,
         ) {
             Ok(ReplicatedPoll::Satisfied { acked_by }) => {
                 let mut response = waiter.wait.response;
                 response.receipt = DurabilityCoordinator::achieved_receipt(
                     response.receipt,
                     requested,
-                    k,
+                    claim.k,
                     acked_by,
                 );
                 let _ =

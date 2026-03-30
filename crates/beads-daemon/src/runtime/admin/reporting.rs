@@ -1,4 +1,9 @@
 use super::*;
+use beads_api::{
+    AdminReplicationPeerState, AdminReplicationQuarantineReason, AdminReplicationWatermarkKind,
+};
+use beads_core::ContentHash;
+use beads_daemon_core::repl::peer_acks::{PeerAckQuarantineReason, PeerAckStatus, WatermarkKind};
 
 pub(super) fn collect_namespaces(
     store: &crate::runtime::store::runtime::StoreRuntime,
@@ -195,6 +200,44 @@ fn resolve_segment_path(store_dir: &Path, segment_path: &Path) -> PathBuf {
     }
 }
 
+fn admin_peer_ack_state(state: PeerAckStatus) -> AdminReplicationPeerState {
+    match state {
+        PeerAckStatus::Healthy => AdminReplicationPeerState::Healthy,
+        PeerAckStatus::Quarantined { reason } => AdminReplicationPeerState::Quarantined {
+            reason: admin_peer_ack_quarantine_reason(reason),
+        },
+    }
+}
+
+fn admin_peer_ack_quarantine_reason(
+    reason: PeerAckQuarantineReason,
+) -> AdminReplicationQuarantineReason {
+    match reason {
+        PeerAckQuarantineReason::DivergedHead {
+            kind,
+            namespace,
+            origin,
+            seq,
+            expected,
+            got,
+        } => AdminReplicationQuarantineReason::DivergedHead {
+            kind: admin_watermark_kind(kind),
+            namespace,
+            origin,
+            seq,
+            expected: ContentHash::from_bytes(expected),
+            got: ContentHash::from_bytes(got),
+        },
+    }
+}
+
+fn admin_watermark_kind(kind: WatermarkKind) -> AdminReplicationWatermarkKind {
+    match kind {
+        WatermarkKind::Durable => AdminReplicationWatermarkKind::Durable,
+        WatermarkKind::Applied => AdminReplicationWatermarkKind::Applied,
+    }
+}
+
 pub(super) fn build_replication_status(
     store: &crate::runtime::store::runtime::StoreRuntime,
     namespaces: &BTreeSet<NamespaceId>,
@@ -233,7 +276,8 @@ pub(super) fn build_replication_status(
             AdminReplicationPeer {
                 peer: snapshot.peer,
                 last_ack_at_ms: snapshot.last_ack_at_ms,
-                diverged: snapshot.diverged,
+                diverged: !matches!(snapshot.status, PeerAckStatus::Healthy),
+                state: Some(admin_peer_ack_state(snapshot.status)),
                 lag_by_namespace,
                 watermarks_durable: snapshot.durable,
                 watermarks_applied: snapshot.applied,

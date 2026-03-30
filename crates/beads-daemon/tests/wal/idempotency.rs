@@ -35,6 +35,7 @@ fn idempotency_mapping_reuses_txn_and_event_ids() {
         txn_id,
         &event_ids,
         created_at_ms,
+        None,
     )
     .expect("upsert client request");
     txn.commit().expect("commit");
@@ -63,6 +64,7 @@ fn idempotency_mapping_reuses_txn_and_event_ids() {
         txn_id,
         &event_ids,
         created_at_ms,
+        None,
     )
     .expect("idempotent upsert");
     txn.commit().expect("commit");
@@ -94,6 +96,7 @@ fn request_sha_mismatch_returns_error() {
         txn_id,
         &event_ids,
         created_at_ms,
+        None,
     )
     .expect("upsert client request");
     txn.commit().expect("commit");
@@ -112,6 +115,7 @@ fn request_sha_mismatch_returns_error() {
             txn_id,
             &event_ids,
             created_at_ms + 1,
+            None,
         )
         .expect_err("expected mismatch error");
     txn.rollback().expect("rollback");

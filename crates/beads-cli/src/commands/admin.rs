@@ -8,7 +8,8 @@ use beads_api::{
     AdminFingerprintOutput, AdminFingerprintSample, AdminFlushOutput, AdminHealthReport,
     AdminHealthStatus, AdminMaintenanceModeOutput, AdminMetricsOutput, AdminRebuildIndexOutput,
     AdminReloadLimitsOutput, AdminReloadPoliciesOutput, AdminReloadReplicationOutput,
-    AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput,
+    AdminReplicationPeerState, AdminReplicationQuarantineReason, AdminRotateReplicaIdOutput,
+    AdminScrubOutput, AdminStatusOutput,
 };
 use beads_core::{HeadStatus, ReplicaRole, WallClock, Watermarks};
 use beads_surface::ipc::{
@@ -281,10 +282,19 @@ pub fn render_admin_status(status: &AdminStatusOutput) -> String {
             } else {
                 fmt_wall_ms(peer.last_ack_at_ms)
             };
+            let state = peer.state.as_ref();
             out.push_str(&format!(
-                "  {} (last_ack={}, diverged={})\n",
-                peer.peer, last_ack, peer.diverged
+                "  {} (last_ack={}, state={})\n",
+                peer.peer,
+                last_ack,
+                replication_peer_state_str(state, peer.diverged)
             ));
+            if let Some(AdminReplicationPeerState::Quarantined { reason }) = state {
+                out.push_str(&format!(
+                    "    quarantine_reason={}\n",
+                    replication_quarantine_reason_str(reason)
+                ));
+            }
             for ns in &peer.lag_by_namespace {
                 out.push_str(&format!(
                     "    {}: durable_lag={}, applied_lag={}\n",
@@ -690,6 +700,42 @@ fn wal_warning_kind_str(kind: beads_api::AdminWalWarningKind) -> &'static str {
     }
 }
 
+fn replication_peer_state_str(
+    state: Option<&AdminReplicationPeerState>,
+    diverged: bool,
+) -> &'static str {
+    match state {
+        Some(AdminReplicationPeerState::Healthy) => "healthy",
+        Some(AdminReplicationPeerState::Quarantined { .. }) => "quarantined",
+        None if diverged => "quarantined",
+        None => "healthy",
+    }
+}
+
+fn replication_quarantine_reason_str(reason: &AdminReplicationQuarantineReason) -> String {
+    match reason {
+        AdminReplicationQuarantineReason::DivergedHead {
+            kind,
+            namespace,
+            origin,
+            seq,
+            expected,
+            got,
+        } => format!(
+            "diverged_head kind={} namespace={} origin={} seq={} expected={} got={}",
+            match kind {
+                beads_api::AdminReplicationWatermarkKind::Durable => "durable",
+                beads_api::AdminReplicationWatermarkKind::Applied => "applied",
+            },
+            namespace.as_str(),
+            origin,
+            seq.get(),
+            expected,
+            got
+        ),
+    }
+}
+
 fn render_admin_health(title: &str, report: &AdminHealthReport) -> String {
     let mut out = String::new();
     out.push_str(title);
@@ -841,5 +887,51 @@ mod tests {
             "    03030303-0303-0303-0303-030303030303: seq=2 head=known",
         );
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn render_admin_status_includes_quarantined_peer_state() {
+        let store_id = StoreId::new(Uuid::from_bytes([1u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([2u8; 16]));
+        let peer = ReplicaId::new(Uuid::from_bytes([4u8; 16]));
+        let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
+
+        let status = AdminStatusOutput {
+            store_id,
+            replica_id,
+            replication_listen_addr: None,
+            namespaces: vec![NamespaceId::core()],
+            watermarks_applied: Watermarks::new(),
+            watermarks_durable: Watermarks::new(),
+            last_clock_anomaly: None,
+            wal: Vec::new(),
+            wal_warnings: Vec::new(),
+            replication: vec![beads_api::AdminReplicationPeer {
+                peer,
+                last_ack_at_ms: 0,
+                diverged: true,
+                state: Some(AdminReplicationPeerState::Quarantined {
+                    reason: AdminReplicationQuarantineReason::DivergedHead {
+                        kind: beads_api::AdminReplicationWatermarkKind::Durable,
+                        namespace: NamespaceId::core(),
+                        origin,
+                        seq: Seq0::new(2),
+                        expected: beads_core::ContentHash::from_bytes([1u8; 32]),
+                        got: beads_core::ContentHash::from_bytes([2u8; 32]),
+                    },
+                }),
+                lag_by_namespace: Vec::new(),
+                watermarks_durable: Watermarks::new(),
+                watermarks_applied: Watermarks::new(),
+            }],
+            replica_liveness: Vec::new(),
+            checkpoints: Vec::new(),
+        };
+
+        let output = render_admin_status(&status);
+        assert!(output.contains("state=quarantined"));
+        assert!(output.contains("quarantine_reason=diverged_head"));
+        assert!(output.contains("kind=durable"));
+        assert!(output.contains("seq=2"));
     }
 }

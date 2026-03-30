@@ -5,6 +5,7 @@ use std::num::NonZeroU32;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::core::{
@@ -19,6 +20,29 @@ pub struct DurabilityCoordinator {
     policies: std::collections::BTreeMap<NamespaceId, NamespacePolicy>,
     roster: Option<ReplicaRoster>,
     peer_acks: Arc<Mutex<PeerAckTable>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub enum DurabilityRequestClaim {
+    LocalFsync,
+    Replicated(ReplicatedDurabilityClaim),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Hash)]
+pub struct ReplicatedDurabilityClaim {
+    pub k: NonZeroU32,
+    pub eligible: BTreeSet<ReplicaId>,
+}
+
+impl DurabilityRequestClaim {
+    pub fn requested(&self) -> DurabilityClass {
+        match self {
+            DurabilityRequestClaim::LocalFsync => DurabilityClass::LocalFsync,
+            DurabilityRequestClaim::Replicated(claim) => {
+                DurabilityClass::ReplicatedFsync { k: claim.k }
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -70,8 +94,16 @@ impl DurabilityCoordinator {
         namespace: &NamespaceId,
         requested: DurabilityClass,
     ) -> Result<(), DurabilityError> {
+        self.request_claim(namespace, requested).map(|_| ())
+    }
+
+    pub fn request_claim(
+        &self,
+        namespace: &NamespaceId,
+        requested: DurabilityClass,
+    ) -> Result<DurabilityRequestClaim, DurabilityError> {
         let DurabilityClass::ReplicatedFsync { k } = requested else {
-            return Ok(());
+            return Ok(DurabilityRequestClaim::LocalFsync);
         };
 
         let eligible = self.eligible_replicas(namespace);
@@ -88,7 +120,9 @@ impl DurabilityCoordinator {
             });
         }
 
-        Ok(())
+        Ok(DurabilityRequestClaim::Replicated(
+            ReplicatedDurabilityClaim { k, eligible },
+        ))
     }
 
     pub fn await_durability(
@@ -100,7 +134,8 @@ impl DurabilityCoordinator {
         receipt: DurabilityReceipt,
         wait_timeout: Duration,
     ) -> Result<DurabilityReceipt, DurabilityError> {
-        let DurabilityClass::ReplicatedFsync { k } = requested else {
+        let claim = self.request_claim(namespace, requested)?;
+        let DurabilityRequestClaim::Replicated(claim) = claim else {
             return Ok(receipt);
         };
 
@@ -108,18 +143,26 @@ impl DurabilityCoordinator {
         let mut backoff = Duration::from_millis(5);
 
         loop {
-            match self.poll_replicated(namespace, origin, seq, k) {
+            match self.poll_claim(namespace, origin, seq, &claim) {
                 Ok(ReplicatedPoll::Satisfied { acked_by }) => {
-                    return Ok(Self::achieved_receipt(receipt, requested, k, acked_by));
+                    return Ok(Self::achieved_receipt(
+                        receipt,
+                        DurabilityClass::ReplicatedFsync { k: claim.k },
+                        claim.k,
+                        acked_by,
+                    ));
                 }
                 Ok(ReplicatedPoll::Pending { acked_by, eligible }) => {
                     let elapsed = start.elapsed();
                     if wait_timeout.is_zero() || elapsed >= wait_timeout {
                         let pending = Self::pending_replica_ids(&eligible, &acked_by);
-                        let pending_receipt =
-                            Self::pending_receipt(receipt, requested, acked_by.clone());
+                        let pending_receipt = Self::pending_receipt(
+                            receipt,
+                            DurabilityClass::ReplicatedFsync { k: claim.k },
+                            acked_by.clone(),
+                        );
                         return Err(DurabilityError::DurabilityTimeout {
-                            requested,
+                            requested: DurabilityClass::ReplicatedFsync { k: claim.k },
                             waited_ms: elapsed.as_millis() as u64,
                             pending_replica_ids: Some(pending),
                             receipt: Box::new(pending_receipt),
@@ -153,9 +196,38 @@ impl DurabilityCoordinator {
             table.set_eligibility(namespace.clone(), eligible.clone());
         }
 
+        self.poll_replicated_with_eligible(namespace, origin, seq, k, &eligible)
+    }
+
+    pub fn poll_claim(
+        &self,
+        namespace: &NamespaceId,
+        origin: ReplicaId,
+        seq: Seq1,
+        claim: &ReplicatedDurabilityClaim,
+    ) -> Result<ReplicatedPoll, DurabilityError> {
+        self.poll_replicated_with_eligible(namespace, origin, seq, claim.k, &claim.eligible)
+    }
+
+    fn poll_replicated_with_eligible(
+        &self,
+        namespace: &NamespaceId,
+        origin: ReplicaId,
+        seq: Seq1,
+        k: NonZeroU32,
+        eligible: &BTreeSet<ReplicaId>,
+    ) -> Result<ReplicatedPoll, DurabilityError> {
+        let eligible = eligible.clone();
+
         let outcome = {
             let table = self.peer_acks.lock().expect("peer ack lock poisoned");
-            table.satisfied_k(namespace, &origin, Seq0::new(seq.get()), k.get())
+            table.satisfied_k_with_eligible(
+                namespace,
+                &origin,
+                Seq0::new(seq.get()),
+                k.get(),
+                &eligible,
+            )
         };
 
         match outcome {
@@ -448,5 +520,68 @@ mod tests {
             }
             _ => panic!("expected timeout"),
         }
+    }
+
+    #[test]
+    fn quarantined_peer_keeps_quorum_pending_while_recovery_is_possible() {
+        let namespace = NamespaceId::core();
+        let local = replica(30);
+        let peer = replica(31);
+        let roster = roster(vec![
+            ReplicaEntry {
+                replica_id: local,
+                name: "local".to_string(),
+                role: ReplicaDurabilityRole::anchor(true),
+                allowed_namespaces: None,
+                expire_after_ms: None,
+            },
+            ReplicaEntry {
+                replica_id: peer,
+                name: "peer".to_string(),
+                role: ReplicaDurabilityRole::peer(true),
+                allowed_namespaces: None,
+                expire_after_ms: None,
+            },
+        ]);
+
+        let peer_acks = Arc::new(Mutex::new(PeerAckTable::new()));
+        let coordinator =
+            DurabilityCoordinator::new(local, policy_peers(), Some(roster), peer_acks.clone());
+
+        let mut durable: WatermarkState<Durable> = std::collections::BTreeMap::new();
+        durable.entry(namespace.clone()).or_default().insert(
+            local,
+            Watermark::new(Seq0::new(2), HeadStatus::Known([1u8; 32])).unwrap(),
+        );
+        peer_acks
+            .lock()
+            .unwrap()
+            .update_peer(peer, &durable, None, 10)
+            .unwrap();
+
+        let mut diverged: WatermarkState<Durable> = std::collections::BTreeMap::new();
+        diverged.entry(namespace.clone()).or_default().insert(
+            local,
+            Watermark::new(Seq0::new(2), HeadStatus::Known([2u8; 32])).unwrap(),
+        );
+        let _ = peer_acks
+            .lock()
+            .unwrap()
+            .update_peer(peer, &diverged, None, 11)
+            .unwrap_err();
+
+        let poll = coordinator
+            .poll_replicated(
+                &namespace,
+                local,
+                Seq1::from_u64(2).unwrap(),
+                NonZeroU32::new(1).unwrap(),
+            )
+            .expect("quarantined peer should remain waitable");
+
+        assert!(matches!(
+            poll,
+            ReplicatedPoll::Pending { ref acked_by, .. } if acked_by.is_empty()
+        ));
     }
 }

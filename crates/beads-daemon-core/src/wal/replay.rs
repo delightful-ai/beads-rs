@@ -13,9 +13,9 @@ use thiserror::Error;
 use crate::core::error::details as error_details;
 use crate::core::{
     Applied, CliErrorCode, DecodeError, Durable, EncodeError, ErrorCode, ErrorPayload, EventId,
-    HeadStatus, IntoErrorPayload, Limits, NamespaceId, ProtocolErrorCode, ReplicaId, SegmentId,
-    Seq0, Seq1, StoreMeta, Transience, Watermark, WatermarkError, WatermarkPair, decode_event_body,
-    decode_event_hlc_max,
+    EventKindV1, HeadStatus, IntoErrorPayload, Limits, NamespaceId, ProtocolErrorCode, ReplicaId,
+    SegmentId, Seq0, Seq1, StoreMeta, Transience, Watermark, WatermarkError, WatermarkPair,
+    decode_event_body, decode_event_hlc_max,
 };
 
 use super::EventWalError;
@@ -866,6 +866,10 @@ fn index_record_with_txn(
         header.txn_id,
         header.client_request_id(),
     )?;
+    let EventKindV1::TxnV1(txn_body) = &record.body().raw().kind;
+    if let Some(counter) = txn_body.delta.max_dot_counter() {
+        txn.observe_orset_counter(counter)?;
+    }
 
     if let (Some(client_request_id), Some(request_sha256)) =
         (header.client_request_id(), header.request_sha256())
@@ -879,6 +883,7 @@ fn index_record_with_txn(
             header.txn_id,
             &event_ids,
             header.event_time_ms,
+            header.durability_claim(),
         )?;
     }
 
@@ -1431,9 +1436,10 @@ mod tests {
     use uuid::Uuid;
 
     use crate::core::{
-        ActorId, EventBody, EventKindV1, HlcMax, Limits, NamespaceId, ReplicaId, SegmentId, Seq0,
-        Seq1, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, TxnDeltaV1, TxnId,
-        TxnV1, encode_event_body_canonical,
+        ActorId, BeadId, EventBody, EventKindV1, HlcMax, Label, Limits, NamespaceId, ReplicaId,
+        SegmentId, Seq0, Seq1, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions,
+        TxnDeltaV1, TxnId, TxnOpV1, TxnV1, WireDotV1, WireDvvV1, WireLabelAddV1, WireLabelRemoveV1,
+        encode_event_body_canonical,
     };
     use crate::wal::SegmentConfig;
     use crate::wal::record::{RecordHeader, RequestProof};
@@ -1442,7 +1448,7 @@ mod tests {
 
     fn test_meta(store_id: StoreId, store_epoch: StoreEpoch) -> StoreMeta {
         let identity = StoreIdentity::new(store_id, store_epoch);
-        let versions = StoreMetaVersions::new(1, 2, 3, 4, 5);
+        let versions = StoreMetaVersions::new(1, StoreMetaVersions::WAL_FORMAT_VERSION, 3, 4, 5);
         StoreMeta::new(
             identity,
             ReplicaId::new(Uuid::from_bytes([9u8; 16])),
@@ -1493,6 +1499,7 @@ mod tests {
         rows: Vec<IndexedRangeItem>,
         frontier: Option<WatermarkRow>,
         next_origin_seq: Seq1,
+        orset_counter: u64,
         segment_offsets: BTreeMap<SegmentId, u64>,
     }
 
@@ -1519,6 +1526,125 @@ mod tests {
             trace_id: None,
             kind: EventKindV1::TxnV1(TxnV1 {
                 delta: TxnDeltaV1::new(),
+                hlc_max: HlcMax {
+                    actor_id: ActorId::new("alice".to_string()).unwrap(),
+                    physical_ms: event_time_ms,
+                    logical: 1,
+                },
+            }),
+        };
+        let body = body.into_validated(limits).expect("validated");
+        let payload = encode_event_body_canonical(body.as_ref()).expect("payload");
+        let sha256 = sha256_bytes(payload.as_ref()).0;
+        let header = RecordHeader {
+            origin_replica_id: origin,
+            origin_seq: seq,
+            event_time_ms,
+            txn_id: TxnId::new(Uuid::from_bytes([txn_byte; 16])),
+            request_proof: RequestProof::None,
+            sha256,
+            prev_sha256,
+        };
+        VerifiedRecord::new(header, payload, body).expect("verified record")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn make_replay_record_with_dot_counter(
+        store: StoreIdentity,
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        seq: Seq1,
+        prev_sha256: Option<[u8; 32]>,
+        event_time_ms: u64,
+        txn_byte: u8,
+        dot_counter: u64,
+        limits: &Limits,
+    ) -> VerifiedRecord {
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::LabelAdd(WireLabelAddV1 {
+                bead_id: BeadId::parse("bd-replay-dot").expect("bead id"),
+                label: Label::parse("replay").expect("label"),
+                dot: WireDotV1 {
+                    replica: origin,
+                    counter: dot_counter,
+                },
+                lineage: None,
+            }))
+            .expect("insert label add");
+        let body = EventBody {
+            envelope_v: 1,
+            store,
+            namespace,
+            origin_replica_id: origin,
+            origin_seq: seq,
+            event_time_ms,
+            txn_id: TxnId::new(Uuid::from_bytes([txn_byte; 16])),
+            client_request_id: None,
+            trace_id: None,
+            kind: EventKindV1::TxnV1(TxnV1 {
+                delta,
+                hlc_max: HlcMax {
+                    actor_id: ActorId::new("alice".to_string()).unwrap(),
+                    physical_ms: event_time_ms,
+                    logical: 1,
+                },
+            }),
+        };
+        let body = body.into_validated(limits).expect("validated");
+        let payload = encode_event_body_canonical(body.as_ref()).expect("payload");
+        let sha256 = sha256_bytes(payload.as_ref()).0;
+        let header = RecordHeader {
+            origin_replica_id: origin,
+            origin_seq: seq,
+            event_time_ms,
+            txn_id: TxnId::new(Uuid::from_bytes([txn_byte; 16])),
+            request_proof: RequestProof::None,
+            sha256,
+            prev_sha256,
+        };
+        VerifiedRecord::new(header, payload, body).expect("verified record")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn make_replay_record_with_label_remove_counter(
+        store: StoreIdentity,
+        namespace: NamespaceId,
+        origin: ReplicaId,
+        seq: Seq1,
+        prev_sha256: Option<[u8; 32]>,
+        event_time_ms: u64,
+        txn_byte: u8,
+        dot_counter: u64,
+        limits: &Limits,
+    ) -> VerifiedRecord {
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::LabelRemove(WireLabelRemoveV1 {
+                bead_id: BeadId::parse("bd-replay-dot").expect("bead id"),
+                label: Label::parse("replay").expect("label"),
+                ctx: WireDvvV1 {
+                    max: BTreeMap::new(),
+                    dots: vec![WireDotV1 {
+                        replica: origin,
+                        counter: dot_counter,
+                    }],
+                },
+                lineage: None,
+            }))
+            .expect("insert label remove");
+        let body = EventBody {
+            envelope_v: 1,
+            store,
+            namespace,
+            origin_replica_id: origin,
+            origin_seq: seq,
+            event_time_ms,
+            txn_id: TxnId::new(Uuid::from_bytes([txn_byte; 16])),
+            client_request_id: None,
+            trace_id: None,
+            kind: EventKindV1::TxnV1(TxnV1 {
+                delta,
                 hlc_max: HlcMax {
                     actor_id: ActorId::new("alice".to_string()).unwrap(),
                     physical_ms: event_time_ms,
@@ -1638,6 +1764,84 @@ mod tests {
         }
     }
 
+    #[test]
+    fn rebuild_restores_orset_counter_from_wal_records() {
+        let temp = TempDir::new().unwrap();
+        let store_id = StoreId::new(Uuid::from_bytes([51u8; 16]));
+        let store_epoch = StoreEpoch::new(1);
+        let meta = test_meta(store_id, store_epoch);
+        let limits = Limits::default();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([52u8; 16]));
+        let store = StoreIdentity::new(store_id, store_epoch);
+
+        let mut writer = SegmentWriter::open(
+            temp.path(),
+            &meta,
+            &namespace,
+            10,
+            SegmentConfig::from_limits(&limits),
+        )
+        .unwrap();
+
+        let record = make_replay_record_with_dot_counter(
+            store,
+            namespace.clone(),
+            origin,
+            Seq1::from_u64(1).expect("seq1"),
+            None,
+            11,
+            1,
+            7,
+            &limits,
+        );
+        writer.append(&record, 11).expect("append replay record");
+
+        rebuild_index(temp.path(), &meta, &index, &limits).expect("rebuild index");
+
+        assert_eq!(index.reader().load_orset_counter().unwrap(), 7);
+    }
+
+    #[test]
+    fn rebuild_restores_orset_counter_from_label_remove_context() {
+        let temp = TempDir::new().unwrap();
+        let store_id = StoreId::new(Uuid::from_bytes([61u8; 16]));
+        let store_epoch = StoreEpoch::new(1);
+        let meta = test_meta(store_id, store_epoch);
+        let limits = Limits::default();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([62u8; 16]));
+        let store = StoreIdentity::new(store_id, store_epoch);
+
+        let mut writer = SegmentWriter::open(
+            temp.path(),
+            &meta,
+            &namespace,
+            10,
+            SegmentConfig::from_limits(&limits),
+        )
+        .unwrap();
+
+        let record = make_replay_record_with_label_remove_counter(
+            store,
+            namespace.clone(),
+            origin,
+            Seq1::from_u64(1).expect("seq1"),
+            None,
+            11,
+            1,
+            9,
+            &limits,
+        );
+        writer.append(&record, 11).expect("append replay record");
+
+        rebuild_index(temp.path(), &meta, &index, &limits).expect("rebuild index");
+
+        assert_eq!(index.reader().load_orset_counter().unwrap(), 9);
+    }
+
     fn seed_catch_up_gap_fixture() -> CatchUpAtomicFixture {
         let temp = TempDir::new().unwrap();
         let store_id = StoreId::new(Uuid::from_bytes([51u8; 16]));
@@ -1741,6 +1945,10 @@ mod tests {
             rows,
             frontier,
             next_origin_seq,
+            orset_counter: index
+                .reader()
+                .load_orset_counter()
+                .expect("load orset counter"),
             segment_offsets,
         }
     }
@@ -1836,6 +2044,7 @@ mod tests {
         assert_eq!(frontier.applied_seq(), 3);
         assert_eq!(frontier.durable_seq(), 3);
         assert_eq!(post.next_origin_seq.get(), 4);
+        assert!(post.orset_counter >= pre.orset_counter);
 
         let pre_offset = pre
             .segment_offsets
@@ -2271,6 +2480,63 @@ mod tests {
         )
         .expect("catch-up should succeed");
         assert_recovered_after_retry(&fixture, &pre);
+    }
+
+    #[test]
+    fn catch_up_restores_orset_counter_from_new_history() {
+        let temp = TempDir::new().unwrap();
+        let store_id = StoreId::new(Uuid::from_bytes([71u8; 16]));
+        let store_epoch = StoreEpoch::new(1);
+        let meta = test_meta(store_id, store_epoch);
+        let limits = Limits::default();
+        let index = SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
+        let namespace = NamespaceId::core();
+        let origin = ReplicaId::new(Uuid::from_bytes([72u8; 16]));
+        let store = StoreIdentity::new(store_id, store_epoch);
+
+        let mut writer = SegmentWriter::open(
+            temp.path(),
+            &meta,
+            &namespace,
+            10,
+            SegmentConfig::from_limits(&limits),
+        )
+        .unwrap();
+
+        let first = make_replay_record_with_dot_counter(
+            store,
+            namespace.clone(),
+            origin,
+            Seq1::from_u64(1).expect("seq1"),
+            None,
+            11,
+            1,
+            3,
+            &limits,
+        );
+        let first_sha = first.header().sha256;
+        writer.append(&first, 11).expect("append first record");
+        rebuild_index(temp.path(), &meta, &index, &limits).expect("rebuild initial index");
+        assert_eq!(index.reader().load_orset_counter().unwrap(), 3);
+
+        let second = make_replay_record_with_label_remove_counter(
+            store,
+            namespace.clone(),
+            origin,
+            Seq1::from_u64(2).expect("seq2"),
+            Some(first_sha),
+            12,
+            2,
+            8,
+            &limits,
+        );
+        writer.append(&second, 12).expect("append catch-up record");
+
+        catch_up_index(temp.path(), &meta, &index, &limits).expect("catch up index");
+
+        let snapshot = capture_snapshot(&index, &namespace, origin);
+        assert_eq!(snapshot.next_origin_seq.get(), 3);
+        assert_eq!(snapshot.orset_counter, 8);
     }
 
     #[test]

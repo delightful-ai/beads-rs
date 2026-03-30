@@ -45,7 +45,9 @@ impl TestGitTx {
 }
 
 pub mod durability_coordinator {
-    pub use crate::runtime::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
+    pub use crate::runtime::durability_coordinator::{
+        DurabilityCoordinator, DurabilityRequestClaim, ReplicatedDurabilityClaim, ReplicatedPoll,
+    };
 }
 
 // The E2E harness depends on other helpers that are only available with the
@@ -54,7 +56,9 @@ pub mod durability_coordinator {
 pub mod e2e;
 
 pub mod durability {
-    pub use crate::runtime::durability_coordinator::{DurabilityCoordinator, ReplicatedPoll};
+    pub use crate::runtime::durability_coordinator::{
+        DurabilityCoordinator, DurabilityRequestClaim, ReplicatedDurabilityClaim, ReplicatedPoll,
+    };
 }
 
 pub mod executor {

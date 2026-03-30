@@ -7,8 +7,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use std::sync::{LazyLock, MutexGuard};
+
 use rand::RngCore;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -81,6 +84,11 @@ pub(crate) struct ReplicaIdRotation {
     pub runtime_version: ReplicationRuntimeVersion,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PolicyReloadOutcome {
+    pub reload_replication_runtime: bool,
+}
+
 pub struct StoreRuntime {
     layout: DaemonLayout,
     pub primary_remote: RemoteUrl,
@@ -108,6 +116,277 @@ pub struct StoreRuntime {
 pub struct StoreRuntimeOpen {
     pub runtime: StoreRuntime,
     pub replay_stats: ReplayStats,
+}
+
+enum StoreMetaOpenState {
+    Ready(StoreMeta),
+    Pending(PendingStoreMetaTransition),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+struct PendingStoreMetaTransitionRecord {
+    meta: StoreMeta,
+}
+
+struct PendingStoreMetaTransition {
+    meta_path: PathBuf,
+    pending_path: PathBuf,
+    meta: StoreMeta,
+    marker_persisted: bool,
+}
+
+struct NormalizedPendingStoreMetaTransition {
+    record: PendingStoreMetaTransitionRecord,
+    marker_persisted: bool,
+}
+
+impl StoreMetaOpenState {
+    fn meta(&self) -> &StoreMeta {
+        match self {
+            StoreMetaOpenState::Ready(meta) => meta,
+            StoreMetaOpenState::Pending(pending) => &pending.meta,
+        }
+    }
+
+    fn commit(self) -> Result<StoreMeta, StoreRuntimeError> {
+        match self {
+            StoreMetaOpenState::Ready(meta) => Ok(meta),
+            StoreMetaOpenState::Pending(pending) => pending.commit(),
+        }
+    }
+
+    fn ensure_pending_persisted(&mut self) -> Result<(), StoreRuntimeError> {
+        if let StoreMetaOpenState::Pending(pending) = self {
+            pending.ensure_persisted()?;
+        }
+        Ok(())
+    }
+
+    fn pending(&self) -> Option<&PendingStoreMetaTransition> {
+        match self {
+            StoreMetaOpenState::Ready(_) => None,
+            StoreMetaOpenState::Pending(pending) => Some(pending),
+        }
+    }
+}
+
+impl PendingStoreMetaTransition {
+    fn new(meta_path: PathBuf, pending_path: PathBuf, meta: StoreMeta) -> Self {
+        Self {
+            meta_path,
+            pending_path,
+            meta,
+            marker_persisted: false,
+        }
+    }
+
+    fn persisted(meta_path: PathBuf, pending_path: PathBuf, meta: StoreMeta) -> Self {
+        Self {
+            meta_path,
+            pending_path,
+            meta,
+            marker_persisted: true,
+        }
+    }
+
+    fn ensure_persisted(&mut self) -> Result<(), StoreRuntimeError> {
+        if !self.marker_persisted {
+            write_pending_store_meta_transition(
+                &self.pending_path,
+                &PendingStoreMetaTransitionRecord {
+                    meta: self.meta.clone(),
+                },
+            )?;
+            self.marker_persisted = true;
+        }
+        Ok(())
+    }
+
+    fn commit(self) -> Result<StoreMeta, StoreRuntimeError> {
+        write_store_meta_for_open(&self.meta_path, &self.meta)?;
+        #[cfg(test)]
+        maybe_panic_store_meta_transition("store_meta_transition_after_meta_commit");
+        if let Err(err) = remove_pending_store_meta_transition(&self.pending_path) {
+            tracing::warn!(
+                pending_path = %self.pending_path.display(),
+                error = ?err,
+                "store meta transition marker cleanup failed after committed meta write"
+            );
+        }
+        Ok(self.meta)
+    }
+}
+
+fn derive_store_meta_open_state(
+    existing: Option<&StoreMeta>,
+    meta_path: &Path,
+    pending_path: &Path,
+    store_id: StoreId,
+    now_ms: u64,
+    expected_versions: StoreMetaVersions,
+) -> Result<StoreMetaOpenState, StoreRuntimeError> {
+    match existing {
+        Some(meta) => {
+            if meta.store_id() != store_id {
+                return Err(StoreRuntimeError::MetaMismatch {
+                    expected: store_id,
+                    got: meta.store_id(),
+                });
+            }
+            let got_versions = meta.versions();
+            if got_versions == expected_versions {
+                Ok(StoreMetaOpenState::Ready(meta.clone()))
+            } else if can_upgrade_index_schema_only(got_versions, expected_versions) {
+                let mut upgraded = meta.clone();
+                upgraded.index_schema_version = expected_versions.index_schema_version;
+                Ok(StoreMetaOpenState::Pending(
+                    PendingStoreMetaTransition::new(
+                        meta_path.to_path_buf(),
+                        pending_path.to_path_buf(),
+                        upgraded,
+                    ),
+                ))
+            } else {
+                Err(StoreRuntimeError::UnsupportedStoreMetaVersion {
+                    expected: expected_versions,
+                    got: got_versions,
+                })
+            }
+        }
+        None => {
+            let identity = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+            Ok(StoreMetaOpenState::Pending(
+                PendingStoreMetaTransition::new(
+                    meta_path.to_path_buf(),
+                    pending_path.to_path_buf(),
+                    StoreMeta::new(identity, new_replica_id(), expected_versions, now_ms),
+                ),
+            ))
+        }
+    }
+}
+
+fn normalize_pending_store_meta_transition(
+    pending: &PendingStoreMetaTransitionRecord,
+    store_id: StoreId,
+    expected_versions: StoreMetaVersions,
+) -> Result<NormalizedPendingStoreMetaTransition, StoreRuntimeError> {
+    if pending.meta.store_id() != store_id {
+        return Err(StoreRuntimeError::MetaMismatch {
+            expected: store_id,
+            got: pending.meta.store_id(),
+        });
+    }
+
+    let got_versions = pending.meta.versions();
+    if got_versions == expected_versions {
+        Ok(NormalizedPendingStoreMetaTransition {
+            record: pending.clone(),
+            marker_persisted: true,
+        })
+    } else if can_upgrade_index_schema_only(got_versions, expected_versions) {
+        let mut upgraded = pending.meta.clone();
+        upgraded.index_schema_version = expected_versions.index_schema_version;
+        Ok(NormalizedPendingStoreMetaTransition {
+            record: PendingStoreMetaTransitionRecord { meta: upgraded },
+            marker_persisted: false,
+        })
+    } else {
+        Err(StoreRuntimeError::UnsupportedStoreMetaVersion {
+            expected: expected_versions,
+            got: got_versions,
+        })
+    }
+}
+
+fn recover_pending_store_meta_transition(
+    layout: &DaemonLayout,
+    store_id: StoreId,
+    committed: Option<&StoreMeta>,
+    meta_path: PathBuf,
+    pending_path: PathBuf,
+    expected_versions: StoreMetaVersions,
+    pending: PendingStoreMetaTransitionRecord,
+) -> Result<StoreMetaOpenState, StoreRuntimeError> {
+    if pending.meta.store_id() != store_id {
+        return Err(StoreRuntimeError::MetaMismatch {
+            expected: store_id,
+            got: pending.meta.store_id(),
+        });
+    }
+    if let Some(meta) = committed {
+        if meta.store_id() != store_id {
+            return Err(StoreRuntimeError::MetaMismatch {
+                expected: store_id,
+                got: meta.store_id(),
+            });
+        }
+        if meta.versions() == expected_versions {
+            if meta != &pending.meta {
+                tracing::warn!(
+                    store_id = %store_id,
+                    pending_path = %pending_path.display(),
+                    "ignoring stale pending store meta transition after committed meta advanced"
+                );
+            }
+            if let Err(err) = remove_pending_store_meta_transition(&pending_path) {
+                tracing::warn!(
+                    pending_path = %pending_path.display(),
+                    error = ?err,
+                    "stale store meta transition marker cleanup failed during recovery"
+                );
+            }
+            return Ok(StoreMetaOpenState::Ready(meta.clone()));
+        }
+    }
+    if pending.meta.versions() != expected_versions {
+        return Err(StoreRuntimeError::UnsupportedStoreMetaVersion {
+            expected: expected_versions,
+            got: pending.meta.versions(),
+        });
+    }
+    remove_wal_index_files_with_layout(layout, store_id)?;
+    Ok(StoreMetaOpenState::Pending(
+        PendingStoreMetaTransition::persisted(meta_path, pending_path, pending.meta),
+    ))
+}
+
+fn rollback_store_meta_transition_after_failure(
+    layout: &DaemonLayout,
+    store_id: StoreId,
+    pending_path: &Path,
+) -> Result<(), StoreRuntimeError> {
+    remove_wal_index_files_with_layout(layout, store_id)?;
+    remove_pending_store_meta_transition(pending_path)
+}
+
+fn read_pending_store_meta_transition_optional_when_committed_recovers(
+    path: &Path,
+    store_id: StoreId,
+) -> Result<Option<PendingStoreMetaTransitionRecord>, StoreRuntimeError> {
+    match read_pending_store_meta_transition_optional(path) {
+        Ok(pending) => Ok(pending),
+        Err(StoreRuntimeError::MetaParse {
+            path: err_path,
+            source,
+        }) if err_path.as_ref() == path => {
+            tracing::warn!(
+                store_id = %store_id,
+                pending_path = %path.display(),
+                error = ?source,
+                "ignoring unreadable pending store meta transition because committed meta is sufficient for recovery"
+            );
+            if let Err(err) = remove_pending_store_meta_transition(path) {
+                tracing::warn!(
+                    pending_path = %path.display(),
+                    error = ?err,
+                    "unreadable store meta transition marker cleanup failed during recovery"
+                );
+            }
+            Ok(None)
+        }
+        Err(err) => Err(err),
+    }
 }
 
 pub(crate) fn checkpoint_dirty_paths_for_outcome(
@@ -182,10 +461,11 @@ impl StoreRuntime {
         namespace_defaults: &BTreeMap<NamespaceId, NamespacePolicy>,
     ) -> Result<StoreRuntimeOpen, StoreRuntimeError> {
         let meta_path = layout.store_meta_path(&store_id);
+        let pending_path = layout.store_meta_pending_path(&store_id);
         let existing = read_store_meta_optional(&meta_path)?;
-
         let expected_versions = StoreMetaVersions::current();
-        let (meta, write_meta) = match existing.as_ref() {
+        let (authoritative_committed, committed_recovers_without_pending) = match existing.as_ref()
+        {
             Some(meta) => {
                 if meta.store_id() != store_id {
                     return Err(StoreRuntimeError::MetaMismatch {
@@ -195,11 +475,9 @@ impl StoreRuntime {
                 }
                 let got_versions = meta.versions();
                 if got_versions == expected_versions {
-                    (meta.clone(), false)
+                    (Some(meta.clone()), true)
                 } else if can_upgrade_index_schema_only(got_versions, expected_versions) {
-                    let mut upgraded = meta.clone();
-                    upgraded.index_schema_version = expected_versions.index_schema_version;
-                    (upgraded, true)
+                    (None, true)
                 } else {
                     return Err(StoreRuntimeError::UnsupportedStoreMetaVersion {
                         expected: expected_versions,
@@ -207,47 +485,144 @@ impl StoreRuntime {
                     });
                 }
             }
-            None => {
-                let identity = StoreIdentity::new(store_id, StoreEpoch::ZERO);
-                (
-                    StoreMeta::new(identity, new_replica_id(), expected_versions, now_ms),
-                    true,
-                )
+            None => (None, false),
+        };
+        let pending = if committed_recovers_without_pending {
+            read_pending_store_meta_transition_optional_when_committed_recovers(
+                &pending_path,
+                store_id,
+            )?
+        } else {
+            read_pending_store_meta_transition_optional(&pending_path)?
+        };
+        let normalized_pending = if authoritative_committed.is_some() {
+            None
+        } else {
+            pending
+                .as_ref()
+                .map(|pending| {
+                    normalize_pending_store_meta_transition(pending, store_id, expected_versions)
+                })
+                .transpose()?
+        };
+        let committed_is_authoritative = authoritative_committed.is_some();
+        let mut meta_state = if let Some(meta) = authoritative_committed {
+            // If committed meta is already current, it defines both startup state and
+            // lock identity. Pending cleanup still runs after we hold the lock.
+            StoreMetaOpenState::Ready(meta)
+        } else {
+            match normalized_pending.as_ref() {
+                Some(pending) => {
+                    let transition = if pending.marker_persisted {
+                        PendingStoreMetaTransition::persisted(
+                            meta_path.clone(),
+                            pending_path.clone(),
+                            pending.record.meta.clone(),
+                        )
+                    } else {
+                        PendingStoreMetaTransition::new(
+                            meta_path.clone(),
+                            pending_path.clone(),
+                            pending.record.meta.clone(),
+                        )
+                    };
+                    StoreMetaOpenState::Pending(transition)
+                }
+                None => derive_store_meta_open_state(
+                    existing.as_ref(),
+                    &meta_path,
+                    &pending_path,
+                    store_id,
+                    now_ms,
+                    expected_versions,
+                )?,
             }
         };
+        let recovery_pending = if committed_is_authoritative {
+            pending.clone()
+        } else {
+            normalized_pending
+                .as_ref()
+                .map(|pending| pending.record.clone())
+        };
 
-        let lock = StoreLock::acquire(layout, store_id, meta.replica_id, now_ms, daemon_version)?;
-
-        if write_meta {
-            write_store_meta(&meta_path, &meta)?;
-        }
-
-        let store_dir = layout.store_dir(&store_id);
-        let store_config = load_store_config_with_layout(layout, store_id, true)?;
-        let (mut wal_index, needs_rebuild) = open_wal_index_with_layout(
+        let lock = StoreLock::acquire(
             layout,
             store_id,
-            &store_dir,
-            &meta,
-            store_config.index_durability_mode,
+            meta_state.meta().replica_id,
+            now_ms,
+            daemon_version,
         )?;
-        let replay_stats = if needs_rebuild {
-            rebuild_index(&store_dir, &meta, &wal_index, limits)?
-        } else {
-            match catch_up_index(&store_dir, &meta, &wal_index, limits) {
-                Ok(stats) => stats,
-                Err(WalReplayError::IndexOffsetInvalid { .. }) => {
-                    remove_wal_index_files_with_layout(layout, store_id)?;
-                    wal_index = SqliteWalIndex::open(
-                        &store_dir,
-                        &meta,
-                        store_config.index_durability_mode,
-                    )?;
-                    rebuild_index(&store_dir, &meta, &wal_index, limits)?
+
+        if let Some(pending) = recovery_pending {
+            meta_state = recover_pending_store_meta_transition(
+                layout,
+                store_id,
+                existing.as_ref(),
+                meta_path.clone(),
+                pending_path.clone(),
+                expected_versions,
+                pending,
+            )?;
+        }
+        if existing.is_none() && !matches!(meta_state, StoreMetaOpenState::Ready(_)) {
+            remove_wal_index_files_with_layout(layout, store_id)?;
+        }
+        meta_state.ensure_pending_persisted()?;
+        let pending_cleanup_path = meta_state
+            .pending()
+            .map(|pending| pending.pending_path.clone());
+        let open_result =
+            (|| -> Result<(SqliteWalIndex, ReplayStats, StoreMeta), StoreRuntimeError> {
+                let store_dir = layout.store_dir(&store_id);
+                let store_config = load_store_config_with_layout(layout, store_id, true)?;
+                let (mut wal_index, needs_rebuild) = open_wal_index_with_layout(
+                    layout,
+                    store_id,
+                    &store_dir,
+                    meta_state.meta(),
+                    store_config.index_durability_mode,
+                )?;
+                let replay_stats = if needs_rebuild {
+                    rebuild_index(&store_dir, meta_state.meta(), &wal_index, limits)?
+                } else {
+                    match catch_up_index(&store_dir, meta_state.meta(), &wal_index, limits) {
+                        Ok(stats) => stats,
+                        Err(WalReplayError::IndexOffsetInvalid { .. }) => {
+                            remove_wal_index_files_with_layout(layout, store_id)?;
+                            wal_index = SqliteWalIndex::open(
+                                &store_dir,
+                                meta_state.meta(),
+                                store_config.index_durability_mode,
+                            )?;
+                            rebuild_index(&store_dir, meta_state.meta(), &wal_index, limits)?
+                        }
+                        Err(err) => return Err(StoreRuntimeError::WalReplay(Box::new(err))),
+                    }
+                };
+                #[cfg(test)]
+                maybe_panic_store_meta_transition("store_meta_transition_before_meta_commit");
+                let meta = meta_state.commit()?;
+                Ok((wal_index, replay_stats, meta))
+            })();
+        let (wal_index, replay_stats, meta) = match open_result {
+            Ok(result) => result,
+            Err(err) => {
+                if let Some(pending_path) = pending_cleanup_path.as_deref()
+                    && let Err(rollback_err) =
+                        rollback_store_meta_transition_after_failure(layout, store_id, pending_path)
+                {
+                    tracing::warn!(
+                        store_id = %store_id,
+                        rollback_error = ?rollback_err,
+                        original_error = ?err,
+                        "store meta transition cleanup failed after open error"
+                    );
                 }
-                Err(err) => return Err(StoreRuntimeError::WalReplay(Box::new(err))),
+                return Err(err);
             }
         };
+        let store_dir = layout.store_dir(&store_id);
 
         let wal_index: Arc<dyn WalIndex> = Arc::new(wal_index);
         let (watermarks_applied, watermarks_durable) = load_watermarks(wal_index.as_ref())?;
@@ -514,6 +889,29 @@ impl StoreRuntime {
         self.replication_runtime_version
     }
 
+    pub(crate) fn reload_policies(
+        &mut self,
+        policies: BTreeMap<NamespaceId, NamespacePolicy>,
+        reload_replication_runtime: bool,
+    ) -> PolicyReloadOutcome {
+        self.policies = policies;
+        if reload_replication_runtime {
+            self.replication_runtime_version = self.replication_runtime_version.next();
+        }
+        PolicyReloadOutcome {
+            reload_replication_runtime,
+        }
+    }
+
+    pub(crate) fn restore_policies(
+        &mut self,
+        policies: BTreeMap<NamespaceId, NamespacePolicy>,
+        runtime_version: ReplicationRuntimeVersion,
+    ) {
+        self.policies = policies;
+        self.replication_runtime_version = runtime_version;
+    }
+
     pub(crate) fn rollback_checkpoint_dirty_shards(&mut self, checkpoint_group: &str) {
         let Some(in_flight) = self.checkpoint_dirty_inflight.remove(checkpoint_group) else {
             return;
@@ -570,18 +968,6 @@ impl StoreRuntime {
             new_replica_id,
             runtime_version: self.replication_runtime_version,
         })
-    }
-
-    pub fn next_orset_counter(&mut self) -> Result<u64, StoreRuntimeError> {
-        let next = self
-            .meta
-            .orset_counter
-            .checked_add(1)
-            .expect("orset counter overflow");
-        self.meta.orset_counter = next;
-        let path = self.layout.store_meta_path(&self.meta.store_id());
-        write_store_meta(&path, &self.meta)?;
-        Ok(next)
     }
 }
 
@@ -1071,6 +1457,23 @@ fn remove_wal_index_files_with_layout(
     layout: &DaemonLayout,
     store_id: StoreId,
 ) -> Result<(), StoreRuntimeError> {
+    let index_dir = layout.store_dir(&store_id).join("index");
+    match fs::symlink_metadata(&index_dir) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(StoreRuntimeError::WalIndex(WalIndexError::Symlink {
+                path: index_dir,
+            }));
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+        Err(err) => {
+            return Err(StoreRuntimeError::WalIndex(WalIndexError::Io {
+                path: Some(index_dir),
+                reason: err.to_string(),
+            }));
+        }
+    }
+
     let db_path = layout.wal_index_path(&store_id);
     for suffix in ["", "-wal", "-shm"] {
         let path = if suffix.is_empty() {
@@ -1078,13 +1481,27 @@ fn remove_wal_index_files_with_layout(
         } else {
             PathBuf::from(format!("{}{}", db_path.display(), suffix))
         };
-        if path.exists() {
-            fs::remove_file(&path).map_err(|source| {
-                StoreRuntimeError::WalIndex(WalIndexError::Io {
+        match fs::symlink_metadata(&path) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(StoreRuntimeError::WalIndex(WalIndexError::Symlink {
+                    path: path.clone(),
+                }));
+            }
+            Ok(_) => {
+                fs::remove_file(&path).map_err(|source| {
+                    StoreRuntimeError::WalIndex(WalIndexError::Io {
+                        path: Some(path.clone()),
+                        reason: source.to_string(),
+                    })
+                })?;
+            }
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => {
+                return Err(StoreRuntimeError::WalIndex(WalIndexError::Io {
                     path: Some(path.clone()),
-                    reason: source.to_string(),
-                })
-            })?;
+                    reason: err.to_string(),
+                }));
+            }
         }
     }
     Ok(())
@@ -1225,7 +1642,9 @@ fn head_status_to_sha(head: Option<HeadStatus>) -> Option<[u8; 32]> {
     }
 }
 
-fn read_store_meta_optional(path: &Path) -> Result<Option<StoreMeta>, StoreRuntimeError> {
+fn read_store_json_optional<T: DeserializeOwned>(
+    path: &Path,
+) -> Result<Option<T>, StoreRuntimeError> {
     match fs::symlink_metadata(path) {
         Ok(meta) if meta.file_type().is_symlink() => {
             return Err(StoreRuntimeError::MetaSymlink {
@@ -1246,15 +1665,25 @@ fn read_store_meta_optional(path: &Path) -> Result<Option<StoreMeta>, StoreRunti
         path: Box::new(path.to_path_buf()),
         source,
     })?;
-    let meta = serde_json::from_slice(&bytes).map_err(|source| StoreRuntimeError::MetaParse {
+    let value = serde_json::from_slice(&bytes).map_err(|source| StoreRuntimeError::MetaParse {
         path: Box::new(path.to_path_buf()),
         source,
     })?;
     ensure_file_permissions(path)?;
-    Ok(Some(meta))
+    Ok(Some(value))
 }
 
-fn write_store_meta(path: &Path, meta: &StoreMeta) -> Result<(), StoreRuntimeError> {
+fn read_store_meta_optional(path: &Path) -> Result<Option<StoreMeta>, StoreRuntimeError> {
+    read_store_json_optional(path)
+}
+
+fn read_pending_store_meta_transition_optional(
+    path: &Path,
+) -> Result<Option<PendingStoreMetaTransitionRecord>, StoreRuntimeError> {
+    read_store_json_optional(path)
+}
+
+fn write_store_json(path: &Path, value: &impl Serialize) -> Result<(), StoreRuntimeError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|source| StoreRuntimeError::MetaWrite {
             path: Box::new(path.to_path_buf()),
@@ -1262,7 +1691,7 @@ fn write_store_meta(path: &Path, meta: &StoreMeta) -> Result<(), StoreRuntimeErr
         })?;
     }
 
-    let bytes = serde_json::to_vec(meta).map_err(|source| StoreRuntimeError::MetaParse {
+    let bytes = serde_json::to_vec(value).map_err(|source| StoreRuntimeError::MetaParse {
         path: Box::new(path.to_path_buf()),
         source,
     })?;
@@ -1293,13 +1722,196 @@ fn write_store_meta(path: &Path, meta: &StoreMeta) -> Result<(), StoreRuntimeErr
             source: err.error,
         })?;
     ensure_file_permissions(path)?;
+    sync_parent_dir(path);
+    Ok(())
+}
+
+fn write_store_meta(path: &Path, meta: &StoreMeta) -> Result<(), StoreRuntimeError> {
+    write_store_json(path, meta)
+}
+
+fn write_pending_store_meta_transition(
+    path: &Path,
+    transition: &PendingStoreMetaTransitionRecord,
+) -> Result<(), StoreRuntimeError> {
+    write_store_json(path, transition)
+}
+
+fn remove_pending_store_meta_transition(path: &Path) -> Result<(), StoreRuntimeError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            return Err(StoreRuntimeError::MetaSymlink {
+                path: Box::new(path.to_path_buf()),
+            });
+        }
+        Ok(_) => {}
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(err) => {
+            return Err(StoreRuntimeError::MetaRead {
+                path: Box::new(path.to_path_buf()),
+                source: err,
+            });
+        }
+    }
+    fs::remove_file(path).map_err(|source| StoreRuntimeError::MetaWrite {
+        path: Box::new(path.to_path_buf()),
+        source,
+    })?;
+    sync_parent_dir(path);
+    Ok(())
+}
+
+fn sync_parent_dir(path: &Path) {
     #[cfg(unix)]
     {
+        let Some(dir) = path.parent() else {
+            return;
+        };
         if let Ok(dir) = fs::File::open(dir) {
             let _ = dir.sync_all();
         }
     }
-    Ok(())
+}
+
+#[cfg(test)]
+type MetaWriteHookFn = Box<dyn FnOnce(&Path, &StoreMeta) -> Result<(), StoreRuntimeError> + Send>;
+
+#[cfg(test)]
+struct MetaWriteHook {
+    path: PathBuf,
+    hook: MetaWriteHookFn,
+}
+
+#[cfg(test)]
+static META_WRITE_HOOK: LazyLock<Mutex<Option<MetaWriteHook>>> = LazyLock::new(|| Mutex::new(None));
+
+#[cfg(test)]
+static META_WRITE_HOOK_INSTALL_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+#[cfg(test)]
+struct MetaWriteHookGuard {
+    _install_guard: MutexGuard<'static, ()>,
+}
+
+#[cfg(test)]
+impl Drop for MetaWriteHookGuard {
+    fn drop(&mut self) {
+        *lock_meta_write_hook() = None;
+    }
+}
+
+#[cfg(test)]
+fn scoped_meta_write_hook(
+    path: PathBuf,
+    hook: impl FnOnce(&Path, &StoreMeta) -> Result<(), StoreRuntimeError> + Send + 'static,
+) -> MetaWriteHookGuard {
+    let install_guard = lock_meta_write_hook_install();
+    let mut slot = lock_meta_write_hook();
+    assert!(slot.is_none(), "meta write hook already installed");
+    *slot = Some(MetaWriteHook {
+        path,
+        hook: Box::new(hook),
+    });
+    drop(slot);
+    MetaWriteHookGuard {
+        _install_guard: install_guard,
+    }
+}
+
+#[cfg(test)]
+fn lock_meta_write_hook() -> MutexGuard<'static, Option<MetaWriteHook>> {
+    META_WRITE_HOOK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+#[cfg(test)]
+fn lock_meta_write_hook_install() -> MutexGuard<'static, ()> {
+    META_WRITE_HOOK_INSTALL_LOCK
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+}
+
+fn write_store_meta_for_open(path: &Path, meta: &StoreMeta) -> Result<(), StoreRuntimeError> {
+    #[cfg(test)]
+    {
+        let maybe_hook = {
+            let mut slot = lock_meta_write_hook();
+            match slot.as_ref() {
+                Some(installed) if installed.path == path => slot.take(),
+                _ => None,
+            }
+        };
+        if let Some(hook) = maybe_hook {
+            return (hook.hook)(path, meta);
+        }
+    }
+    write_store_meta(path, meta)
+}
+
+#[cfg(test)]
+#[derive(Clone, Debug)]
+struct StoreMetaTransitionCrashFailpoint {
+    stage: String,
+    owner: std::thread::ThreadId,
+}
+
+#[cfg(test)]
+fn store_meta_transition_crash_slot()
+-> &'static std::sync::Mutex<Option<StoreMetaTransitionCrashFailpoint>> {
+    static SLOT: std::sync::OnceLock<std::sync::Mutex<Option<StoreMetaTransitionCrashFailpoint>>> =
+        std::sync::OnceLock::new();
+    SLOT.get_or_init(|| std::sync::Mutex::new(None))
+}
+
+#[cfg(test)]
+fn store_meta_transition_crash_install_lock() -> &'static std::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+}
+
+#[cfg(test)]
+fn maybe_panic_store_meta_transition(stage: &str) {
+    let slot = store_meta_transition_crash_slot();
+    let active = slot.lock().unwrap_or_else(|poison| poison.into_inner());
+    if let Some(failpoint) = active.as_ref()
+        && failpoint.stage == stage
+        && failpoint.owner == std::thread::current().id()
+    {
+        panic!("injected store meta transition crash at {stage}");
+    }
+}
+
+#[cfg(test)]
+struct StoreMetaTransitionCrashGuard {
+    _install_guard: MutexGuard<'static, ()>,
+    previous: Option<StoreMetaTransitionCrashFailpoint>,
+}
+
+#[cfg(test)]
+impl Drop for StoreMetaTransitionCrashGuard {
+    fn drop(&mut self) {
+        let slot = store_meta_transition_crash_slot();
+        *slot.lock().unwrap_or_else(|poison| poison.into_inner()) = self.previous.take();
+    }
+}
+
+#[cfg(test)]
+fn set_store_meta_transition_crash_stage_for_tests(stage: &str) -> StoreMetaTransitionCrashGuard {
+    let install_guard = store_meta_transition_crash_install_lock()
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner());
+    let slot = store_meta_transition_crash_slot();
+    let mut active = slot.lock().unwrap_or_else(|poison| poison.into_inner());
+    let previous = active.replace(StoreMetaTransitionCrashFailpoint {
+        stage: stage.to_string(),
+        owner: std::thread::current().id(),
+    });
+    drop(active);
+    StoreMetaTransitionCrashGuard {
+        _install_guard: install_guard,
+        previous,
+    }
 }
 
 #[derive(Debug, Error)]
@@ -1389,6 +2001,7 @@ mod tests {
     };
     use crate::paths;
     use crate::remote::RemoteUrl;
+    use crate::runtime::store::lock::{StoreLockMeta, read_lock_meta};
     use crate::runtime::wal::{IndexDurabilityMode, SqliteWalIndex, WalIndex};
     #[cfg(unix)]
     use std::os::unix::fs::{PermissionsExt, symlink};
@@ -1455,6 +2068,33 @@ mod tests {
         .expect("insert wal_format_version");
         conn.execute("INSERT INTO legacy_sentinel (id) VALUES (1)", [])
             .expect("insert sentinel");
+    }
+
+    fn write_stale_lock_meta(
+        store_id: StoreId,
+        replica_id: ReplicaId,
+        started_at_ms: u64,
+        daemon_version: &str,
+    ) {
+        let lock_path = paths::store_lock_path(store_id);
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent).expect("create lock dir");
+        }
+        let lock_meta = StoreLockMeta {
+            store_id,
+            replica_id,
+            pid: i32::MAX as u32,
+            started_at_ms,
+            daemon_version: daemon_version.to_string(),
+            lease_epoch: 1,
+            lease_token: Some(Uuid::from_bytes([201u8; 16])),
+            last_heartbeat_ms: Some(started_at_ms),
+        };
+        let data = serde_json::to_vec(&lock_meta).expect("serialize stale lock meta");
+        fs::write(&lock_path, data).expect("write stale lock meta");
+        #[cfg(unix)]
+        fs::set_permissions(&lock_path, fs::Permissions::from_mode(0o600))
+            .expect("secure stale lock permissions");
     }
 
     #[test]
@@ -1590,6 +2230,696 @@ mod tests {
     }
 
     #[test]
+    fn stale_index_meta_upgrade_failure_rolls_back_index() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([23u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([24u8; 16]));
+        let now_ms = 1_700_000_000_000;
+        let mut stale_versions = StoreMetaVersions::current();
+        stale_versions.index_schema_version = stale_versions.index_schema_version.saturating_sub(1);
+        let stale_meta = write_meta_with_versions_for(store_id, replica_id, now_ms, stale_versions);
+        write_legacy_index_with_sentinel(store_id, &stale_meta);
+
+        let meta_path = paths::store_meta_path(store_id);
+        let _hook = scoped_meta_write_hook(meta_path.clone(), move |path, _meta| {
+            assert_eq!(path, meta_path);
+            Err(StoreRuntimeError::MetaWrite {
+                path: Box::new(path.to_path_buf()),
+                source: io::Error::other("injected stale meta upgrade failure"),
+            })
+        });
+
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let err = match StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            now_ms + 1,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        ) {
+            Ok(_) => panic!("stale meta upgrade should fail when meta persistence fails"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, StoreRuntimeError::MetaWrite { .. }));
+
+        let persisted_meta = read_store_meta_optional(&paths::store_meta_path(store_id))
+            .expect("read store meta after failed upgrade")
+            .expect("store meta exists");
+        assert_eq!(
+            persisted_meta.index_schema_version, stale_versions.index_schema_version,
+            "stale meta must remain unchanged when upgrade persistence fails"
+        );
+        assert!(
+            !paths::wal_index_path(store_id).exists(),
+            "wal index must roll back when stale meta upgrade persistence fails"
+        );
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after failed upgrade")
+                .is_none(),
+            "pending upgrade marker must be cleaned up on synchronous upgrade failure"
+        );
+    }
+
+    #[test]
+    fn stale_pending_marker_from_older_index_schema_upgrades_on_open() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([45u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([46u8; 16]));
+        let now_ms = 1_700_000_000_000;
+        let mut stale_versions = StoreMetaVersions::current();
+        stale_versions.index_schema_version = stale_versions.index_schema_version.saturating_sub(1);
+        let stale_meta = write_meta_with_versions_for(store_id, replica_id, now_ms, stale_versions);
+        write_pending_store_meta_transition(
+            &paths::store_meta_pending_path(store_id),
+            &PendingStoreMetaTransitionRecord {
+                meta: stale_meta.clone(),
+            },
+        )
+        .expect("write stale pending marker");
+        write_legacy_index_with_sentinel(store_id, &stale_meta);
+
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let open = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            now_ms + 1,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("open runtime with stale pending marker")
+        .runtime;
+
+        assert_eq!(
+            open.meta.index_schema_version,
+            StoreMetaVersions::INDEX_SCHEMA_VERSION
+        );
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after recovery")
+                .is_none(),
+            "recovery must clear stale pending markers after upgrading committed meta"
+        );
+    }
+
+    #[test]
+    fn bootstrap_crash_before_meta_commit_recovers_on_next_open() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([38u8; 16]));
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let failpoint = set_store_meta_transition_crash_stage_for_tests(
+            "store_meta_transition_before_meta_commit",
+        );
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = StoreRuntime::open(
+                &crate::daemon_layout_from_paths(),
+                store_id,
+                RemoteUrl::new("example.com/test/repo"),
+                1_700_000_000_000,
+                "test",
+                &Limits::default(),
+                &namespace_defaults,
+            );
+        }));
+        drop(failpoint);
+
+        assert!(crashed.is_err(), "crash failpoint should unwind open");
+        assert!(
+            read_store_meta_optional(&paths::store_meta_path(store_id))
+                .expect("read committed meta after injected crash")
+                .is_none(),
+            "meta must remain absent before commit"
+        );
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after injected crash")
+                .is_some(),
+            "pending marker must survive the injected crash"
+        );
+        assert!(
+            paths::wal_index_path(store_id).exists(),
+            "bootstrap crash before meta commit should leave durable index state to recover"
+        );
+
+        let open = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_001,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("reopen runtime after injected crash");
+
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after recovery")
+                .is_none(),
+            "recovery must clear the pending marker"
+        );
+        let persisted_meta = read_store_meta_optional(&paths::store_meta_path(store_id))
+            .expect("read committed meta after recovery")
+            .expect("meta exists after recovery");
+        assert_eq!(persisted_meta, open.runtime.meta);
+    }
+
+    #[test]
+    fn bootstrap_crash_before_meta_commit_reclaims_stale_lock_on_recovery() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([44u8; 16]));
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let failpoint = set_store_meta_transition_crash_stage_for_tests(
+            "store_meta_transition_before_meta_commit",
+        );
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = StoreRuntime::open(
+                &crate::daemon_layout_from_paths(),
+                store_id,
+                RemoteUrl::new("example.com/test/repo"),
+                1_700_000_000_000,
+                "test",
+                &Limits::default(),
+                &namespace_defaults,
+            );
+        }));
+        drop(failpoint);
+
+        assert!(crashed.is_err(), "crash failpoint should unwind open");
+        let pending =
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after injected crash")
+                .expect("pending marker survives injected crash");
+        assert!(
+            read_lock_meta(store_id)
+                .expect("read lock after injected crash")
+                .is_none(),
+            "catch_unwind drops the in-process lock; seed a stale on-disk lock to model real process death"
+        );
+        write_stale_lock_meta(
+            store_id,
+            pending.meta.replica_id,
+            1_700_000_000_000,
+            "crashed-daemon",
+        );
+
+        let open = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_001,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("reopen runtime after injected crash with stale lock");
+
+        let lock_meta = read_lock_meta(store_id)
+            .expect("read lock after recovery")
+            .expect("lock exists after recovery");
+        assert_eq!(lock_meta.replica_id, open.runtime.meta.replica_id);
+        assert_eq!(lock_meta.pid, std::process::id());
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after recovery")
+                .is_none(),
+            "recovery must clear the pending marker after reclaiming a stale lock"
+        );
+    }
+
+    #[test]
+    fn bootstrap_crash_after_meta_commit_recovers_on_next_open() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([39u8; 16]));
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let failpoint = set_store_meta_transition_crash_stage_for_tests(
+            "store_meta_transition_after_meta_commit",
+        );
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = StoreRuntime::open(
+                &crate::daemon_layout_from_paths(),
+                store_id,
+                RemoteUrl::new("example.com/test/repo"),
+                1_700_000_000_000,
+                "test",
+                &Limits::default(),
+                &namespace_defaults,
+            );
+        }));
+        drop(failpoint);
+
+        assert!(crashed.is_err(), "crash failpoint should unwind open");
+        let persisted_before_recovery = read_store_meta_optional(&paths::store_meta_path(store_id))
+            .expect("read committed meta after injected crash")
+            .expect("meta must already be durable after commit");
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after injected crash")
+                .is_some(),
+            "pending marker must survive the injected crash"
+        );
+
+        let open = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_001,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("reopen runtime after injected crash");
+
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after recovery")
+                .is_none(),
+            "recovery must clear the pending marker after committed meta survives"
+        );
+        assert_eq!(persisted_before_recovery, open.runtime.meta);
+    }
+
+    #[test]
+    fn stale_pending_marker_does_not_rollback_later_committed_meta() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([47u8; 16]));
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let mut runtime = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_000,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("open runtime")
+        .runtime;
+
+        let mut txn = runtime
+            .wal_index
+            .writer()
+            .begin_txn()
+            .expect("begin wal index txn");
+        txn.next_orset_counter().expect("increment orset counter");
+        txn.next_orset_counter().expect("increment orset counter");
+        txn.commit().expect("commit wal index txn");
+
+        let stale_pending = runtime.meta.clone();
+        write_pending_store_meta_transition(
+            &paths::store_meta_pending_path(store_id),
+            &PendingStoreMetaTransitionRecord {
+                meta: stale_pending.clone(),
+            },
+        )
+        .expect("write stale pending marker");
+
+        let rotation = runtime.rotate_replica_id().expect("rotate replica id");
+        drop(runtime);
+
+        let persisted_meta = read_store_meta_optional(&paths::store_meta_path(store_id))
+            .expect("read committed meta after rotation")
+            .expect("committed meta exists after rotation");
+        assert_eq!(persisted_meta.replica_id, rotation.new_replica_id);
+        assert_ne!(persisted_meta.replica_id, stale_pending.replica_id);
+
+        let reopened = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_001,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("reopen runtime after stale pending marker");
+
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after recovery")
+                .is_none(),
+            "recovery must clear stale pending markers once committed meta is authoritative"
+        );
+        assert_eq!(reopened.runtime.meta.replica_id, rotation.new_replica_id);
+        assert_eq!(
+            reopened
+                .runtime
+                .wal_index
+                .reader()
+                .load_orset_counter()
+                .expect("load orset counter after recovery"),
+            2,
+            "stale pending recovery must preserve committed wal index state"
+        );
+    }
+
+    #[test]
+    fn stale_pending_marker_does_not_poison_lock_replica_id() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([71u8; 16]));
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let mut runtime = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_000,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("open runtime")
+        .runtime;
+        let stale_pending = runtime.meta.clone();
+        write_pending_store_meta_transition(
+            &paths::store_meta_pending_path(store_id),
+            &PendingStoreMetaTransitionRecord {
+                meta: stale_pending.clone(),
+            },
+        )
+        .expect("write stale pending marker");
+        let rotation = runtime.rotate_replica_id().expect("rotate replica id");
+        drop(runtime);
+
+        let reopened = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_001,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("reopen runtime after stale pending marker");
+        let lock_meta = read_lock_meta(store_id)
+            .expect("read lock after recovery")
+            .expect("lock exists after recovery");
+
+        assert_eq!(reopened.runtime.meta.replica_id, rotation.new_replica_id);
+        assert_eq!(
+            lock_meta.replica_id, reopened.runtime.meta.replica_id,
+            "lock metadata must use the recovered committed replica identity"
+        );
+    }
+
+    #[test]
+    fn stale_incompatible_pending_marker_does_not_block_current_meta() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([72u8; 16]));
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let runtime = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_000,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("open runtime")
+        .runtime;
+        let mut incompatible_pending = runtime.meta.clone();
+        incompatible_pending.wal_format_version =
+            incompatible_pending.wal_format_version.saturating_add(1);
+        drop(runtime);
+
+        write_pending_store_meta_transition(
+            &paths::store_meta_pending_path(store_id),
+            &PendingStoreMetaTransitionRecord {
+                meta: incompatible_pending,
+            },
+        )
+        .expect("write incompatible stale pending marker");
+
+        let reopened = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_001,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("reopen runtime with authoritative committed meta");
+
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after recovery")
+                .is_none(),
+            "recovery must clear stale incompatible pending markers once committed meta is authoritative"
+        );
+        let persisted = read_store_meta_optional(&paths::store_meta_path(store_id))
+            .expect("read committed meta after recovery")
+            .expect("committed meta exists");
+        assert_eq!(reopened.runtime.meta, persisted);
+    }
+
+    #[test]
+    fn corrupt_pending_marker_does_not_block_current_meta() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([75u8; 16]));
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let runtime = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_000,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("open runtime")
+        .runtime;
+        drop(runtime);
+
+        fs::write(paths::store_meta_pending_path(store_id), b"{not valid json")
+            .expect("write corrupt pending marker");
+
+        let reopened = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_001,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("reopen runtime with authoritative committed meta");
+
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after recovery")
+                .is_none(),
+            "recovery must clear corrupt pending markers once committed meta is authoritative"
+        );
+        let persisted = read_store_meta_optional(&paths::store_meta_path(store_id))
+            .expect("read committed meta after recovery")
+            .expect("committed meta exists");
+        assert_eq!(reopened.runtime.meta, persisted);
+    }
+
+    #[test]
+    fn corrupt_pending_marker_does_not_block_upgradeable_committed_meta() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([76u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([77u8; 16]));
+        let now_ms = 1_700_000_000_000;
+        let mut stale_versions = StoreMetaVersions::current();
+        stale_versions.index_schema_version = stale_versions.index_schema_version.saturating_sub(1);
+        let stale_meta = write_meta_with_versions_for(store_id, replica_id, now_ms, stale_versions);
+        fs::write(paths::store_meta_pending_path(store_id), b"{not valid json")
+            .expect("write corrupt pending marker");
+        write_legacy_index_with_sentinel(store_id, &stale_meta);
+
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let open = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            now_ms + 1,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("open runtime with corrupt pending marker")
+        .runtime;
+
+        assert_eq!(
+            open.meta.index_schema_version,
+            StoreMetaVersions::INDEX_SCHEMA_VERSION
+        );
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after recovery")
+                .is_none(),
+            "recovery must clear corrupt pending markers after upgrading committed meta"
+        );
+    }
+
+    #[test]
+    fn current_pending_marker_does_not_mask_unsupported_committed_meta() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([73u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([74u8; 16]));
+        let now_ms = 1_700_000_000_000;
+        let identity = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+        let mut committed_versions = StoreMetaVersions::current();
+        committed_versions.wal_format_version =
+            committed_versions.wal_format_version.saturating_add(1);
+        let committed = StoreMeta::new(identity, replica_id, committed_versions, now_ms);
+        write_store_meta(&paths::store_meta_path(store_id), &committed).expect("write meta");
+
+        let mut pending = committed.clone();
+        pending.wal_format_version = StoreMetaVersions::WAL_FORMAT_VERSION;
+        write_pending_store_meta_transition(
+            &paths::store_meta_pending_path(store_id),
+            &PendingStoreMetaTransitionRecord { meta: pending },
+        )
+        .expect("write current-version pending marker");
+
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let err = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            now_ms + 1,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .err()
+        .expect("unsupported committed meta must still fail");
+
+        let expected = StoreMetaVersions::current();
+        assert!(matches!(
+            err,
+            StoreRuntimeError::UnsupportedStoreMetaVersion { expected: got_expected, got }
+                if got_expected == expected && got == committed_versions
+        ));
+    }
+
+    #[test]
+    fn stale_index_meta_upgrade_crash_before_meta_commit_recovers_on_next_open() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([40u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([41u8; 16]));
+        let now_ms = 1_700_000_000_000;
+        let mut stale_versions = StoreMetaVersions::current();
+        stale_versions.index_schema_version = stale_versions.index_schema_version.saturating_sub(1);
+        let stale_meta = write_meta_with_versions_for(store_id, replica_id, now_ms, stale_versions);
+        write_legacy_index_with_sentinel(store_id, &stale_meta);
+
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let failpoint = set_store_meta_transition_crash_stage_for_tests(
+            "store_meta_transition_before_meta_commit",
+        );
+        let crashed = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = StoreRuntime::open(
+                &crate::daemon_layout_from_paths(),
+                store_id,
+                RemoteUrl::new("example.com/test/repo"),
+                now_ms + 1,
+                "test",
+                &Limits::default(),
+                &namespace_defaults,
+            );
+        }));
+        drop(failpoint);
+
+        assert!(crashed.is_err(), "crash failpoint should unwind open");
+        let persisted_meta = read_store_meta_optional(&paths::store_meta_path(store_id))
+            .expect("read stale meta after injected crash")
+            .expect("stale meta exists");
+        assert_eq!(
+            persisted_meta.index_schema_version, stale_versions.index_schema_version,
+            "stale committed meta must remain visible before recovery"
+        );
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after injected crash")
+                .is_some(),
+            "pending upgrade marker must survive the injected crash"
+        );
+
+        let _open = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            now_ms + 2,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("reopen runtime after injected crash");
+
+        let recovered_meta = read_store_meta_optional(&paths::store_meta_path(store_id))
+            .expect("read upgraded meta after recovery")
+            .expect("upgraded meta exists");
+        assert_eq!(
+            recovered_meta.index_schema_version,
+            StoreMetaVersions::INDEX_SCHEMA_VERSION
+        );
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after recovery")
+                .is_none(),
+            "recovery must clear the pending upgrade marker"
+        );
+    }
+
+    #[test]
     fn store_runtime_rejects_version_mismatch() {
         let temp = TempDir::new().expect("temp dir");
         let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
@@ -1672,7 +3002,7 @@ mod tests {
         let namespace_defaults = crate::config::Config::default()
             .namespace_defaults
             .namespaces;
-        let mut runtime = StoreRuntime::open(
+        let runtime = StoreRuntime::open(
             &crate::daemon_layout_from_paths(),
             store_id,
             RemoteUrl::new("example.com/test/repo"),
@@ -1684,16 +3014,39 @@ mod tests {
         .expect("open runtime")
         .runtime;
 
-        let first = runtime.next_orset_counter().expect("increment");
-        let second = runtime.next_orset_counter().expect("increment");
+        let mut txn = runtime
+            .wal_index
+            .writer()
+            .begin_txn()
+            .expect("begin wal index txn");
+        let first = txn.next_orset_counter().expect("increment");
+        let second = txn.next_orset_counter().expect("increment");
+        txn.commit().expect("commit wal index txn");
         assert_eq!(first, 1);
         assert_eq!(second, 2);
 
         let meta_path = paths::store_meta_path(store_id);
+        let modified_before = std::fs::metadata(&meta_path)
+            .expect("meta metadata before readback")
+            .modified()
+            .expect("meta modified time before readback");
         let meta = read_store_meta_optional(&meta_path)
             .expect("read meta")
             .expect("meta exists");
-        assert_eq!(meta.orset_counter, 2);
+        let modified_after = std::fs::metadata(&meta_path)
+            .expect("meta metadata after readback")
+            .modified()
+            .expect("meta modified time after readback");
+        assert_eq!(meta.orset_counter, 0);
+        assert_eq!(modified_after, modified_before);
+        assert_eq!(
+            runtime
+                .wal_index
+                .reader()
+                .load_orset_counter()
+                .expect("load orset counter"),
+            2
+        );
     }
 
     #[test]
@@ -1800,6 +3153,182 @@ mod tests {
             runtime.wal_index.durability_mode(),
             IndexDurabilityMode::Durable
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_failure_does_not_persist_meta_without_index() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([36u8; 16]));
+        let store_dir = paths::store_dir(store_id);
+        fs::create_dir_all(&store_dir).expect("create store dir");
+        let index_dir = store_dir.join("index");
+        let target = temp.path().join("index-target");
+        fs::create_dir_all(&target).expect("create index target");
+        fs::write(target.join("wal.sqlite"), b"sentinel").expect("seed target wal sqlite");
+        symlink(&target, &index_dir).expect("symlink index dir");
+
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let err = match StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_000,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        ) {
+            Ok(_) => panic!("bootstrap should fail when wal index dir is a symlink"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(
+            err,
+            StoreRuntimeError::WalIndex(WalIndexError::Symlink { .. })
+        ));
+        assert!(
+            read_store_meta_optional(&paths::store_meta_path(store_id))
+                .expect("read meta after failed bootstrap")
+                .is_none(),
+            "meta must not persist when bootstrap fails before index init"
+        );
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after failed bootstrap")
+                .is_none(),
+            "pending bootstrap marker must be cleaned up on synchronous bootstrap failure"
+        );
+        assert!(
+            target.join("wal.sqlite").exists(),
+            "bootstrap cleanup must not follow symlinked index targets"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_meta_write_failure_rolls_back_new_index() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([37u8; 16]));
+        let meta_path = paths::store_meta_path(store_id);
+        let _hook = scoped_meta_write_hook(meta_path.clone(), move |path, _meta| {
+            assert_eq!(path, meta_path);
+            Err(StoreRuntimeError::MetaWrite {
+                path: Box::new(path.to_path_buf()),
+                source: io::Error::other("injected meta write failure"),
+            })
+        });
+
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let err = match StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_000,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        ) {
+            Ok(_) => panic!("bootstrap should fail when meta write cannot complete"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, StoreRuntimeError::MetaWrite { .. }));
+        assert!(
+            read_store_meta_optional(&paths::store_meta_path(store_id))
+                .expect("read meta after failed meta write")
+                .is_none(),
+            "meta must not persist when bootstrap meta write fails"
+        );
+        assert!(
+            !paths::wal_index_path(store_id).exists(),
+            "wal index must roll back when bootstrap meta write fails"
+        );
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after failed meta write")
+                .is_none(),
+            "pending bootstrap marker must be cleaned up on synchronous meta write failure"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bootstrap_store_config_failure_cleans_pending_marker() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([42u8; 16]));
+        let config_path = paths::store_config_path(store_id);
+        if let Some(parent) = config_path.parent() {
+            fs::create_dir_all(parent).expect("create store dir");
+        }
+        let target = temp.path().join("store-config-target");
+        fs::write(&target, "index_durability_mode = \"cache\"").expect("write target config");
+        symlink(&target, &config_path).expect("symlink store config");
+
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let err = match StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_000,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        ) {
+            Ok(_) => panic!("bootstrap should fail when store config path is a symlink"),
+            Err(err) => err,
+        };
+
+        assert!(matches!(err, StoreRuntimeError::StoreConfigSymlink { .. }));
+        assert!(
+            read_store_meta_optional(&paths::store_meta_path(store_id))
+                .expect("read meta after failed bootstrap")
+                .is_none(),
+            "meta must remain absent when store config load fails"
+        );
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after failed bootstrap")
+                .is_none(),
+            "pending bootstrap marker must be cleaned up when store config load fails"
+        );
+    }
+
+    #[test]
+    fn fresh_bootstrap_lock_replica_matches_runtime_meta() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([43u8; 16]));
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let open = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            1_700_000_000_000,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("open runtime");
+
+        let lock_meta = read_lock_meta(store_id)
+            .expect("read store lock")
+            .expect("store lock exists");
+        assert_eq!(lock_meta.replica_id, open.runtime.meta.replica_id);
     }
 
     #[test]
