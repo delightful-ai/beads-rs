@@ -1226,20 +1226,26 @@ fn validate_meta(conn: &Connection, meta: &StoreMeta) -> Result<(), WalIndexErro
 }
 
 fn read_u64_meta(conn: &Connection, key: &'static str) -> Result<u64, WalIndexError> {
-    let raw = require_meta(conn, key)?;
-    let store_id = read_store_id_meta(conn)?;
+    let row: Option<(String, Option<String>)> = conn
+        .query_row(
+            "SELECT value, (SELECT value FROM meta WHERE key = 'store_id') \
+             FROM meta WHERE key = ?1",
+            params![key],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+        )
+        .optional()
+        .map_err(map_sqlite_error)?;
+    let (raw, store_id_raw) = row.ok_or(WalIndexError::MetaMissing { key })?;
+    let store_id_raw = store_id_raw.ok_or(WalIndexError::MetaMissing { key: "store_id" })?;
+    let store_id = StoreId::parse_str(&store_id_raw).map_err(|_| {
+        WalIndexError::EventIdDecode(format!("invalid store_id meta: {store_id_raw}"))
+    })?;
     raw.parse::<u64>().map_err(|_| WalIndexError::MetaMismatch {
         key,
         expected: "u64".to_string(),
         got: raw,
         store_id,
     })
-}
-
-fn read_store_id_meta(conn: &Connection) -> Result<StoreId, WalIndexError> {
-    let raw = require_meta(conn, "store_id")?;
-    StoreId::parse_str(&raw)
-        .map_err(|_| WalIndexError::EventIdDecode(format!("invalid store_id meta: {raw}")))
 }
 
 fn set_meta(conn: &Connection, key: &'static str, value: String) -> Result<(), WalIndexError> {
@@ -1621,6 +1627,48 @@ mod tests {
         let reopened =
             SqliteWalIndex::open(temp.path(), &meta, IndexDurabilityMode::Cache).unwrap();
         assert_eq!(reopened.reader().load_orset_counter().unwrap(), 5);
+    }
+
+    #[test]
+    fn sqlite_index_invalid_orset_counter_still_reports_store_id() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let db_path = temp.path().join("index").join("wal.sqlite");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        initialize_schema(&conn).unwrap();
+        write_meta(&conn, &meta).unwrap();
+        set_meta(&conn, "orset_counter", "not-a-u64".to_string()).unwrap();
+
+        let err = read_u64_meta(&conn, "orset_counter").unwrap_err();
+        assert!(matches!(
+            err,
+            WalIndexError::MetaMismatch {
+                key: "orset_counter",
+                expected,
+                got,
+                store_id,
+            } if expected == "u64" && got == "not-a-u64" && store_id == meta.store_id()
+        ));
+    }
+
+    #[test]
+    fn sqlite_index_valid_orset_counter_still_requires_valid_store_id() {
+        let temp = TempDir::new().unwrap();
+        let meta = test_meta();
+        let db_path = temp.path().join("index").join("wal.sqlite");
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        let conn = Connection::open(&db_path).unwrap();
+        initialize_schema(&conn).unwrap();
+        write_meta(&conn, &meta).unwrap();
+        set_meta(&conn, "store_id", "not-a-store-id".to_string()).unwrap();
+
+        let err = read_u64_meta(&conn, "orset_counter").unwrap_err();
+        assert!(matches!(
+            err,
+            WalIndexError::EventIdDecode(message)
+                if message == "invalid store_id meta: not-a-store-id"
+        ));
     }
 
     #[test]

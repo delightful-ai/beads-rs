@@ -6,6 +6,7 @@ use super::super::export_worker::ExportJob;
 use super::super::metrics;
 use super::Daemon;
 use crate::core::{CanonicalState, NamespaceId, StoreId, WallClock};
+use crate::runtime::store::lock::StoreLockError;
 
 const STORE_LOCK_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(10);
 const EXPORT_DEBOUNCE: Duration = Duration::from_millis(250);
@@ -183,6 +184,7 @@ impl Daemon {
         if interval == Duration::ZERO {
             return;
         }
+        let mut lost_lease = Vec::new();
         for (store_id, session) in self.store_sessions.iter_mut() {
             let store = session.runtime_mut();
             if !store.lock_heartbeat_due(now, interval) {
@@ -191,6 +193,14 @@ impl Daemon {
             match store.update_lock_heartbeat(now_ms) {
                 Ok(()) => {
                     store.mark_lock_heartbeat(now);
+                }
+                Err(err @ StoreLockError::Held { .. }) => {
+                    tracing::warn!(
+                        store_id = %store_id,
+                        error = ?err,
+                        "store lock heartbeat lost lease ownership; dropping store state"
+                    );
+                    lost_lease.push(*store_id);
                 }
                 Err(err) => {
                     tracing::warn!(
@@ -201,6 +211,9 @@ impl Daemon {
                     store.mark_lock_heartbeat(now);
                 }
             }
+        }
+        for store_id in lost_lease {
+            self.drop_store_state(store_id);
         }
     }
 

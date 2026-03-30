@@ -476,7 +476,7 @@ mod tests {
         FrameLimitState, FrameReader, FrameWriter, ReplEnvelope, ReplMessage, WireReplMessage,
         decode_envelope, encode_envelope,
     };
-    use crate::runtime::store::lock::read_lock_meta;
+    use crate::runtime::store::lock::{StoreLockMeta, read_lock_meta};
     use crate::runtime::store::runtime::StoreRuntime;
     use crate::runtime::wal::frame::encode_frame;
     use crate::runtime::wal::{HlcRow, RecordHeader, RequestProof, SegmentHeader, VerifiedRecord};
@@ -1111,6 +1111,55 @@ mod tests {
             .expect("read lock meta")
             .expect("lock meta");
         assert_eq!(after.last_heartbeat_ms, Some(now_ms));
+    }
+
+    #[test]
+    fn store_lock_heartbeat_losing_ownership_drops_store_state() {
+        let _tmp = test_store_dir();
+        let mut daemon = Daemon::new_with_limits(test_actor(), Limits::default());
+        let remote = test_remote();
+        let store_id = insert_store(&mut daemon, &remote);
+        let current = read_lock_meta(store_id)
+            .expect("read current lock meta")
+            .expect("lock meta");
+        let replacement = StoreLockMeta {
+            store_id,
+            replica_id: ReplicaId::new(Uuid::from_bytes([91u8; 16])),
+            pid: current.pid.saturating_add(1),
+            started_at_ms: current.started_at_ms.saturating_add(1),
+            daemon_version: "replacement".to_string(),
+            lease_epoch: current.lease_epoch.saturating_add(1),
+            lease_token: Some(Uuid::from_bytes([92u8; 16])),
+            last_heartbeat_ms: Some(
+                current
+                    .last_heartbeat_ms
+                    .unwrap_or(current.started_at_ms)
+                    .saturating_add(1),
+            ),
+        };
+        let lock_path = crate::paths::store_lock_path(store_id);
+        std::fs::write(
+            &lock_path,
+            serde_json::to_vec(&replacement).expect("encode replacement lock"),
+        )
+        .expect("write replacement lock");
+
+        let now = Instant::now() + Duration::from_millis(5);
+        let now_ms = replacement
+            .last_heartbeat_ms
+            .unwrap_or(replacement.started_at_ms)
+            .saturating_add(1);
+        daemon.fire_due_lock_heartbeats_at(now, Duration::from_millis(1), now_ms);
+
+        assert!(
+            !daemon.store_sessions.contains_key(&store_id),
+            "store session should drop once it no longer owns the lease"
+        );
+        let after = read_lock_meta(store_id)
+            .expect("read replacement lock")
+            .expect("replacement lock remains");
+        assert_eq!(after.lease_epoch, replacement.lease_epoch);
+        assert_eq!(after.lease_token, replacement.lease_token);
     }
 
     #[cfg(unix)]
