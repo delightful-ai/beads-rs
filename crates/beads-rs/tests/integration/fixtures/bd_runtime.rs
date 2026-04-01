@@ -6,7 +6,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use assert_cmd::Command;
-use beads_api::QueryResult;
+use beads_api::{AdminStoreUnlockOutput, QueryResult};
 use beads_core::{StoreId, StoreMeta};
 use beads_surface::ipc::{EmptyPayload, IpcClient, RepoCtx, Request, Response, ResponsePayload};
 use tempfile::TempDir;
@@ -466,6 +466,25 @@ impl BdRuntimeRepo {
 
     pub fn bd(&self) -> Command {
         self.bd_with_profile(BdCommandProfile::cli())
+    }
+
+    pub fn store_unlock_output(&self, store_id: StoreId, force: bool) -> AdminStoreUnlockOutput {
+        let mut cmd = self.bd();
+        cmd.args(["store", "unlock", "--store-id"]);
+        let store_id = store_id.to_string();
+        cmd.arg(store_id.as_str());
+        if force {
+            cmd.arg("--force");
+        }
+        cmd.arg("--json");
+        let output = cmd.output().expect("run bd store unlock");
+        assert!(
+            output.status.success(),
+            "bd store unlock failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        serde_json::from_slice(&output.stdout).expect("parse store unlock output")
     }
 
     #[cfg(feature = "slow-tests")]

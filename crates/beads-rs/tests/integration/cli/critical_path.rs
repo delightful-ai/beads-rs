@@ -18,6 +18,8 @@ use crate::fixtures::bd_runtime::{
 use crate::fixtures::git::repo_has_branch;
 #[cfg(feature = "slow-tests")]
 use crate::fixtures::wait;
+#[cfg(feature = "slow-tests")]
+use beads_api::UnlockAction;
 use predicates::prelude::*;
 
 #[cfg(feature = "slow-tests")]
@@ -88,6 +90,14 @@ impl TestRepo {
     #[cfg(feature = "slow-tests")]
     fn data_dir(&self) -> &Path {
         self.0.data_dir()
+    }
+
+    #[cfg(feature = "slow-tests")]
+    fn force_unlock_store_after_crash(
+        &self,
+        store_id: beads_core::StoreId,
+    ) -> beads_api::AdminStoreUnlockOutput {
+        self.0.store_unlock_output(store_id, true)
     }
 }
 
@@ -3603,13 +3613,8 @@ fn test_crash_recovery_replays_wal() {
     kill(Pid::from_raw(pid as i32), Signal::SIGKILL).expect("failed to SIGKILL daemon");
     let _ = wait::wait_for_process_exit(pid, Duration::from_secs(1));
 
-    let store_id_arg = store_id.to_string();
-    let unlock_out = repo
-        .bd_sync_enabled()
-        .args(["store", "unlock", "--store-id", store_id_arg.as_str()])
-        .output()
-        .expect("run bd store unlock");
-    assert!(unlock_out.status.success());
+    let unlock_out = repo.force_unlock_store_after_crash(store_id);
+    assert_eq!(unlock_out.action, UnlockAction::RemovedForced);
 
     let list_out = repo
         .bd_sync_enabled()

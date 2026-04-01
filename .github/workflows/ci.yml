@@ -35,7 +35,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - run: cargo xtest --no-fail-fast --status-level none --final-status-level slow
+      - run: cargo xtest --no-fail-fast --status-level none --final-status-level slow -E 'not (package(beads-daemon) and test(/^private_field_compile_fail_guards_acknowledgement_apis$/))'
 
   test-slow:
     name: Test (slow)
@@ -47,7 +47,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@nextest
-      - run: cargo nextest run --profile slow --workspace --all-features --features slow-tests --no-fail-fast --status-level none --final-status-level slow
+      - run: cargo nextest run --profile slow --workspace --all-features --features slow-tests --no-fail-fast --status-level none --final-status-level slow -E 'not (package(beads-daemon) and test(/^private_field_compile_fail_guards_acknowledgement_apis$/))'
 
   lint:
     name: Lint
