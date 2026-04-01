@@ -5,7 +5,7 @@ This tree proves daemon crate seams, not assembly flows. The layout is intention
 - Start REPL coverage from `repl.rs` plus `support/repl_peer.rs`, `support/repl_frames.rs`, and `support/repl_transport.rs`. Those helpers already drive `beads_daemon::testkit::repl::*` rather than private runtime modules.
 - Use `repl/e2e.rs` plus `beads_daemon::testkit::e2e::ReplicationRig` for deterministic multi-node replication, restart, and link-fault coverage that no longer needs the shipped `bd` process seam.
 - Start WAL coverage from `wal.rs` plus `support/wal.rs` and `support/wal_corrupt.rs`. `TempWalDir`, `record_for_seq`, and the corruption helpers are the owning fixture stack.
-- Keep privacy/acknowledgement checks in `private_field_compile_fail.rs` and `ui/*_private.rs`. Those tests guard `PendingReplayApply` and `PlannedMutation` from field-peeking.
+- Keep privacy/acknowledgement checks as compile-fail doctests on the owning types in `src/runtime/core/helpers.rs` and `src/runtime/mutation_engine.rs`. Those doctests guard `PendingReplayApply` and `PlannedMutation` from field-peeking.
 
 ## Keep / Avoid
 - Keep new coverage in the existing seam buckets. The REPL and WAL suites were intentionally moved down from `crates/beads-rs/tests`; do not bounce daemon-owned protocol/WAL tests back up to assembly.
@@ -18,5 +18,5 @@ This tree proves daemon crate seams, not assembly flows. The layout is intention
 ## Proof Loops
 - Run `cargo test -p beads-daemon --features test-harness --test repl -- --list` for the cheap proof that the REPL integration target compiles and is wired into the harness.
 - Run `cargo test -p beads-daemon --features test-harness --test wal -- --list` for the WAL integration target, including fsck/receipt/index coverage under `tests/wal.rs`.
-- Run `cargo test -p beads-daemon --features test-harness private_field_compile_fail_guards_acknowledgement_apis -- --list` when touching `PendingReplayApply`, `PlannedMutation`, or the UI privacy boundary.
+- Run `cargo test -p beads-daemon --doc --features test-harness` when touching `PendingReplayApply`, `PlannedMutation`, or the compile-fail privacy boundary.
 - Run `cargo test -p beads-daemon --features test-harness` before calling this subtree done.

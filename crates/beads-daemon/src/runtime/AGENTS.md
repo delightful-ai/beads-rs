@@ -8,7 +8,7 @@
 - Thread checkpoint orchestration through `core/checkpoint_import.rs`, `core/checkpoint_scheduling.rs`, and `git_worker.rs`; leave checkpoint format/cache/publish rules in `crates/beads-git`.
 
 ## Invariants / Bait
-- `core/helpers.rs::PendingReplayApply` must be acknowledged with `acknowledge_checkpoint_dirty(...)` before replayed state becomes live. The compile-fail tests in `crates/beads-daemon/tests/ui/*_private.rs` exist to stop field-peeking.
+- `core/helpers.rs::PendingReplayApply` must be acknowledged with `acknowledge_checkpoint_dirty(...)` before replayed state becomes live. The compile-fail doctest on the type exists to stop field-peeking.
 - `mutation_engine.rs::PlannedMutation` is another acknowledgement boundary. Keep its fields private and extend it through methods, not direct struct access.
 - `wal_atomic_commit.rs` and `core/repl_ingest.rs` preserve the append -> index/frontier commit -> in-memory state/broadcast order. Do not split that sequence across ad-hoc helpers.
 - `admin/online.rs` reload flows must restore config and preserve existing handles when strict load, runtime reload, or peer reload fails. `core/mod.rs` carries the regression coverage for that path.

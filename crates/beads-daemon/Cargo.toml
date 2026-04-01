@@ -54,4 +54,3 @@ tracing.workspace = true
 [dev-dependencies]
 bytes.workspace = true
 uuid.workspace = true
-trybuild = "1"

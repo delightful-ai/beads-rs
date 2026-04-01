@@ -174,7 +174,8 @@ Warm runner burn-in receipts:
 - all six iterations green
 - fast tier wall time: `63.865s`, `42.515s`, `41.896s`
 - slow tier wall time: `45.980s`, `42.504s`, `42.185s`
-- acceptance targets met on warm runs: fast tier `<60s`, slow tier `<120s`
+- acceptance targets met on warm runtime runs: fast tier `<60s`, slow tier `<120s`
+- the daemon acknowledgement-boundary compile-fail proof now lives in compile-fail doctests on the owning types, not a `trybuild` integration target; CI covers those doctests in a dedicated `cargo test -p beads-daemon --doc --features test-harness` job because they prove API shape, not the warm runtime nextest budget
 
 Stability notes behind the current receipts:
 
