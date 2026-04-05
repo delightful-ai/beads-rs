@@ -1,5 +1,0 @@
-error[E0616]: field `draft` of struct `PlannedMutation` is private
- --> tests/ui/planned_mutation_private.rs:4:21
-  |
-4 |     let _ = planned.draft;
-  |                     ^^^^^ private field

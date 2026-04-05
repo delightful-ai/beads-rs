@@ -1,5 +1,0 @@
-error[E0616]: field `state` of struct `PendingReplayApply` is private
- --> tests/ui/pending_replay_apply_private.rs:4:21
-  |
-4 |     let _ = pending.state;
-  |                     ^^^^^ private field

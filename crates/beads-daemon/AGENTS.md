@@ -14,12 +14,14 @@
 - Do not bypass `beads_git::test_support` when adding data-dir overrides. `src/paths.rs::DataDirOverride` deliberately keeps daemon and git test roots coupled instead of exposing raw override helpers.
 
 ## Tests
-- `tests/repl.rs`, `tests/wal.rs`, and `tests/private_field_compile_fail.rs` are the crate seams. The REPL and WAL suites were intentionally re-homed here from `crates/beads-rs/tests`.
+- `tests/repl.rs` and `tests/wal.rs` are the crate-level integration seams. The REPL and WAL suites were intentionally re-homed here from `crates/beads-rs/tests`.
+- The acknowledgement-boundary privacy proof now lives as compile-fail doctests on the owning types in `src/runtime/core/helpers.rs` and `src/runtime/mutation_engine.rs`, not as a `trybuild` integration target under `tests/`.
 - Keep one-subsystem implementation tests next to the owning module under `src/**`.
 - Keep assembly/product seams in `crates/beads-rs/tests`, not here.
 
 ## Verification
-- Run `cargo test -p beads-daemon --features test-harness` for the full crate seam. `tests/repl.rs`, `tests/wal.rs`, and the `ui/*_private.rs` compile-fail checks import `beads_daemon::testkit::*`, so plain `cargo test -p beads-daemon` does not compile that surface.
+- Run `cargo test -p beads-daemon --features test-harness` for the full crate seam. `tests/repl.rs` and `tests/wal.rs` import `beads_daemon::testkit::*`, so plain `cargo test -p beads-daemon` does not compile that surface.
+- Run `cargo test -p beads-daemon --doc --features test-harness` when touching `PendingReplayApply`, `PlannedMutation`, or the compile-fail privacy boundary.
 - Use `cargo test -p beads-daemon --features test-harness -- --list` if you need to prove the test-harness-gated seam is present before running the full suite.
 - Run `cargo check -p beads-daemon --all-features` when touching `test-harness`, `model-testing`, or other gated surfaces in `Cargo.toml`.
 - Run `cargo test -p beads-rs --test public_boundary` when changing cross-crate boundary rules around `beads_daemon::runtime::*`, `beads_daemon::git::*`, or the assembly-owned test markers in `crates/beads-rs/tests`. It does not prove the full `beads-daemon` export list or `testkit` API shape.
