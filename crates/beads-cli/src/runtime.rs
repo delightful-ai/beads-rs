@@ -116,28 +116,6 @@ impl CliRuntimeCtx {
     }
 }
 
-pub fn resolve_description(
-    description: Option<String>,
-    body: Option<String>,
-) -> ValidationResult<Option<String>> {
-    match (description, body) {
-        (Some(d), Some(b)) => {
-            if d != b {
-                return Err(validation::validation_error(
-                    "description",
-                    format!(
-                        "cannot specify both --description and --body with different values (--description={d:?}, --body={b:?})"
-                    ),
-                ));
-            }
-            Ok(Some(d))
-        }
-        (Some(d), None) => Ok(Some(d)),
-        (None, Some(b)) => Ok(Some(b)),
-        (None, None) => Ok(None),
-    }
-}
-
 pub fn validate_actor_id(raw: &str) -> ValidationResult<ActorId> {
     ValidatedActorId::parse(raw)
         .map(Into::into)
@@ -205,18 +183,6 @@ mod tests {
     use beads_surface::ipc::ResponsePayload;
     use serde_json::json;
     use uuid::Uuid;
-
-    #[test]
-    fn resolve_description_rejects_mismatched_alias_values() {
-        let err = resolve_description(Some("a".into()), Some("b".into())).expect_err("conflict");
-        assert_eq!(
-            err,
-            validation::validation_error(
-                "description",
-                "cannot specify both --description and --body with different values (--description=\"a\", --body=\"b\")"
-            )
-        );
-    }
 
     #[test]
     fn mutation_meta_includes_actor_override() {

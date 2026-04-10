@@ -13,6 +13,7 @@ use beads_surface::ipc::{
     CreatePayload, IpcClient, IpcError, MutationCtx, MutationMeta, Request, Response,
 };
 
+use super::ipc_client::runtime_bound_client;
 use super::timing;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -70,7 +71,7 @@ pub struct LoadGenerator {
 
 impl LoadGenerator {
     pub fn for_runtime_dir(repo: PathBuf, runtime_dir: &Path) -> Self {
-        Self::with_client(repo, IpcClient::for_runtime_dir(runtime_dir))
+        Self::with_client(repo, runtime_bound_client(runtime_dir))
     }
 
     pub fn with_client(repo: PathBuf, client: IpcClient) -> Self {

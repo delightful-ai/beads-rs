@@ -1,120 +1,124 @@
 use clap::Args;
 
 use super::common::{fmt_issue_ref, fmt_labels, fmt_wall_ms};
-use super::{CommandResult, print_ok};
-use crate::render::print_line;
+use super::{CommandError, CommandResult, print_ok};
+use crate::render::{print_json, print_line};
 use crate::runtime::{CliRuntimeCtx, send};
-use crate::validation::normalize_bead_id;
+use crate::validation::{normalize_bead_id, validation_error};
 use beads_api::{Issue, IssueSummary, Note, QueryResult};
-use beads_core::{BeadId, BeadType, WorkflowStatus};
-use beads_surface::Filters;
+use beads_core::{BeadId, BeadType, NamespaceId, WorkflowStatus};
 use beads_surface::ipc::{IdPayload, ListPayload, Request, ResponsePayload};
+use beads_surface::{Filters, SortField};
 use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
+use std::process::Command as ProcessCommand;
 
 #[derive(Args, Debug)]
 pub struct ShowArgs {
-    pub id: String,
+    /// Bead id(s) to inspect.
+    #[arg(value_name = "ID", num_args = 0..)]
+    pub id: Vec<String>,
 
-    /// No-op for compatibility (children are always shown).
-    #[arg(long, hide = true)]
+    /// Bead id to inspect, useful when the id could be mistaken for a flag.
+    #[arg(long = "id", value_name = "ID", num_args = 1..)]
+    pub id_flag: Vec<String>,
+
+    /// Resolve the current bead from the active jj change or your most recent in-progress work.
+    #[arg(long)]
+    pub current: bool,
+
+    /// Compact one-line output.
+    #[arg(long, conflicts_with = "long")]
+    pub short: bool,
+
+    /// Full output including dependency and comment sections.
+    #[arg(long, conflicts_with = "short")]
+    pub long: bool,
+
+    /// Show only incoming references to the bead.
+    #[arg(long, conflicts_with = "children")]
+    pub refs: bool,
+
+    /// Show only direct children of the bead.
+    #[arg(long)]
     pub children: bool,
 }
 
 pub fn handle(ctx: &CliRuntimeCtx, args: ShowArgs) -> CommandResult<()> {
-    let id = normalize_bead_id(&args.id)?;
-    if ctx.json {
-        let req = Request::ShowDetails {
-            ctx: ctx.read_ctx(),
-            payload: IdPayload { id: id.clone() },
-        };
-        let ok = send(&req)?;
-        return match ok {
-            ResponsePayload::Query(QueryResult::ShowDetails(details)) => print_ok(
-                &ResponsePayload::Query(QueryResult::Issue(details.issue)),
-                true,
-            ),
-            other => print_ok(&other, true),
-        };
+    let ids = resolve_show_ids(ctx, args.id, args.id_flag, args.current)?;
+    let mut views = Vec::with_capacity(ids.len());
+    for id in &ids {
+        views.push(fetch_show_view(ctx, id)?);
     }
 
+    if ctx.json {
+        let issues = views
+            .iter()
+            .map(|view| view.issue.clone())
+            .collect::<Vec<_>>();
+        if issues.len() == 1 {
+            return print_ok(
+                &ResponsePayload::Query(QueryResult::Issue(
+                    issues.into_iter().next().expect("single issue"),
+                )),
+                true,
+            );
+        }
+        print_json(&issues)?;
+        return Ok(());
+    }
+
+    let mut output = String::new();
+    for (idx, view) in views.iter().enumerate() {
+        if idx > 0 && !args.short {
+            output.push_str("\n------------------------------------------------------------\n");
+        }
+        let rendered = if args.refs {
+            render_show_refs(&view.issue, &view.incoming, args.short)
+        } else if args.children {
+            render_show_children(&view.issue, &view.incoming.children, args.short)
+        } else if args.short {
+            render_issue_summary(&view.issue)
+        } else if args.long {
+            render_show_long(&view.issue, &view.outgoing, &view.incoming, &view.notes)
+        } else {
+            render_show(&view.issue, &view.outgoing, &view.incoming, &view.notes)
+        };
+        output.push_str(rendered.trim_end());
+        output.push('\n');
+    }
+
+    print_line(output.trim_end())?;
+    Ok(())
+}
+
+fn fetch_show_view(ctx: &CliRuntimeCtx, id: &BeadId) -> CommandResult<ShowView> {
     let req = Request::ShowDetails {
         ctx: ctx.read_ctx(),
         payload: IdPayload { id: id.clone() },
     };
     match send(&req)? {
-        ResponsePayload::Query(QueryResult::ShowDetails(details)) => {
-            let mut summary_map: HashMap<String, IssueSummary> = details
-                .summaries
-                .into_iter()
-                .map(|summary| (summary.id.clone(), summary))
-                .collect();
-
-            let outgoing_edges = details.outgoing;
-            let incoming_edges = details.incoming;
-            let notes = details.issue.notes.clone();
-            let view = details.issue;
-
-            let outgoing_ids: BTreeSet<String> =
-                outgoing_edges.iter().map(|e| e.to.clone()).collect();
-
-            let mut blocks_ids: BTreeSet<String> = BTreeSet::new();
-            let mut children_ids: BTreeSet<String> = BTreeSet::new();
-            let mut related_ids: BTreeSet<String> = BTreeSet::new();
-            let mut discovered_ids: BTreeSet<String> = BTreeSet::new();
-            for e in &incoming_edges {
-                match e.kind.as_str() {
-                    "parent" => {
-                        children_ids.insert(e.from.clone());
-                    }
-                    "related" => {
-                        related_ids.insert(e.from.clone());
-                    }
-                    "discovered_from" => {
-                        discovered_ids.insert(e.from.clone());
-                    }
-                    _ => {
-                        blocks_ids.insert(e.from.clone());
-                    }
-                }
-            }
-
-            let mut all_ids = BTreeSet::new();
-            all_ids.extend(outgoing_ids.iter().cloned());
-            all_ids.extend(blocks_ids.iter().cloned());
-            all_ids.extend(children_ids.iter().cloned());
-            all_ids.extend(related_ids.iter().cloned());
-            all_ids.extend(discovered_ids.iter().cloned());
-
-            let has_all_summaries = all_ids
-                .iter()
-                .all(|dep_id| summary_map.contains_key(dep_id));
-            if !has_all_summaries {
-                let fetched = fetch_summary_map(ctx, &all_ids)?;
-                summary_map.extend(fetched);
-            }
-
-            let outgoing_views = summaries_for(&outgoing_ids, &summary_map);
-            let blocks = summaries_for(&blocks_ids, &summary_map);
-            let children = summaries_for(&children_ids, &summary_map);
-            let related = summaries_for(&related_ids, &summary_map);
-            let discovered = summaries_for(&discovered_ids, &summary_map);
-
-            let incoming = IncomingGroups {
-                children,
-                blocks,
-                related,
-                discovered,
-            };
-
-            print_line(&render_show(&view, &outgoing_views, &incoming, &notes))?;
-            Ok(())
-        }
-        ResponsePayload::Query(QueryResult::Issue(view)) => render_show_legacy(ctx, &id, view),
-        other => print_ok(&other, false),
+        ResponsePayload::Query(QueryResult::ShowDetails(details)) => build_show_view(
+            ctx,
+            details.issue,
+            details.incoming,
+            details.outgoing,
+            details.summaries,
+        ),
+        ResponsePayload::Query(QueryResult::Issue(view)) => fetch_show_view_legacy(ctx, id, view),
+        other => Err(CommandError::Ipc(
+            beads_surface::ipc::IpcError::DaemonUnavailable(format!(
+                "unexpected response for show details: {other:?}"
+            )),
+        )),
     }
 }
 
-fn render_show_legacy(ctx: &CliRuntimeCtx, id: &BeadId, view: Issue) -> CommandResult<()> {
+fn fetch_show_view_legacy(
+    ctx: &CliRuntimeCtx,
+    id: &BeadId,
+    view: Issue,
+) -> CommandResult<ShowView> {
     let deps_payload = send(&Request::Deps {
         ctx: ctx.read_ctx(),
         payload: IdPayload { id: id.clone() },
@@ -123,7 +127,6 @@ fn render_show_legacy(ctx: &CliRuntimeCtx, id: &BeadId, view: Issue) -> CommandR
         ResponsePayload::Query(QueryResult::Deps { incoming, outgoing }) => (incoming, outgoing),
         _ => (Vec::new(), Vec::new()),
     };
-
     let notes_payload = send(&Request::Notes {
         ctx: ctx.read_ctx(),
         payload: IdPayload { id: id.clone() },
@@ -132,9 +135,22 @@ fn render_show_legacy(ctx: &CliRuntimeCtx, id: &BeadId, view: Issue) -> CommandR
         ResponsePayload::Query(QueryResult::Notes(n)) => n,
         _ => Vec::new(),
     };
+    let show_view = build_show_view(ctx, view, incoming_edges, outgoing_edges, Vec::new())?;
+    Ok(ShowView { notes, ..show_view })
+}
 
+fn build_show_view(
+    ctx: &CliRuntimeCtx,
+    view: Issue,
+    incoming_edges: Vec<beads_api::DepEdge>,
+    outgoing_edges: Vec<beads_api::DepEdge>,
+    summaries: Vec<IssueSummary>,
+) -> CommandResult<ShowView> {
+    let mut summary_map: HashMap<String, IssueSummary> = summaries
+        .into_iter()
+        .map(|summary| (summary.id.clone(), summary))
+        .collect();
     let outgoing_ids: BTreeSet<String> = outgoing_edges.iter().map(|e| e.to.clone()).collect();
-
     let mut blocks_ids: BTreeSet<String> = BTreeSet::new();
     let mut children_ids: BTreeSet<String> = BTreeSet::new();
     let mut related_ids: BTreeSet<String> = BTreeSet::new();
@@ -162,7 +178,12 @@ fn render_show_legacy(ctx: &CliRuntimeCtx, id: &BeadId, view: Issue) -> CommandR
     all_ids.extend(children_ids.iter().cloned());
     all_ids.extend(related_ids.iter().cloned());
     all_ids.extend(discovered_ids.iter().cloned());
-    let summary_map = fetch_summary_map(ctx, &all_ids)?;
+    let has_all_summaries = all_ids
+        .iter()
+        .all(|dep_id| summary_map.contains_key(dep_id));
+    if !has_all_summaries {
+        summary_map.extend(fetch_summary_map(ctx, &all_ids)?);
+    }
 
     let outgoing_views = summaries_for(&outgoing_ids, &summary_map);
     let blocks = summaries_for(&blocks_ids, &summary_map);
@@ -177,8 +198,46 @@ fn render_show_legacy(ctx: &CliRuntimeCtx, id: &BeadId, view: Issue) -> CommandR
         discovered,
     };
 
-    print_line(&render_show(&view, &outgoing_views, &incoming, &notes))?;
-    Ok(())
+    let notes = view.notes.clone();
+    Ok(ShowView {
+        issue: view,
+        outgoing: outgoing_views,
+        incoming,
+        notes,
+    })
+}
+
+fn resolve_show_ids(
+    ctx: &CliRuntimeCtx,
+    positional: Vec<String>,
+    id_flag: Vec<String>,
+    current: bool,
+) -> CommandResult<Vec<BeadId>> {
+    if current && (!positional.is_empty() || !id_flag.is_empty()) {
+        return Err(validation_error(
+            "current",
+            "--current cannot be combined with explicit bead ids",
+        )
+        .into());
+    }
+
+    if current {
+        return Ok(vec![resolve_current_issue_id(ctx)?]);
+    }
+
+    let raw_ids = positional.into_iter().chain(id_flag).collect::<Vec<_>>();
+    if raw_ids.is_empty() {
+        return Err(validation_error(
+            "id",
+            "show requires at least one bead id (or use --current)",
+        )
+        .into());
+    }
+
+    raw_ids
+        .into_iter()
+        .map(|raw| normalize_bead_id(&raw).map_err(Into::into))
+        .collect()
 }
 
 fn fetch_summary_map(
@@ -225,6 +284,13 @@ pub struct IncomingGroups {
     pub discovered: Vec<IssueSummary>,
 }
 
+struct ShowView {
+    issue: Issue,
+    outgoing: Vec<IssueSummary>,
+    incoming: IncomingGroups,
+    notes: Vec<Note>,
+}
+
 fn render_show(
     bead: &Issue,
     outgoing: &[IssueSummary],
@@ -234,10 +300,12 @@ fn render_show(
     let mut out = String::new();
     out.push_str(&format!(
         "\n{}: {}\n",
-        fmt_issue_ref(&bead.namespace, &bead.id),
+        fmt_show_issue_ref(&bead.namespace, &bead.id),
         bead.title
     ));
-    out.push_str(&format!("Namespace: {}\n", bead.namespace.as_str()));
+    if bead.namespace != NamespaceId::core() {
+        out.push_str(&format!("Namespace: {}\n", bead.namespace.as_str()));
+    }
     out.push_str(&format!("Status: {}\n", bead.status.as_str()));
     out.push_str(&format!("Priority: P{}\n", bead.priority));
     out.push_str(&format!("Type: {}\n", bead.issue_type.as_str()));
@@ -278,7 +346,7 @@ fn render_show(
         for dep in outgoing {
             out.push_str(&format!(
                 "  → {}: {} [P{}]\n",
-                fmt_issue_ref(&dep.namespace, &dep.id),
+                fmt_show_issue_ref(&dep.namespace, &dep.id),
                 dep.title,
                 dep.priority
             ));
@@ -294,7 +362,7 @@ fn render_show(
             for dep in &incoming.children {
                 out.push_str(&format!(
                     "  ↳ {}: {} [P{}]\n",
-                    fmt_issue_ref(&dep.namespace, &dep.id),
+                    fmt_show_issue_ref(&dep.namespace, &dep.id),
                     dep.title,
                     dep.priority
                 ));
@@ -306,7 +374,7 @@ fn render_show(
         for dep in &incoming.blocks {
             out.push_str(&format!(
                 "  ← {}: {} [P{}]\n",
-                fmt_issue_ref(&dep.namespace, &dep.id),
+                fmt_show_issue_ref(&dep.namespace, &dep.id),
                 dep.title,
                 dep.priority
             ));
@@ -317,7 +385,7 @@ fn render_show(
         for dep in &incoming.related {
             out.push_str(&format!(
                 "  ↔ {}: {} [P{}]\n",
-                fmt_issue_ref(&dep.namespace, &dep.id),
+                fmt_show_issue_ref(&dep.namespace, &dep.id),
                 dep.title,
                 dep.priority
             ));
@@ -328,7 +396,7 @@ fn render_show(
         for dep in &incoming.discovered {
             out.push_str(&format!(
                 "  ◊ {}: {} [P{}]\n",
-                fmt_issue_ref(&dep.namespace, &dep.id),
+                fmt_show_issue_ref(&dep.namespace, &dep.id),
                 dep.title,
                 dep.priority
             ));
@@ -351,15 +419,26 @@ fn render_show(
     out
 }
 
+fn render_show_long(
+    bead: &Issue,
+    outgoing: &[IssueSummary],
+    incoming: &IncomingGroups,
+    notes: &[Note],
+) -> String {
+    render_show(bead, outgoing, incoming, notes)
+}
+
 pub fn render_issue_detail(v: &Issue) -> String {
     // Default detail renderer (used for `show --json=false` fallback).
     let mut out = String::new();
     out.push_str(&format!(
         "\n{}: {}\n",
-        fmt_issue_ref(&v.namespace, &v.id),
+        fmt_show_issue_ref(&v.namespace, &v.id),
         v.title
     ));
-    out.push_str(&format!("Namespace: {}\n", v.namespace.as_str()));
+    if v.namespace != NamespaceId::core() {
+        out.push_str(&format!("Namespace: {}\n", v.namespace.as_str()));
+    }
     out.push_str(&format!("Status: {}\n", v.status.as_str()));
     out.push_str(&format!("Priority: P{}\n", v.priority));
     out.push_str(&format!("Type: {}\n", v.issue_type.as_str()));
@@ -400,6 +479,130 @@ pub fn render_issue_detail(v: &Issue) -> String {
     }
     out.push('\n');
     out
+}
+
+fn render_issue_summary(v: &Issue) -> String {
+    let assignee = v
+        .assignee
+        .as_ref()
+        .filter(|assignee| !assignee.is_empty())
+        .map(|assignee| format!(" @{}", assignee))
+        .unwrap_or_default();
+    format!(
+        "{} [P{}] [{}] {}{} - {}",
+        fmt_show_issue_ref(&v.namespace, &v.id),
+        v.priority,
+        v.issue_type.as_str(),
+        v.status.as_str(),
+        assignee,
+        v.title
+    )
+}
+
+fn render_show_refs(bead: &Issue, incoming: &IncomingGroups, short: bool) -> String {
+    let mut out = String::new();
+    let total = incoming.blocks.len()
+        + incoming.related.len()
+        + incoming.discovered.len()
+        + incoming.children.len();
+
+    if short {
+        if total == 0 {
+            return format!("{} refs=0", fmt_show_issue_ref(&bead.namespace, &bead.id));
+        }
+        for summary in incoming
+            .blocks
+            .iter()
+            .chain(incoming.related.iter())
+            .chain(incoming.discovered.iter())
+            .chain(incoming.children.iter())
+        {
+            out.push_str(&format!(
+                "{} -> {}\n",
+                fmt_show_issue_ref(&summary.namespace, &summary.id),
+                fmt_show_issue_ref(&bead.namespace, &bead.id)
+            ));
+        }
+        return out;
+    }
+
+    out.push_str(&format!(
+        "{} references ({total})\n",
+        fmt_show_issue_ref(&bead.namespace, &bead.id)
+    ));
+    append_summary_group(&mut out, "Blocks", &incoming.blocks, "  <-");
+    append_summary_group(&mut out, "Related", &incoming.related, "  <>");
+    append_summary_group(&mut out, "Discovered From", &incoming.discovered, "  <>");
+    append_summary_group(&mut out, "Children", &incoming.children, "  <-");
+    out
+}
+
+fn render_show_children(bead: &Issue, children: &[IssueSummary], short: bool) -> String {
+    if short {
+        if children.is_empty() {
+            return format!(
+                "{} children=0",
+                fmt_show_issue_ref(&bead.namespace, &bead.id)
+            );
+        }
+        let mut out = String::new();
+        for child in children {
+            out.push_str(&format!(
+                "{} [P{}] [{}] {} - {}\n",
+                fmt_show_issue_ref(&child.namespace, &child.id),
+                child.priority,
+                child.issue_type.as_str(),
+                child.status.as_str(),
+                child.title
+            ));
+        }
+        return out;
+    }
+
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{} children ({})\n",
+        fmt_show_issue_ref(&bead.namespace, &bead.id),
+        children.len()
+    ));
+    if children.is_empty() {
+        out.push_str("  (none)\n");
+        return out;
+    }
+    for child in children {
+        out.push_str(&format!(
+            "  -> {}: {} [P{}] [{}]\n",
+            fmt_show_issue_ref(&child.namespace, &child.id),
+            child.title,
+            child.priority,
+            child.status.as_str()
+        ));
+    }
+    out
+}
+
+fn append_summary_group(out: &mut String, label: &str, summaries: &[IssueSummary], prefix: &str) {
+    if summaries.is_empty() {
+        return;
+    }
+    out.push_str(&format!("\n{label} ({}):\n", summaries.len()));
+    for summary in summaries {
+        out.push_str(&format!(
+            "{prefix} {}: {} [P{}] [{}]\n",
+            fmt_show_issue_ref(&summary.namespace, &summary.id),
+            summary.title,
+            summary.priority,
+            summary.status.as_str()
+        ));
+    }
+}
+
+fn fmt_show_issue_ref(namespace: &NamespaceId, id: &str) -> String {
+    if *namespace == NamespaceId::core() {
+        id.to_string()
+    } else {
+        fmt_issue_ref(namespace, id)
+    }
 }
 
 /// Render epic children with progress breakdown and priority sorting.
@@ -456,7 +659,7 @@ fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
                 " {}[P{}] {}: {}{}\n",
                 status_marker,
                 child.priority,
-                fmt_issue_ref(&child.namespace, &child.id),
+                fmt_show_issue_ref(&child.namespace, &child.id),
                 child.title,
                 assignee
             ));
@@ -468,11 +671,71 @@ fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
         for child in &done {
             out.push_str(&format!(
                 "  [x] {}: {}\n",
-                fmt_issue_ref(&child.namespace, &child.id),
+                fmt_show_issue_ref(&child.namespace, &child.id),
                 child.title
             ));
         }
     }
+}
+
+fn resolve_current_issue_id(ctx: &CliRuntimeCtx) -> CommandResult<BeadId> {
+    if let Some(id) = current_jj_bead_id(&ctx.repo) {
+        return Ok(id);
+    }
+
+    let filters = Filters {
+        assignee: Some(ctx.actor_id()?),
+        status: Some(String::from("in_progress")),
+        sort_by: Some(SortField::UpdatedAt),
+        ascending: false,
+        limit: Some(1),
+        ..Filters::default()
+    };
+    let req = Request::List {
+        ctx: ctx.read_ctx(),
+        payload: ListPayload { filters },
+    };
+    match send(&req)? {
+        ResponsePayload::Query(QueryResult::Issues(mut issues)) => issues
+            .drain(..)
+            .next()
+            .map(|summary| BeadId::parse(&summary.id))
+            .transpose()?
+            .ok_or_else(|| {
+                validation_error(
+                    "current",
+                    "no current bead found (no bead id in the current jj change and no in-progress bead assigned to you)",
+                )
+                .into()
+            }),
+        other => Err(CommandError::Ipc(beads_surface::ipc::IpcError::DaemonUnavailable(
+            format!("unexpected response while resolving current bead: {other:?}"),
+        ))),
+    }
+}
+
+fn current_jj_bead_id(repo: &Path) -> Option<BeadId> {
+    let output = ProcessCommand::new("jj")
+        .current_dir(repo)
+        .args(["log", "-r", "@", "--no-graph", "-T", "description"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let description = String::from_utf8(output.stdout).ok()?;
+    extract_bead_id_from_text(&description)
+}
+
+fn extract_bead_id_from_text(text: &str) -> Option<BeadId> {
+    text.split_whitespace().find_map(|token| {
+        let candidate =
+            token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '.');
+        if candidate.is_empty() {
+            return None;
+        }
+        normalize_bead_id(candidate).ok()
+    })
 }
 
 #[cfg(test)]
@@ -515,7 +778,30 @@ mod tests {
     }
 
     #[test]
-    fn render_show_includes_namespace() {
+    fn render_show_omits_core_namespace() {
+        let issue = sample_issue("core", "bd-123");
+        let incoming = IncomingGroups {
+            children: Vec::new(),
+            blocks: Vec::new(),
+            related: Vec::new(),
+            discovered: Vec::new(),
+        };
+
+        let output = render_show(&issue, &[], &incoming, &[]);
+        let expected = concat!(
+            "\nbd-123: Title\n",
+            "Status: open\n",
+            "Priority: P1\n",
+            "Type: task\n",
+            "Created: 1970-01-01 00:00\n",
+            "Updated: 1970-01-01 00:00\n",
+            "\n",
+        );
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn render_show_includes_non_core_namespace() {
         let issue = sample_issue("wf", "bd-123");
         let incoming = IncomingGroups {
             children: Vec::new(),
@@ -536,5 +822,48 @@ mod tests {
             "\n",
         );
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn resolve_show_ids_accepts_repeated_flag_ids() {
+        let ids = resolve_show_ids(
+            &CliRuntimeCtx {
+                repo: std::path::PathBuf::from("/tmp/beads"),
+                json: false,
+                namespace: None,
+                durability: None,
+                client_request_id: None,
+                require_min_seen: None,
+                wait_timeout_ms: None,
+                actor_id: None,
+            },
+            Vec::new(),
+            vec!["beads-rs-k8u3".to_string(), "beads-rs-k8u3.5".to_string()],
+            false,
+        )
+        .expect("show ids");
+        assert_eq!(ids[0].as_str(), "beads-rs-k8u3");
+        assert_eq!(ids[1].as_str(), "beads-rs-k8u3.5");
+    }
+
+    #[test]
+    fn render_issue_detail_is_compact_for_core_namespace() {
+        let issue = sample_issue("core", "bd-123");
+        let output = render_issue_detail(&issue);
+        assert!(!output.contains("Namespace: core"));
+        assert!(output.contains("\nbd-123: Title\n"));
+    }
+
+    #[test]
+    fn render_issue_summary_is_one_line() {
+        let issue = sample_issue("core", "bd-123");
+        let output = render_issue_summary(&issue);
+        assert_eq!(output, "bd-123 [P1] [task] open - Title");
+    }
+
+    #[test]
+    fn extract_bead_id_from_text_accepts_jj_style_descriptions() {
+        let id = extract_bead_id_from_text("beads-rs-k8u3.5: show affordances").expect("bead id");
+        assert_eq!(id.as_str(), "beads-rs-k8u3.5");
     }
 }

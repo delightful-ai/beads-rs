@@ -13,6 +13,7 @@ use tempfile::TempDir;
 
 use super::daemon_runtime::shutdown_daemon;
 use super::git::{init_bare_repo, init_repo, init_repo_with_origin};
+use super::ipc_client::{runtime_bound_client, runtime_bound_client_no_autostart};
 use super::temp;
 use super::timing;
 use super::wait;
@@ -450,12 +451,12 @@ impl BdRuntimeRepo {
     }
 
     pub fn ipc_client_no_autostart(&self) -> IpcClient {
-        IpcClient::for_runtime_dir(self.runtime_dir()).with_autostart(false)
+        runtime_bound_client_no_autostart(self.runtime_dir())
     }
 
     #[allow(dead_code)]
     pub fn ipc_client_autostart(&self) -> IpcClient {
-        IpcClient::for_runtime_dir(self.runtime_dir())
+        runtime_bound_client(self.runtime_dir())
     }
 
     pub fn bd_with_profile(&self, profile: BdCommandProfile) -> Command {

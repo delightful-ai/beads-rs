@@ -22,9 +22,9 @@ use beads_core::{
 };
 use beads_rs::config::{Config, ReplicationPeerConfig};
 use beads_surface::ipc::{
-    AdminFingerprintPayload, AdminOp, CreatePayload, EmptyPayload, IdPayload, IpcClient,
-    IpcConnection, IpcError, MutationCtx, MutationMeta, ReadConsistency, ReadCtx, RepoCtx, Request,
-    Response, ResponsePayload,
+    AdminFingerprintPayload, AdminOp, CreatePayload, EmptyPayload, IdPayload, IpcConnection,
+    IpcError, MutationCtx, MutationMeta, ReadConsistency, ReadCtx, RepoCtx, Request, Response,
+    ResponsePayload,
 };
 use beads_surface::ops::OpResult;
 
@@ -35,6 +35,7 @@ use super::bd_runtime::{
 use super::daemon_boundary::wal::{SEGMENT_HEADER_PREFIX_LEN, SegmentHeader};
 use super::daemon_runtime::{crash_daemon, shutdown_daemon};
 use super::git::{init_bare_repo, init_repo_with_origin};
+use super::ipc_client::runtime_bound_client_no_autostart;
 use super::tailnet_proxy::{TailnetProfile, TailnetProxy, TailnetTrace, TailnetTraceMode};
 use super::temp;
 use super::timing;
@@ -1298,7 +1299,7 @@ impl Node {
         self.retry_ipc_send(request, || {
             let mut guard = conn_slot.lock().expect("ipc conn lock");
             if guard.is_none() {
-                let client = IpcClient::for_runtime_dir(&self.runtime_dir).with_autostart(false);
+                let client = runtime_bound_client_no_autostart(&self.runtime_dir);
                 *guard = Some(client.connect()?);
             }
             let conn = guard.as_mut().expect("ipc conn");
@@ -1311,7 +1312,7 @@ impl Node {
     fn send_with_fresh_connection(&self, request: &Request) -> Result<Response, IpcError> {
         let timeout = ipc_timeout_for_request(request);
         self.retry_ipc_send(request, || {
-            let client = IpcClient::for_runtime_dir(&self.runtime_dir).with_autostart(false);
+            let client = runtime_bound_client_no_autostart(&self.runtime_dir);
             let mut conn = client.connect()?;
             conn.set_read_timeout(Some(timeout))?;
             conn.set_write_timeout(Some(timeout))?;
@@ -1367,7 +1368,7 @@ fn bootstrap_replica(
         &node.config_dir,
         store_id_override,
     );
-    let client = IpcClient::for_runtime_dir(&node.runtime_dir).with_autostart(false);
+    let client = runtime_bound_client_no_autostart(&node.runtime_dir);
     assert!(
         wait_for_daemon_ready(&client, Duration::from_secs(5)),
         "daemon failed to start for {}",

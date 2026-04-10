@@ -15,6 +15,8 @@ use beads_surface::ipc::{
     Response, ResponsePayload,
 };
 
+use super::ipc_client::runtime_bound_client;
+
 #[derive(Debug, Error)]
 pub enum StatusError {
     #[error(transparent)]
@@ -38,7 +40,7 @@ pub struct StatusCollector {
 
 impl StatusCollector {
     pub fn for_runtime_dir(repo: PathBuf, runtime_dir: &Path) -> Self {
-        Self::with_client(repo, IpcClient::for_runtime_dir(runtime_dir))
+        Self::with_client(repo, runtime_bound_client(runtime_dir))
     }
 
     pub fn with_client(repo: PathBuf, client: IpcClient) -> Self {

@@ -1,10 +1,11 @@
 use clap::Args;
 
 use super::common::fetch_issue;
+use super::input::{FileTextArg, InlineTextArg, resolve_text_input, text_input_uses_stdin};
 use super::{CommandError, CommandResult, print_ok};
 use crate::parsers::{parse_bead_type, parse_priority};
 use crate::render::print_line;
-use crate::runtime::{CliRuntimeCtx, resolve_description, send};
+use crate::runtime::{CliRuntimeCtx, send};
 use crate::validation::{
     normalize_bead_id, normalize_bead_id_for, normalize_dep_specs, validation_error,
 };
@@ -31,16 +32,39 @@ pub struct UpdateArgs {
     #[arg(long)]
     pub title: Option<String>,
 
-    #[arg(short = 'd', long, allow_hyphen_values = true)]
+    /// Replace the description/body text.
+    #[arg(short = 'd', long, alias = "desc", allow_hyphen_values = true)]
     pub description: Option<String>,
 
     /// Alias for --description (GitHub CLI convention).
     #[arg(long = "body", hide = true, allow_hyphen_values = true)]
     pub body: Option<String>,
 
+    /// Alias for --description (git commit convention).
+    #[arg(short = 'm', long = "message", hide = true, allow_hyphen_values = true)]
+    pub message: Option<String>,
+
+    /// Read description from file (use `-` for stdin).
+    #[arg(long = "body-file", value_name = "PATH")]
+    pub body_file: Option<std::path::PathBuf>,
+
+    /// Alias for --body-file.
+    #[arg(long = "description-file", hide = true, value_name = "PATH")]
+    pub description_file: Option<std::path::PathBuf>,
+
+    /// Read description from stdin.
+    #[arg(long)]
+    pub stdin: bool,
+
+    /// Replace the design section.
     #[arg(long, allow_hyphen_values = true)]
     pub design: Option<String>,
 
+    /// Read design text from file (use `-` for stdin).
+    #[arg(long = "design-file", value_name = "PATH")]
+    pub design_file: Option<std::path::PathBuf>,
+
+    /// Replace the acceptance criteria section.
     #[arg(
         long = "acceptance",
         alias = "acceptance-criteria",
@@ -126,10 +150,67 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
     if let Some(title) = args.title {
         patch.title = Patch::Set(title);
     }
-    if let Some(desc) = resolve_description(args.description, args.body)? {
+    let description_sources_inline = [
+        InlineTextArg {
+            flag: "--description",
+            value: args.description.as_deref(),
+        },
+        InlineTextArg {
+            flag: "--body",
+            value: args.body.as_deref(),
+        },
+        InlineTextArg {
+            flag: "--message",
+            value: args.message.as_deref(),
+        },
+    ];
+    let description_sources_files = [
+        FileTextArg {
+            flag: "--body-file",
+            path: args.body_file.as_deref(),
+        },
+        FileTextArg {
+            flag: "--description-file",
+            path: args.description_file.as_deref(),
+        },
+    ];
+    let design_sources_inline = [InlineTextArg {
+        flag: "--design",
+        value: args.design.as_deref(),
+    }];
+    let design_sources_files = [FileTextArg {
+        flag: "--design-file",
+        path: args.design_file.as_deref(),
+    }];
+    if text_input_uses_stdin(
+        &description_sources_inline,
+        &description_sources_files,
+        args.stdin,
+        true,
+    ) && text_input_uses_stdin(&design_sources_inline, &design_sources_files, false, false)
+    {
+        return Err(validation_error(
+            "stdin",
+            "description and design cannot both read from stdin in the same invocation; use a file for one of them",
+        )
+        .into());
+    }
+    if let Some(desc) = resolve_text_input(
+        "description",
+        &description_sources_inline,
+        &description_sources_files,
+        args.stdin,
+        true,
+    )? {
         patch.description = Patch::Set(desc);
     }
-    if let Some(design) = args.design {
+    if let Some(design) = resolve_text_input(
+        "design",
+        &design_sources_inline,
+        &design_sources_files,
+        false,
+        false,
+    )? {
         patch.design = Patch::Set(design);
     }
     if let Some(acc) = args.acceptance {
@@ -337,4 +418,64 @@ fn parse_status(raw: &str) -> CommandResult<WorkflowStatus> {
 
 fn parse_status_arg(raw: &str) -> std::result::Result<String, String> {
     Ok(crate::parsers::parse_status(raw))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::commands::CommandError;
+    use beads_core::NamespaceId;
+
+    fn sample_ctx() -> CliRuntimeCtx {
+        CliRuntimeCtx {
+            repo: std::path::PathBuf::from("/tmp/beads"),
+            json: false,
+            namespace: Some(NamespaceId::core()),
+            durability: None,
+            client_request_id: None,
+            require_min_seen: None,
+            wait_timeout_ms: None,
+            actor_id: None,
+        }
+    }
+
+    #[test]
+    fn update_rejects_double_stdin_usage() {
+        let err = handle(
+            &sample_ctx(),
+            UpdateArgs {
+                id: "beads-rs-k8u3".to_string(),
+                parent: None,
+                no_parent: false,
+                title: None,
+                description: None,
+                body: None,
+                message: None,
+                body_file: None,
+                description_file: None,
+                stdin: true,
+                design: None,
+                design_file: Some(std::path::PathBuf::from("-")),
+                acceptance: None,
+                external_ref: None,
+                estimate: None,
+                status: None,
+                reason: None,
+                priority: None,
+                bead_type: None,
+                assignee: None,
+                add_label: Vec::new(),
+                remove_label: Vec::new(),
+                notes: None,
+                deps: Vec::new(),
+            },
+        )
+        .expect_err("double stdin usage must fail");
+
+        assert!(matches!(err, CommandError::Validation(_)));
+        assert!(
+            err.to_string()
+                .contains("description and design cannot both read from stdin")
+        );
+    }
 }

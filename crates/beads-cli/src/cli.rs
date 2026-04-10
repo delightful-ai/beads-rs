@@ -6,10 +6,19 @@ use clap::{ArgAction, Parser, Subcommand, builder::BoolishValueParser};
 use crate::backend::CliHostBackend;
 use crate::commands;
 use crate::commands::CommandError;
-use crate::commands::setup::{SetupCmd, handle_aider, handle_claude, handle_cursor};
+use crate::commands::setup::{
+    SetupCmd, handle_aider, handle_claude, handle_cursor, handle_file_recipe, handle_setup_list,
+};
 use crate::runtime::CliRuntimeCtx;
 use beads_surface::ipc::{EmptyPayload, IpcError, RepoCtx, Request, Response, send_request};
 
+const CREATE_AFTER_HELP: &str = "Examples:\n  bd create \"Write CLI docs\" -p1 -t task\n  printf 'Detailed context\\n' | bd create \"Fix parser\" --stdin\n  bd create \"Refactor parser\" --body-file notes.md --design-file plan.md\n  bd create --file backlog.md";
+const SHOW_AFTER_HELP: &str = "Examples:\n  bd show beads-rs-k8u3\n  bd show --id beads-rs-k8u3 --id beads-rs-k8u3.5\n  bd show --current\n  bd show beads-rs-k8u3 --refs\n  bd show beads-rs-k8u3 --children\n  bd show beads-rs-k8u3 --short\n  bd help --advanced show";
+const LIST_AFTER_HELP: &str = "Examples:\n  bd list\n  bd list --all --long\n  bd list --parent beads-rs-k8u3 --tree\n  bd list --status open --label cli -L\n  bd list --sort priority:desc";
+const UPDATE_AFTER_HELP: &str = "Examples:\n  bd update beads-rs-k8u3 --status in_progress --priority 1\n  printf 'Refined description\\n' | bd update beads-rs-k8u3 --stdin\n  bd update beads-rs-k8u3 --body-file notes.md --design-file design.md\n  bd update beads-rs-k8u3 --add-label cli --notes \"help UX pass\"";
+const DEP_AFTER_HELP: &str = "Examples:\n  bd dep add beads-rs-k8u3.2 beads-rs-k8u3.9\n  bd dep beads-rs-k8u3.9 --blocks beads-rs-k8u3.2\n  bd dep beads-rs-k8u3.2 --depends-on beads-rs-k8u3.9\n  bd dep tree beads-rs-k8u3";
+const PRIME_AFTER_HELP: &str = "Examples:\n  bd prime\n  bd prime --mcp\n  bd prime --full --stealth\n  bd prime --export > /tmp/beads-context.txt";
+const SETUP_AFTER_HELP: &str = "Examples:\n  bd setup list\n  bd setup claude\n  bd setup cursor --check\n  bd setup codex\n  bd setup windsurf --remove";
 #[derive(Parser, Debug)]
 #[command(
     name = "bd",
@@ -83,14 +92,27 @@ pub enum Command {
     Init,
 
     /// Create a new bead.
-    #[command(alias = "new")]
+    #[command(
+        visible_alias = "new",
+        long_about = "Create a bead from a title or import a batch from markdown. Alias: `new`. This is the fastest path for capturing new work, especially when you want the resulting bead id back immediately.",
+        after_help = CREATE_AFTER_HELP
+    )]
     Create(commands::create::CreateArgs),
 
     /// Show a bead.
+    #[command(
+        visible_alias = "view",
+        long_about = "Show the current state of one or more beads, including notes, dependency relationships, and child beads when that detail is available from the daemon. Use `--current` to resolve the active bead from your current jj change or claimed in-progress work, `--short` for a compact read, `--refs` for reverse references, and `--children` for a child-only view.",
+        after_help = SHOW_AFTER_HELP
+    )]
     Show(commands::show::ShowArgs),
 
     /// List beads.
-    #[command(alias = "ls")]
+    #[command(
+        visible_alias = "ls",
+        long_about = "List beads with optional text search, filters, sorting, and output tweaks. Alias: `ls`. Human-mode `bd list` defaults to open work; add `--all` for the full backlog, `--long` for multi-line detail, and `--tree` with `--parent` for descendant views.",
+        after_help = LIST_AFTER_HELP
+    )]
     List(commands::list::ListArgs),
 
     /// Search beads by text (alias for list QUERY).
@@ -133,6 +155,10 @@ pub enum Command {
     Upgrade(commands::upgrade::UpgradeArgs),
 
     /// Update a bead.
+    #[command(
+        long_about = "Update bead fields, labels, notes, dependencies, assignee compatibility state, and workflow status in one invocation.",
+        after_help = UPDATE_AFTER_HELP
+    )]
     Update(commands::update::UpdateArgs),
 
     /// Close a bead.
@@ -151,15 +177,19 @@ pub enum Command {
     Unclaim(commands::unclaim::UnclaimArgs),
 
     /// Comments (alias for notes).
-    #[command(alias = "notes")]
+    #[command(visible_alias = "notes")]
     Comments(commands::comments::CommentsArgs),
 
     /// Add a comment (compat alias).
-    #[command(alias = "note")]
+    #[command(visible_alias = "note")]
     Comment(commands::comments::CommentAddArgs),
 
     /// Dependency operations.
-    #[command(alias = "deps", alias = "dependencies")]
+    #[command(
+        visible_aliases = ["deps", "dependencies"],
+        long_about = "Inspect and edit dependency edges between beads. Aliases: `deps`, `dependencies`. `add` means FROM depends on TO, so TO must complete before FROM is ready. Convenience form: `bd dep <blocker> --blocks <blocked>` means the blocked bead depends on the blocker.",
+        after_help = DEP_AFTER_HELP
+    )]
     Dep {
         #[command(subcommand)]
         cmd: commands::dep::DepCmd,
@@ -181,12 +211,20 @@ pub enum Command {
     Status,
 
     /// Output AI-optimized workflow context.
-    Prime,
+    #[command(
+        long_about = "Print the short, dense workflow context that helps an agent or human reload the local beads conventions quickly after entering a repo.",
+        after_help = PRIME_AFTER_HELP
+    )]
+    Prime(commands::prime::PrimeArgs),
 
     /// Display instructions for configuring AGENTS.md.
     Onboard(commands::onboard::OnboardArgs),
 
     /// Setup integration with AI editors.
+    #[command(
+        long_about = "Install, inspect, or remove editor integrations that make beads workflows easier to use from AI tooling such as Claude Code, Cursor, Aider, Codex, Gemini, OpenCode, and Windsurf.",
+        after_help = SETUP_AFTER_HELP
+    )]
     Setup {
         #[command(subcommand)]
         cmd: SetupCmd,
@@ -282,7 +320,7 @@ pub fn command_name(command: &Command) -> String {
         Command::Label { cmd } => format!("label.{}", label_cmd_name(cmd)),
         Command::Epic { cmd } => format!("epic.{}", epic_cmd_name(cmd)),
         Command::Status => "status".to_string(),
-        Command::Prime => "prime".to_string(),
+        Command::Prime(_) => "prime".to_string(),
         Command::Onboard(_) => "onboard".to_string(),
         Command::Setup { cmd } => format!("setup.{}", setup_cmd_name(cmd)),
         Command::Migrate { cmd } => format!("migrate.{}", migrate_cmd_name(cmd)),
@@ -321,7 +359,7 @@ where
         Command::Daemon { cmd } => match cmd {
             commands::daemon::DaemonCmd::Run => host.run_daemon_command(),
         },
-        Command::Prime => handle_prime(host),
+        Command::Prime(args) => handle_prime(host, args),
         Command::Setup { cmd } => handle_setup::<H>(cmd),
         Command::Onboard(args) => handle_onboard(host, args.output.as_deref()),
         Command::Store { cmd } => commands::store::handle(json, cmd, backend),
@@ -384,7 +422,7 @@ where
         Command::Admin { cmd } => commands::admin::handle(ctx, cmd).map_err(Into::into),
         Command::Migrate { cmd } => commands::migrate::handle(ctx, cmd, backend),
         Command::Daemon { .. }
-        | Command::Prime
+        | Command::Prime(_)
         | Command::Setup { .. }
         | Command::Onboard(_)
         | Command::Store { .. }
@@ -398,20 +436,25 @@ where
     H::Error: From<commands::setup::SetupError>,
 {
     match cmd {
+        SetupCmd::List => handle_setup_list(),
         SetupCmd::Claude(args) => handle_claude(args.project, args.check, args.remove),
         SetupCmd::Cursor(args) => handle_cursor(args.check, args.remove),
         SetupCmd::Aider(args) => handle_aider(args.check, args.remove),
+        SetupCmd::Codex(args) => handle_file_recipe("codex", args),
+        SetupCmd::Gemini(args) => handle_file_recipe("gemini", args),
+        SetupCmd::OpenCode(args) => handle_file_recipe("opencode", args),
+        SetupCmd::Windsurf(args) => handle_file_recipe("windsurf", args),
     }
     .map_err(Into::into)
 }
 
-fn handle_prime<H>(host: &H) -> std::result::Result<(), H::Error>
+fn handle_prime<H>(host: &H, args: commands::prime::PrimeArgs) -> std::result::Result<(), H::Error>
 where
     H: CliHost,
     H::Error: From<IpcError>,
 {
     let mut stdout = std::io::stdout().lock();
-    if let Err(err) = commands::prime::write_context_if(&mut stdout, host.in_beads_repo())
+    if let Err(err) = commands::prime::write_context_if(&mut stdout, host.in_beads_repo(), &args)
         && err.kind() != std::io::ErrorKind::BrokenPipe
     {
         return Err(IpcError::from(err).into());
@@ -550,9 +593,14 @@ fn maintenance_cmd_name(cmd: &commands::admin::AdminMaintenanceCmd) -> &'static 
 
 fn setup_cmd_name(cmd: &SetupCmd) -> &'static str {
     match cmd {
+        SetupCmd::List => "list",
         SetupCmd::Claude(_) => "claude",
         SetupCmd::Cursor(_) => "cursor",
         SetupCmd::Aider(_) => "aider",
+        SetupCmd::Codex(_) => "codex",
+        SetupCmd::Gemini(_) => "gemini",
+        SetupCmd::OpenCode(_) => "opencode",
+        SetupCmd::Windsurf(_) => "windsurf",
     }
 }
 
@@ -567,5 +615,69 @@ fn migrate_cmd_name(cmd: &commands::migrate::MigrateCmd) -> &'static str {
 fn daemon_cmd_name(cmd: &commands::daemon::DaemonCmd) -> &'static str {
     match cmd {
         commands::daemon::DaemonCmd::Run => "run",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_create_accepts_compat_text_input_flags() {
+        let cli = parse_from([
+            "bd",
+            "create",
+            "Write docs",
+            "--desc",
+            "from desc",
+            "--message",
+            "from desc",
+            "--body-file",
+            "body.md",
+            "--design-file",
+            "design.md",
+        ]);
+
+        match cli.command {
+            Command::Create(args) => {
+                assert_eq!(args.description.as_deref(), Some("from desc"));
+                assert_eq!(args.message.as_deref(), Some("from desc"));
+                assert_eq!(args.body_file.as_deref(), Some(Path::new("body.md")));
+                assert_eq!(args.design_file.as_deref(), Some(Path::new("design.md")));
+            }
+            other => panic!("expected create command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_update_accepts_stdin_and_design_file_flags() {
+        let cli = parse_from([
+            "bd",
+            "update",
+            "beads-rs-k8u3",
+            "--stdin",
+            "--design-file",
+            "design.md",
+        ]);
+
+        match cli.command {
+            Command::Update(args) => {
+                assert!(args.stdin);
+                assert_eq!(args.design_file.as_deref(), Some(Path::new("design.md")));
+            }
+            other => panic!("expected update command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_update_accepts_desc_alias() {
+        let cli = parse_from(["bd", "update", "beads-rs-k8u3", "--desc", "from desc"]);
+
+        match cli.command {
+            Command::Update(args) => {
+                assert_eq!(args.description.as_deref(), Some("from desc"));
+            }
+            other => panic!("expected update command, got {other:?}"),
+        }
     }
 }

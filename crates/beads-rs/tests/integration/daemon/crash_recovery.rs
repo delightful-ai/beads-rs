@@ -10,6 +10,7 @@ use std::time::Duration;
 use crate::fixtures::bd_runtime::{
     store_dir_from_data_dir, store_meta_from_data_dir, wait_for_daemon_pid, wait_for_store_id,
 };
+use crate::fixtures::ipc_client::runtime_bound_client_no_autostart;
 use crate::fixtures::realtime::RealtimeFixture;
 use crate::fixtures::store_lock::unlock_store;
 use crate::fixtures::wait;
@@ -17,7 +18,7 @@ use beads_api::QueryResult;
 use beads_core::{BeadId, BeadType, EventId, NamespaceId, Priority, Seq1};
 use beads_daemon::testkit::wal::{IndexDurabilityMode, SqliteWalIndex, WalIndex};
 use beads_surface::ipc::{
-    CreatePayload, IpcClient, MutationCtx, MutationMeta, Request, Response, ResponsePayload,
+    CreatePayload, MutationCtx, MutationMeta, Request, Response, ResponsePayload,
 };
 
 fn marker_path(dir: &Path, stage: &str) -> PathBuf {
@@ -110,7 +111,7 @@ fn crash_recovery_truncates_tail_and_resets_origin_seq() {
     start_daemon_with_hang(&fixture, "wal_after_write", &hang_dir);
 
     let request = create_request(fixture.repo_path(), "bd-crash-tail", "crash tail");
-    let client = IpcClient::for_runtime_dir(fixture.runtime_dir()).with_autostart(false);
+    let client = runtime_bound_client_no_autostart(fixture.runtime_dir());
     let handle = thread::spawn(move || client.send_request(&request));
 
     let marker = marker_path(&hang_dir, "wal_after_write");
@@ -148,7 +149,7 @@ fn crash_recovery_truncates_tail_and_resets_origin_seq() {
         "expected tail truncation to shrink segment"
     );
 
-    let client = IpcClient::for_runtime_dir(fixture.runtime_dir()).with_autostart(false);
+    let client = runtime_bound_client_no_autostart(fixture.runtime_dir());
     let create_resp = client
         .send_request(&create_request(
             fixture.repo_path(),
@@ -179,7 +180,7 @@ fn crash_recovery_rebuilds_index_after_fsync_before_commit() {
     start_daemon_with_hang(&fixture, "wal_mutation_before_atomic_commit", &hang_dir);
 
     let request = create_request(fixture.repo_path(), "bd-crash-index", "crash index");
-    let client = IpcClient::for_runtime_dir(fixture.runtime_dir()).with_autostart(false);
+    let client = runtime_bound_client_no_autostart(fixture.runtime_dir());
     let handle = thread::spawn(move || client.send_request(&request));
 
     let marker = marker_path(&hang_dir, "wal_mutation_before_atomic_commit");

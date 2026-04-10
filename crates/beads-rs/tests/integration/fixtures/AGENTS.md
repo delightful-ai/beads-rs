@@ -8,7 +8,7 @@ NEVER: hide owner-crate logic or one-off test behavior here. If a helper stops b
 - Use `temp.rs` for short deterministic temp roots, owner metadata, stale fixture cleanup, and Unix socket path checks. Do not derive temp paths from `current_dir()/tmp`.
 - Use `wait.rs` for polling and child lifecycle. `wait_for_child_exit()` and `kill_child_and_wait()` reap `Child`s; bare `kill()` and PID-only checks leak processes.
 - Use `daemon_runtime.rs` when a fixture owns daemon shutdown/crash semantics. Pass the owning fixture's `runtime_dir` and `data_dir`; do not assume `data/` lives under the runtime tree.
-- Owned daemons should be driven through `IpcClient::for_runtime_dir(...).with_autostart(false)` so autostart helpers do not steal lifecycle ownership.
+- Owned daemons should be driven through the shared helpers in `ipc_client.rs` so assembly tests share one runtime-bound `IpcClient` construction path while keeping autostart disabled for fixture-owned daemons.
 - Use `realtime.rs` or `BdRuntimeRepo` for single-daemon tests. Reach for `repl_rig.rs` only when you truly need multi-daemon replication, peer config churn, or tailnet proxy faults.
 - Use `admin_status.rs` when you need repeated admin-status sampling under load instead of open-coding status collectors in individual tests. Bind those helpers to the owning runtime dir; do not introduce ambient `IpcClient::new()` shortcuts there or in `ipc_stream.rs` / `load_gen.rs`.
 - `tailnet_proxy.rs` is the external fault-injection harness consumed by `repl_rig.rs` and `daemon/repl_e2e.rs`; keep those surfaces aligned.

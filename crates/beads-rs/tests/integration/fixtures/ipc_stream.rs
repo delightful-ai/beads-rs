@@ -12,6 +12,8 @@ use beads_surface::ipc::{
     ResponsePayload, SubscriptionStream,
 };
 
+use super::ipc_client::runtime_bound_client;
+
 #[derive(Debug)]
 pub enum StreamMessage {
     Subscribed(SubscribeInfo),
@@ -131,10 +133,6 @@ impl StreamingClient {
             Response::Err { err } => Err(StreamClientError::Remote(Box::new(err))),
         }
     }
-}
-
-fn runtime_bound_client(runtime_dir: &Path) -> IpcClient {
-    IpcClient::for_runtime_dir(runtime_dir)
 }
 
 #[cfg(test)]
