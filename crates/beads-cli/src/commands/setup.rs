@@ -4,6 +4,7 @@
 //! - `bd setup claude` - Claude Code hooks
 //! - `bd setup cursor` - Cursor IDE rules
 //! - `bd setup aider` - Aider configuration
+//! - `bd setup codex|gemini|opencode|windsurf` - Additional file-based recipes
 
 use std::fs;
 use std::io::Write;
@@ -24,12 +25,22 @@ pub enum SetupError {
 
 #[derive(Subcommand, Debug)]
 pub enum SetupCmd {
+    /// List the supported setup recipes.
+    List,
     /// Setup Claude Code integration (hooks for SessionStart/PreCompact).
     Claude(SetupClaudeArgs),
     /// Setup Cursor IDE integration (rules file).
-    Cursor(SetupCursorArgs),
+    Cursor(SetupRecipeArgs),
     /// Setup Aider integration (config + instructions).
-    Aider(SetupAiderArgs),
+    Aider(SetupRecipeArgs),
+    /// Setup Codex integration (project-local AGENTS.md).
+    Codex(SetupRecipeArgs),
+    /// Setup Gemini integration (project-local instructions).
+    Gemini(SetupRecipeArgs),
+    /// Setup OpenCode integration (project-local AGENTS.md).
+    OpenCode(SetupRecipeArgs),
+    /// Setup Windsurf integration (rules file).
+    Windsurf(SetupRecipeArgs),
 }
 
 #[derive(Args, Debug)]
@@ -47,24 +58,13 @@ pub struct SetupClaudeArgs {
     pub remove: bool,
 }
 
-#[derive(Args, Debug)]
-pub struct SetupCursorArgs {
-    /// Check if Cursor integration is installed.
+#[derive(Args, Debug, Clone, Copy)]
+pub struct SetupRecipeArgs {
+    /// Check if the integration is installed.
     #[arg(long)]
     pub check: bool,
 
-    /// Remove bd rules from Cursor.
-    #[arg(long)]
-    pub remove: bool,
-}
-
-#[derive(Args, Debug)]
-pub struct SetupAiderArgs {
-    /// Check if Aider integration is installed.
-    #[arg(long)]
-    pub check: bool,
-
-    /// Remove bd config from Aider.
+    /// Remove the integration files.
     #[arg(long)]
     pub remove: bool,
 }
@@ -72,6 +72,14 @@ pub struct SetupAiderArgs {
 // =============================================================================
 // Claude Code integration
 // =============================================================================
+
+#[derive(Clone, Copy)]
+struct FileRecipe {
+    name: &'static str,
+    description: &'static str,
+    path: &'static str,
+    contents: &'static str,
+}
 
 pub fn handle_claude(project: bool, check: bool, remove: bool) -> Result<()> {
     if check {
@@ -675,6 +683,73 @@ fn remove_aider() -> Result<()> {
     Ok(())
 }
 
+const CODEX_INSTRUCTIONS: &str = r#"# Beads Workflow for Codex
+
+This repository tracks work in `bd`.
+
+- Use `bd ready` to find unblocked work.
+- Use `bd show <id>` to inspect a bead in detail.
+- Use `bd create` to capture newly discovered work.
+- Use `bd prime` whenever you need the full workflow context refreshed.
+"#;
+
+const GEMINI_INSTRUCTIONS: &str = r#"# Beads Workflow for Gemini
+
+Use `bd` for all task tracking in this repository.
+
+- Start with `bd ready`.
+- Inspect with `bd show <id>`.
+- Capture new work with `bd create`.
+- Reload context with `bd prime`.
+"#;
+
+const OPENCODE_INSTRUCTIONS: &str = r#"# Beads Workflow for OpenCode
+
+This repository uses `bd` as the source of truth for work tracking.
+
+- `bd ready` surfaces unblocked work.
+- `bd list --all` shows the broader backlog.
+- `bd show <id>` gives full context for one bead.
+- `bd prime --mcp` provides a compact agent-facing refresher.
+"#;
+
+const WINDSURF_RULES: &str = r#"# Beads Workflow
+
+Track all work in `bd`.
+
+- Use `bd ready` before starting work.
+- Use `bd create` for newly discovered work.
+- Use `bd show <id>` for details.
+- Use `bd prime` for a full workflow refresher.
+"#;
+
+const FILE_RECIPES: &[FileRecipe] = &[
+    FileRecipe {
+        name: "codex",
+        description: "Project-local Codex instructions",
+        path: ".codex/AGENTS.md",
+        contents: CODEX_INSTRUCTIONS,
+    },
+    FileRecipe {
+        name: "gemini",
+        description: "Project-local Gemini instructions",
+        path: ".gemini/GEMINI.md",
+        contents: GEMINI_INSTRUCTIONS,
+    },
+    FileRecipe {
+        name: "opencode",
+        description: "Project-local OpenCode instructions",
+        path: ".opencode/AGENTS.md",
+        contents: OPENCODE_INSTRUCTIONS,
+    },
+    FileRecipe {
+        name: "windsurf",
+        description: "Project-local Windsurf rules",
+        path: ".windsurf/rules/beads.md",
+        contents: WINDSURF_RULES,
+    },
+];
+
 // =============================================================================
 // Helpers
 // =============================================================================
@@ -716,6 +791,90 @@ fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
     fs::rename(&temp_path, path)
         .map_err(|e| validation_error("setup", format!("failed to rename file: {e}")))?;
 
+    Ok(())
+}
+
+pub fn handle_setup_list() -> Result<()> {
+    print_line("Supported setup recipes:")?;
+    print_line("  claude    Claude Code hooks (global or project)")?;
+    print_line("  cursor    Cursor rules file")?;
+    print_line("  aider     Aider config + instructions")?;
+    for recipe in FILE_RECIPES {
+        print_line(&format!("  {:<9} {}", recipe.name, recipe.description))?;
+    }
+    Ok(())
+}
+
+pub fn handle_file_recipe(name: &str, args: SetupRecipeArgs) -> Result<()> {
+    let recipe = FILE_RECIPES
+        .iter()
+        .find(|recipe| recipe.name == name)
+        .ok_or_else(|| validation_error("setup", format!("unknown setup recipe {name}")))?;
+
+    if args.check {
+        return check_file_recipe(recipe);
+    }
+    if args.remove {
+        return remove_file_recipe(recipe);
+    }
+    install_file_recipe(recipe)
+}
+
+fn install_file_recipe(recipe: &FileRecipe) -> Result<()> {
+    let path = PathBuf::from(recipe.path);
+    print_line(&format!("Installing {} integration...", recipe.name))?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|err| {
+            validation_error("setup", format!("failed to create directory: {err}"))
+        })?;
+    }
+    atomic_write(&path, recipe.contents.as_bytes())?;
+    print_line("")?;
+    print_line(&format!("✓ {} integration installed", recipe.name))?;
+    print_line(&format!("  File: {}", path.display()))?;
+    Ok(())
+}
+
+fn check_file_recipe(recipe: &FileRecipe) -> Result<()> {
+    let cwd = std::env::current_dir()
+        .map_err(|err| validation_error("setup", format!("failed to resolve cwd: {err}")))?;
+    check_file_recipe_at(recipe, &cwd)
+}
+
+fn check_file_recipe_at(recipe: &FileRecipe, base_dir: &Path) -> Result<()> {
+    let path = base_dir.join(recipe.path);
+    if path.exists() {
+        print_line(&format!(
+            "✓ {} integration installed: {}",
+            recipe.name,
+            path.display()
+        ))?;
+        Ok(())
+    } else {
+        print_line(&format!("✗ {} integration not installed", recipe.name))?;
+        print_line(&format!("  Run: bd setup {}", recipe.name))?;
+        Err(validation_error(
+            "setup",
+            format!("{} integration not installed", recipe.name),
+        ))
+    }
+}
+
+fn remove_file_recipe(recipe: &FileRecipe) -> Result<()> {
+    let path = PathBuf::from(recipe.path);
+    print_line(&format!("Removing {} integration...", recipe.name))?;
+    match fs::remove_file(&path) {
+        Ok(_) => print_line(&format!("✓ Removed {} integration", recipe.name))?,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            print_line("No integration file found")?;
+        }
+        Err(err) => {
+            return Err(validation_error(
+                "setup",
+                format!("failed to remove file: {err}"),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -823,5 +982,30 @@ mod tests {
         // Remove again
         let removed = remove_hook_command(&mut hooks, event, command);
         assert!(!removed);
+    }
+
+    #[test]
+    fn setup_list_mentions_new_recipes() {
+        let names = FILE_RECIPES
+            .iter()
+            .map(|recipe| recipe.name)
+            .collect::<Vec<_>>();
+        assert!(names.contains(&"codex"));
+        assert!(names.contains(&"gemini"));
+        assert!(names.contains(&"opencode"));
+        assert!(names.contains(&"windsurf"));
+    }
+
+    #[test]
+    fn generic_recipe_check_fails_when_missing() {
+        let recipe = FileRecipe {
+            name: "codex",
+            description: "Project-local Codex instructions",
+            path: ".codex/AGENTS.md",
+            contents: CODEX_INSTRUCTIONS,
+        };
+        let dir = tempdir().expect("temp dir");
+        let err = check_file_recipe_at(&recipe, dir.path()).expect_err("expected missing recipe");
+        assert!(matches!(err, SetupError::Validation { .. }));
     }
 }

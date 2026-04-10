@@ -10,6 +10,7 @@ use std::num::NonZeroU32;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::fixtures::ipc_client::runtime_bound_client_no_autostart;
 use crate::fixtures::receipt;
 use crate::fixtures::repl_rig::{
     DurabilityEligibility, FaultProfile, ReplRig, ReplRigOptions, TailnetTraceConfig,
@@ -25,8 +26,8 @@ use beads_core::{
     ReplicaDurabilityRole, ReplicaEntry, Seq0,
 };
 use beads_surface::ipc::{
-    AdminCheckpointWaitPayload, AdminOp, CreatePayload, IdPayload, IpcClient, MutationCtx,
-    MutationMeta, ReadConsistency, ReadCtx, RepoCtx, Request, Response, ResponsePayload,
+    AdminCheckpointWaitPayload, AdminOp, CreatePayload, IdPayload, MutationCtx, MutationMeta,
+    ReadConsistency, ReadCtx, RepoCtx, Request, Response, ResponsePayload,
 };
 use beads_surface::ops::OpResult;
 
@@ -117,7 +118,7 @@ fn wait_for_checkpoint(rig: &ReplRig, idx: usize, namespace: &NamespaceId, timeo
 
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
-        let client = IpcClient::for_runtime_dir(&runtime_dir).with_autostart(false);
+        let client = runtime_bound_client_no_autostart(&runtime_dir);
         let request = Request::Admin(AdminOp::CheckpointWait {
             ctx: RepoCtx::new(repo_dir),
             payload: AdminCheckpointWaitPayload {
@@ -670,7 +671,7 @@ fn create_issue_with_durability_result(
     k: NonZeroU32,
 ) -> Response {
     let node = rig.node(node_idx);
-    let client = IpcClient::for_runtime_dir(node.runtime_dir()).with_autostart(false);
+    let client = runtime_bound_client_no_autostart(node.runtime_dir());
     let request = Request::Create {
         ctx: MutationCtx::new(
             node.repo_dir().to_path_buf(),
@@ -705,7 +706,7 @@ fn show_issue_with_read(
     read: ReadConsistency,
 ) -> Response {
     let node = rig.node(node_idx);
-    let client = IpcClient::for_runtime_dir(node.runtime_dir()).with_autostart(false);
+    let client = runtime_bound_client_no_autostart(node.runtime_dir());
     let request = Request::Show {
         ctx: ReadCtx::new(node.repo_dir().to_path_buf(), read),
         payload: IdPayload {

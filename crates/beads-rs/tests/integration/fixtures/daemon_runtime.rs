@@ -295,7 +295,6 @@ mod tests {
     use std::time::Duration;
 
     use beads_daemon::test_utils::daemon_meta_path;
-    use beads_surface::ipc::IpcClient;
 
     use crate::fixtures::bd_runtime::{
         BdCommandProfile, spawn_daemon_with_paths, wait_for_daemon_ready,
@@ -370,7 +369,7 @@ mod tests {
             BdCommandProfile::daemon(),
         );
         let pid = child.id();
-        let client = IpcClient::for_runtime_dir(&runtime_dir).with_autostart(false);
+        let client = crate::fixtures::ipc_client::runtime_bound_client_no_autostart(&runtime_dir);
         assert!(
             wait_for_daemon_ready(&client, Duration::from_secs(5)),
             "daemon should become ready"

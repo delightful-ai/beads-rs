@@ -13,6 +13,7 @@ pub mod daemon_runtime;
 pub mod event_body;
 pub mod git;
 pub mod identity;
+pub mod ipc_client;
 pub mod ipc_stream;
 pub mod legacy_store;
 pub mod load_gen;

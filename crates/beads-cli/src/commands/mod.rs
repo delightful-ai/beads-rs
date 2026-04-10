@@ -23,6 +23,7 @@ pub mod deleted;
 pub mod dep;
 pub mod epic;
 pub mod init;
+pub mod input;
 pub mod label;
 pub mod list;
 pub mod migrate;
