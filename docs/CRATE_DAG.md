@@ -12,9 +12,10 @@ This document is the canonical dependency policy for internal crate boundaries.
 - `beads-git`
 - `beads-daemon`
 - `beads-daemon-core`
+- `beads-http`
 - `beads-rs`
 
-`beads-bootstrap`, `beads-cli`, `beads-git`, `beads-daemon`, and `beads-daemon-core` are first-class workspace crates.
+`beads-bootstrap`, `beads-cli`, `beads-git`, `beads-daemon`, `beads-daemon-core`, and `beads-http` are first-class workspace crates.
 `beads-rs` is the tiny assembly crate/package entrypoint and depends on the leaf crates it assembles.
 It is not a compatibility umbrella or a reusable dependency surface for other internal crates.
 
@@ -38,6 +39,9 @@ Only the directed edges below are allowed:
 - `beads-daemon -> beads-git`
 - `beads-daemon -> beads-daemon-core`
 - `beads-daemon-core -> beads-core`
+- `beads-http -> beads-core`
+- `beads-http -> beads-api`
+- `beads-http -> beads-surface`
 - `beads-rs -> beads-core`
 - `beads-rs -> beads-api`
 - `beads-rs -> beads-bootstrap`
@@ -50,15 +54,16 @@ Only the directed edges below are allowed:
 ## Forbidden edges
 
 - Any internal dependency edge not listed in **Allowed edges** is forbidden.
-- `beads-core` must not depend on `beads-api`, `beads-bootstrap`, `beads-surface`, `beads-cli`, `beads-git`, `beads-daemon`, `beads-daemon-core`, or `beads-rs`.
-- `beads-api` must not depend on `beads-bootstrap`, `beads-surface`, `beads-cli`, `beads-git`, `beads-daemon`, `beads-daemon-core`, or `beads-rs`.
-- `beads-bootstrap` must not depend on `beads-api`, `beads-surface`, `beads-cli`, `beads-git`, `beads-daemon`, `beads-daemon-core`, or `beads-rs`.
-- `beads-surface` must not depend on `beads-bootstrap`, `beads-cli`, `beads-git`, `beads-daemon`, `beads-daemon-core`, or `beads-rs`.
-- `beads-cli` must not depend on `beads-bootstrap`, `beads-git`, `beads-daemon`, `beads-daemon-core`, or `beads-rs`.
-- `beads-git` must not depend on `beads-api`, `beads-surface`, `beads-cli`, `beads-daemon`, `beads-daemon-core`, or `beads-rs`.
-- `beads-daemon-core` must not depend on `beads-api`, `beads-bootstrap`, `beads-surface`, `beads-cli`, `beads-git`, `beads-daemon`, or `beads-rs`.
-- `beads-daemon` must not depend on `beads-cli` or `beads-rs`.
-- `beads-rs` must not be used as a dependency by `beads-core`, `beads-api`, `beads-bootstrap`, `beads-surface`, `beads-cli`, `beads-git`, `beads-daemon-core`, or `beads-daemon`.
+- `beads-core` must not depend on `beads-api`, `beads-bootstrap`, `beads-surface`, `beads-cli`, `beads-git`, `beads-daemon`, `beads-daemon-core`, `beads-http`, or `beads-rs`.
+- `beads-api` must not depend on `beads-bootstrap`, `beads-surface`, `beads-cli`, `beads-git`, `beads-daemon`, `beads-daemon-core`, `beads-http`, or `beads-rs`.
+- `beads-bootstrap` must not depend on `beads-api`, `beads-surface`, `beads-cli`, `beads-git`, `beads-daemon`, `beads-daemon-core`, `beads-http`, or `beads-rs`.
+- `beads-surface` must not depend on `beads-bootstrap`, `beads-cli`, `beads-git`, `beads-daemon`, `beads-daemon-core`, `beads-http`, or `beads-rs`.
+- `beads-cli` must not depend on `beads-bootstrap`, `beads-git`, `beads-daemon`, `beads-daemon-core`, `beads-http`, or `beads-rs`.
+- `beads-git` must not depend on `beads-api`, `beads-surface`, `beads-cli`, `beads-daemon`, `beads-daemon-core`, `beads-http`, or `beads-rs`.
+- `beads-daemon-core` must not depend on `beads-api`, `beads-bootstrap`, `beads-surface`, `beads-cli`, `beads-git`, `beads-daemon`, `beads-http`, or `beads-rs`.
+- `beads-daemon` must not depend on `beads-cli`, `beads-http`, or `beads-rs`.
+- `beads-http` must not depend on `beads-bootstrap`, `beads-cli`, `beads-git`, `beads-daemon`, `beads-daemon-core`, or `beads-rs`.
+- `beads-rs` must not be used as a dependency by `beads-core`, `beads-api`, `beads-bootstrap`, `beads-surface`, `beads-cli`, `beads-git`, `beads-daemon-core`, `beads-daemon`, or `beads-http`.
 
 ## CLI Boundary Invariant
 
