@@ -5,6 +5,7 @@ use beads_api::{
     AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, AdminStoreLockInfoOutput,
     AdminStoreUnlockOutput, BlockedIssue, CountResult, DaemonInfo, DeletedLookup, DepCycles,
     DepEdge, EpicStatus, Issue, IssueSummary, Note, ReadyResult, StatusOutput, Tombstone,
+    TrackerIssue,
 };
 use beads_core::CoreError;
 use beads_surface::ipc::{IpcError, ResponsePayload};
@@ -97,6 +98,41 @@ impl crate::render::HumanRenderer for CliCommandRenderer {
 
     fn render_issues(&self, issues: &[IssueSummary]) -> String {
         list::render_issue_list_opts(issues, false)
+    }
+
+    fn render_tracker_issues(&self, issues: &[TrackerIssue]) -> String {
+        if issues.is_empty() {
+            return "No tracker issues found.".to_string();
+        }
+
+        let mut out = String::new();
+        for issue in issues {
+            use std::fmt::Write as _;
+
+            let _ = writeln!(
+                out,
+                "{} [{}] {}",
+                issue.identifier,
+                issue.status.as_str(),
+                issue.title
+            );
+            if let Some(assignee) = &issue.assignee {
+                let _ = writeln!(out, "  assignee: {assignee}");
+            }
+            if !issue.labels.is_empty() {
+                let _ = writeln!(out, "  labels: {}", issue.labels.join(", "));
+            }
+            if !issue.blocked_by.is_empty() {
+                let blockers = issue
+                    .blocked_by
+                    .iter()
+                    .map(|blocker| format!("{} [{}]", blocker.identifier, blocker.status.as_str()))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let _ = writeln!(out, "  blocked by: {blockers}");
+            }
+        }
+        out.trim_end().to_string()
     }
 
     fn render_dep_tree(&self, root: &str, edges: &[DepEdge]) -> String {

@@ -9,6 +9,7 @@
 mod admin;
 mod admin_status;
 mod crash_recovery;
+mod http;
 mod lifecycle;
 mod logging;
 mod realtime_smoke;

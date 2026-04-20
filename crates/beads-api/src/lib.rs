@@ -11,9 +11,11 @@ mod deps;
 mod issues;
 mod query;
 mod realtime;
+mod tracker;
 
 pub use admin::*;
 pub use deps::*;
 pub use issues::*;
 pub use query::*;
 pub use realtime::*;
+pub use tracker::*;

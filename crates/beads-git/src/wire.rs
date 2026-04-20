@@ -12,8 +12,8 @@ use serde::{Deserialize, Serialize};
 use super::error::WireError;
 use crate::core::{
     ActorId, Bead, BeadId, BeadSlug, BeadSnapshotWireV1, CanonicalState, DepKey, DepKind, Dot, Dvv,
-    NoteAppendV1, OrSet, OrSetValue, SnapshotCodec, SnapshotWireV1, Stamp, StateJsonlSha256,
-    WireDepEntryV1, WireDepStoreV1, WireStamp, WireTombstoneV1, WriteStamp,
+    IssueStatus, NoteAppendV1, OrSet, OrSetValue, SnapshotCodec, SnapshotWireV1, Stamp,
+    StateJsonlSha256, WireDepEntryV1, WireDepStoreV1, WireStamp, WireTombstoneV1, WriteStamp,
 };
 
 // =============================================================================
@@ -34,14 +34,15 @@ struct WireBeadFullCompat {
 
 impl WireBeadFullCompat {
     fn from_wire(wire: BeadSnapshotWireV1) -> Self {
-        let workflow_stamp = wire_field_stamp(&wire, "workflow");
+        let status_stamp = wire_field_stamp(&wire, "status");
         let claim_stamp = wire_field_stamp(&wire, "claim");
-        let (closed_at, closed_by) = match &wire.workflow {
-            crate::core::WireWorkflowSnapshot::Closed { .. } => (
-                Some(WireStamp::from(&workflow_stamp.at)),
-                Some(workflow_stamp.by.clone()),
-            ),
-            _ => (None, None),
+        let (closed_at, closed_by) = if wire.status.is_terminal() {
+            (
+                Some(WireStamp::from(&status_stamp.at)),
+                Some(status_stamp.by.clone()),
+            )
+        } else {
+            (None, None)
         };
         let assignee_at = match &wire.claim {
             crate::core::WireClaimSnapshot::Claimed(_) => Some(WireStamp::from(&claim_stamp.at)),
@@ -60,18 +61,15 @@ impl WireBeadFullCompat {
             WireError::InvalidValue("state.jsonl bead must be a JSON object".to_string())
         })?;
 
-        let workflow_closed = matches!(
-            &self.wire.workflow,
-            crate::core::WireWorkflowSnapshot::Closed { .. }
-        );
+        let workflow_closed = self.wire.status.is_terminal();
         if workflow_closed {
             match (self.closed_at.as_ref(), self.closed_by.as_ref()) {
                 (Some(closed_at), Some(closed_by)) => {
-                    let workflow_stamp = wire_field_stamp(&self.wire, "workflow");
+                    let workflow_stamp = wire_field_stamp(&self.wire, "status");
                     let closed_stamp = Stamp::new(wire_to_stamp(*closed_at), closed_by.clone());
                     if closed_stamp != workflow_stamp {
                         return Err(WireError::InvalidValue(
-                            "closed_at/closed_by does not match workflow stamp".to_string(),
+                            "closed_at/closed_by does not match status stamp".to_string(),
                         ));
                     }
                 }
@@ -231,7 +229,7 @@ pub fn serialize_meta(
         .notes
         .ok_or_else(|| WireError::InvalidValue("meta.json missing checksum fields".into()))?;
     let meta = WireMeta {
-        format_version: 1,
+        format_version: crate::core::FormatVersion::CURRENT.get(),
         root_slug: root_slug.map(|s| s.to_string()),
         last_write_stamp: last_write_stamp.map(stamp_to_wire),
         state_sha256: Some(checksums.state),
@@ -249,13 +247,13 @@ pub fn serialize_meta(
 
 /// Parse state.jsonl bytes into beads.
 pub fn parse_state(bytes: &[u8]) -> Result<Vec<Bead>, WireError> {
-    Ok(parse_state_full(bytes)?
+    Ok(parse_state_current_full(bytes)?
         .into_iter()
         .map(Bead::from)
         .collect())
 }
 
-fn parse_state_full(bytes: &[u8]) -> Result<Vec<BeadSnapshotWireV1>, WireError> {
+fn parse_state_current_full(bytes: &[u8]) -> Result<Vec<BeadSnapshotWireV1>, WireError> {
     let content = parse_utf8(bytes)?;
     let mut beads = Vec::new();
 
@@ -271,6 +269,76 @@ fn parse_state_full(bytes: &[u8]) -> Result<Vec<BeadSnapshotWireV1>, WireError> 
 
     SnapshotCodec::validate_beads(&beads).map_err(|err| map_snapshot_error("state.jsonl", err))?;
     Ok(beads)
+}
+
+fn parse_state_migration_full(bytes: &[u8]) -> Result<Vec<BeadSnapshotWireV1>, WireError> {
+    let content = parse_utf8(bytes)?;
+    let mut beads = Vec::new();
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut raw: serde_json::Value = serde_json::from_str(line)?;
+        inject_legacy_status(&mut raw)?;
+        let compat: WireBeadFullCompat = serde_json::from_value(raw.clone())?;
+        compat.validate_redundant_fields(&raw)?;
+        beads.push(compat.wire);
+    }
+
+    SnapshotCodec::validate_beads(&beads).map_err(|err| map_snapshot_error("state.jsonl", err))?;
+    Ok(beads)
+}
+
+fn inject_legacy_status(raw: &mut serde_json::Value) -> Result<(), WireError> {
+    let Some(obj) = raw.as_object_mut() else {
+        return Err(WireError::InvalidValue(
+            "state.jsonl bead must be a JSON object".to_string(),
+        ));
+    };
+    // Legacy v1 migration path: accept the old rich `tracker_state` field name
+    // and rewrite it onto canonical `status` before snapshot decode.
+    if let Some(status_value) = obj.get("tracker_state") {
+        let Some(status_raw) = status_value.as_str() else {
+            return Err(WireError::InvalidValue(
+                "state.jsonl tracker_state must be a string".to_string(),
+            ));
+        };
+        let status = IssueStatus::parse(status_raw).ok_or_else(|| {
+            WireError::InvalidValue(format!("unknown legacy tracker_state {status_raw:?}"))
+        })?;
+        obj.insert("status".to_string(), serde_json::json!(status.as_str()));
+        return Ok(());
+    }
+
+    let Some(status_value) = obj.get("status") else {
+        return Ok(());
+    };
+    let Some(status_raw) = status_value.as_str() else {
+        return Err(WireError::InvalidValue(
+            "state.jsonl status must be a string".to_string(),
+        ));
+    };
+    if let Some(status) = IssueStatus::parse(status_raw) {
+        obj.insert("status".to_string(), serde_json::json!(status.as_str()));
+        return Ok(());
+    }
+    let status = match status_raw.trim() {
+        "open" => Some(IssueStatus::Todo),
+        "in_progress" => Some(IssueStatus::InProgress),
+        "closed" => IssueStatus::from_close_reason(
+            obj.get("closed_reason").and_then(|value| value.as_str()),
+        )
+        .or(Some(IssueStatus::Done)),
+        _ => None,
+    }
+    .ok_or_else(|| WireError::InvalidValue(format!("unknown legacy status {status_raw:?}")))?;
+
+    obj.insert(
+        "status".to_string(),
+        serde_json::to_value(status).map_err(WireError::from)?,
+    );
+    Ok(())
 }
 
 /// Parse tombstones.jsonl bytes into wire tombstones.
@@ -448,7 +516,29 @@ pub fn parse_legacy_state(
     deps_bytes: &[u8],
     notes_bytes: &[u8],
 ) -> Result<CanonicalState, WireError> {
-    let beads = parse_state_full(state_bytes)?;
+    let beads = parse_state_migration_full(state_bytes)?;
+    let tombstones = parse_tombstones(tombstones_bytes)?;
+    let deps = parse_deps(deps_bytes)?;
+    let notes = parse_notes(notes_bytes)?;
+
+    let snapshot = SnapshotWireV1 {
+        beads,
+        tombstones,
+        deps,
+        notes,
+    };
+    SnapshotCodec::into_state(snapshot)
+        .map_err(|err| WireError::InvalidValue(format!("snapshot decode failed: {err}")))
+}
+
+/// Parse current git JSONL files into a canonical state.
+pub fn parse_current_state(
+    state_bytes: &[u8],
+    tombstones_bytes: &[u8],
+    deps_bytes: &[u8],
+    notes_bytes: &[u8],
+) -> Result<CanonicalState, WireError> {
+    let beads = parse_state_current_full(state_bytes)?;
     let tombstones = parse_tombstones(tombstones_bytes)?;
     let deps = parse_deps(deps_bytes)?;
     let notes = parse_notes(notes_bytes)?;
@@ -473,7 +563,7 @@ pub fn parse_state_allow_legacy_deps(
     deps_bytes: &[u8],
     notes_bytes: &[u8],
 ) -> Result<(CanonicalState, DepsFormat, Vec<String>), WireError> {
-    let beads = parse_state_full(state_bytes)?;
+    let beads = parse_state_migration_full(state_bytes)?;
     let tombstones = parse_tombstones(tombstones_bytes)?;
     let notes = parse_notes(notes_bytes)?;
     let (deps, deps_format, warnings) = match parse_deps_wire(deps_bytes) {
@@ -664,6 +754,11 @@ pub enum StoreMeta {
         last_write_stamp: Option<WriteStamp>,
         checksums: Option<StoreChecksums>,
     },
+    V2 {
+        root_slug: Option<BeadSlug>,
+        last_write_stamp: Option<WriteStamp>,
+        checksums: Option<StoreChecksums>,
+    },
 }
 
 impl StoreMeta {
@@ -671,6 +766,7 @@ impl StoreMeta {
         match self {
             StoreMeta::Legacy => None,
             StoreMeta::V1 { root_slug, .. } => root_slug.as_ref(),
+            StoreMeta::V2 { root_slug, .. } => root_slug.as_ref(),
         }
     }
 
@@ -680,6 +776,9 @@ impl StoreMeta {
             StoreMeta::V1 {
                 last_write_stamp, ..
             } => last_write_stamp.as_ref(),
+            StoreMeta::V2 {
+                last_write_stamp, ..
+            } => last_write_stamp.as_ref(),
         }
     }
 
@@ -687,6 +786,15 @@ impl StoreMeta {
         match self {
             StoreMeta::Legacy => None,
             StoreMeta::V1 { checksums, .. } => checksums.as_ref(),
+            StoreMeta::V2 { checksums, .. } => checksums.as_ref(),
+        }
+    }
+
+    pub fn format_version(&self) -> Option<u32> {
+        match self {
+            StoreMeta::Legacy => None,
+            StoreMeta::V1 { .. } => Some(1),
+            StoreMeta::V2 { .. } => Some(crate::core::FormatVersion::CURRENT.get()),
         }
     }
 }
@@ -706,29 +814,53 @@ impl SupportedStoreMeta {
     pub fn parse(bytes: &[u8]) -> Result<Self, WireError> {
         let content = parse_utf8(bytes)?;
         let meta: WireMeta = serde_json::from_str(content)?;
-        if meta.format_version != 1 {
-            return Err(WireError::InvalidValue(format!(
-                "unsupported meta format_version {}",
-                meta.format_version
-            )));
-        }
-        let checksums = match (
-            meta.state_sha256,
-            meta.tombstones_sha256,
-            meta.deps_sha256,
-            meta.notes_sha256,
-        ) {
-            (Some(state), Some(tombstones), Some(deps), notes) => Some(StoreChecksums {
-                state,
-                tombstones,
-                deps,
-                notes,
-            }),
-            (None, None, None, None) => None,
+        let checksums = match meta.format_version {
+            1 => match (
+                meta.state_sha256,
+                meta.tombstones_sha256,
+                meta.deps_sha256,
+                meta.notes_sha256,
+            ) {
+                (Some(state), Some(tombstones), Some(deps), notes) => Some(StoreChecksums {
+                    state,
+                    tombstones,
+                    deps,
+                    notes,
+                }),
+                (None, None, None, None) => None,
+                _ => {
+                    return Err(WireError::InvalidValue(
+                        "meta.json has partial checksum fields".into(),
+                    ));
+                }
+            },
+            version if version == crate::core::FormatVersion::CURRENT.get() => {
+                match (
+                    meta.state_sha256,
+                    meta.tombstones_sha256,
+                    meta.deps_sha256,
+                    meta.notes_sha256,
+                ) {
+                    (Some(state), Some(tombstones), Some(deps), Some(notes)) => {
+                        Some(StoreChecksums {
+                            state,
+                            tombstones,
+                            deps,
+                            notes: Some(notes),
+                        })
+                    }
+                    _ => {
+                        return Err(WireError::InvalidValue(
+                            "meta.json missing required checksum fields".into(),
+                        ));
+                    }
+                }
+            }
             _ => {
-                return Err(WireError::InvalidValue(
-                    "meta.json has partial checksum fields".into(),
-                ));
+                return Err(WireError::InvalidValue(format!(
+                    "unsupported meta format_version {}",
+                    meta.format_version
+                )));
             }
         };
         let root_slug = match meta.root_slug {
@@ -737,11 +869,20 @@ impl SupportedStoreMeta {
             }
             None => None,
         };
+        let last_write_stamp = meta.last_write_stamp.map(wire_to_stamp);
         Ok(Self {
-            meta: StoreMeta::V1 {
-                root_slug,
-                last_write_stamp: meta.last_write_stamp.map(wire_to_stamp),
-                checksums,
+            meta: match meta.format_version {
+                1 => StoreMeta::V1 {
+                    root_slug,
+                    last_write_stamp,
+                    checksums,
+                },
+                version if version == crate::core::FormatVersion::CURRENT.get() => StoreMeta::V2 {
+                    root_slug,
+                    last_write_stamp,
+                    checksums,
+                },
+                _ => unreachable!("unsupported format version handled above"),
             },
         })
     }
@@ -770,6 +911,18 @@ impl SupportedStoreMeta {
 /// Parse meta.json bytes into a supported meta type.
 pub fn parse_supported_meta(bytes: &[u8]) -> Result<SupportedStoreMeta, WireError> {
     SupportedStoreMeta::parse(bytes)
+}
+
+pub fn parse_current_meta(bytes: &[u8]) -> Result<SupportedStoreMeta, WireError> {
+    let meta = SupportedStoreMeta::parse(bytes)?;
+    if meta.meta().format_version() == Some(crate::core::FormatVersion::CURRENT.get()) {
+        Ok(meta)
+    } else {
+        Err(WireError::InvalidValue(format!(
+            "unsupported meta format_version {}",
+            meta.meta().format_version().unwrap_or(0)
+        )))
+    }
 }
 
 pub fn verify_store_checksums(
@@ -855,9 +1008,9 @@ mod tests {
     use crate::core::crdt::Crdt;
     use crate::core::state::LabelState;
     use crate::core::{
-        ActorId, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Dvv, Label,
-        LabelStore, Lww, Note, NoteId, OrSet, ParentEdge, Priority, ReplicaId, Tombstone,
-        WireDepEntryV1, WireFieldStamp, WireNoteV1, Workflow,
+        ActorId, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Dvv,
+        IssueStatus, Label, LabelStore, Lww, Note, NoteId, OrSet, ParentEdge, Priority, ReplicaId,
+        Tombstone, WireDepEntryV1, WireFieldStamp, WireNoteV1,
     };
     use proptest::prelude::*;
     use sha2::{Digest, Sha256 as Sha2};
@@ -884,13 +1037,14 @@ mod tests {
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
-            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            status: Lww::new(IssueStatus::Todo, stamp.clone()),
+            closed_on_branch: Lww::new(None, stamp.clone()),
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         Bead::new(core, fields)
     }
 
-    fn make_bead_with(id: &BeadId, stamp: &Stamp, workflow: Workflow, claim: Claim) -> Bead {
+    fn make_bead_with(id: &BeadId, stamp: &Stamp, status: IssueStatus, claim: Claim) -> Bead {
         let core = BeadCore::new(id.clone(), stamp.clone(), None);
         let fields = BeadFields {
             title: Lww::new("title".to_string(), stamp.clone()),
@@ -902,7 +1056,8 @@ mod tests {
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
-            workflow: Lww::new(workflow, stamp.clone()),
+            status: Lww::new(status, stamp.clone()),
+            closed_on_branch: Lww::new(None, stamp.clone()),
             claim: Lww::new(claim, stamp.clone()),
         };
         Bead::new(core, fields)
@@ -1134,7 +1289,7 @@ mod tests {
     #[test]
     fn serialize_state_emits_workflow_and_claim_timestamps() {
         let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
-        let workflow = Workflow::Closed(crate::core::Closure::new(None, None));
+        let workflow = IssueStatus::Done;
         let claim = Claim::claimed(actor_id("bob"), None);
         let bead = make_bead_with(&bead_id("bd-closed"), &stamp, workflow, claim);
         let mut state = CanonicalState::new();
@@ -1153,7 +1308,7 @@ mod tests {
     #[test]
     fn parse_state_accepts_legacy_closed_without_closed_at_by() {
         let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
-        let workflow = Workflow::Closed(crate::core::Closure::new(None, None));
+        let workflow = IssueStatus::Done;
         let bead = make_bead_with(&bead_id("bd-missing"), &stamp, workflow, Claim::default());
         let mut state = CanonicalState::new();
         state.insert(bead).unwrap();
@@ -1169,14 +1324,83 @@ mod tests {
         let parsed =
             parse_state(&join_jsonl(&lines)).expect("legacy closed fields remain readable");
         assert_eq!(parsed.len(), 1);
-        assert!(parsed[0].fields.workflow.value.is_closed());
+        assert!(parsed[0].fields.status.value.is_terminal());
+    }
+
+    #[test]
+    fn parse_state_rejects_legacy_status_without_rich_status() {
+        let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
+        let bead = make_bead_with(
+            &bead_id("bd-legacy-status"),
+            &stamp,
+            IssueStatus::Done,
+            Claim::default(),
+        );
+        let mut state = CanonicalState::new();
+        state.insert(bead).unwrap();
+
+        let bytes = serialize_state(&state).expect("serialize_state");
+        let mut lines = jsonl_lines(&bytes);
+        let mut value: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        let obj = value.as_object_mut().expect("object");
+        obj.remove("status");
+        obj.insert("status".to_string(), serde_json::json!("closed"));
+        obj.insert(
+            "closed_reason".to_string(),
+            serde_json::json!("duplicate cleanup"),
+        );
+        lines[0] = serde_json::to_string(&value).unwrap();
+
+        let err = parse_state(&join_jsonl(&lines))
+            .expect_err("strict state parser should reject legacy status rows");
+        assert!(matches!(
+            err,
+            WireError::Json(_) | WireError::InvalidValue(_)
+        ));
+    }
+
+    #[test]
+    fn parse_legacy_state_accepts_legacy_status_without_rich_status() {
+        let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
+        let bead = make_bead_with(
+            &bead_id("bd-legacy-status"),
+            &stamp,
+            IssueStatus::Done,
+            Claim::default(),
+        );
+        let mut state = CanonicalState::new();
+        state.insert(bead).unwrap();
+
+        let state_bytes = serialize_state(&state).expect("serialize_state");
+        let tomb_bytes = serialize_tombstones(&state).expect("serialize_tombstones");
+        let deps_bytes = serialize_deps(&state).expect("serialize_deps");
+        let notes_bytes = serialize_notes(&state).expect("serialize_notes");
+
+        let mut lines = jsonl_lines(&state_bytes);
+        let mut value: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        let obj = value.as_object_mut().expect("object");
+        obj.remove("status");
+        obj.insert("status".to_string(), serde_json::json!("closed"));
+        obj.insert(
+            "closed_reason".to_string(),
+            serde_json::json!("duplicate cleanup"),
+        );
+        lines[0] = serde_json::to_string(&value).unwrap();
+
+        let parsed =
+            parse_legacy_state(&join_jsonl(&lines), &tomb_bytes, &deps_bytes, &notes_bytes)
+                .expect("migration parser should accept legacy status rows");
+        let bead = parsed
+            .bead_view(&bead_id("bd-legacy-status"))
+            .expect("bead view");
+        assert!(bead.bead.fields.status.value.is_terminal());
     }
 
     #[test]
     fn parse_state_accepts_legacy_assignee_without_assignee_at() {
         let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
         let claim = Claim::claimed(actor_id("bob"), None);
-        let bead = make_bead_with(&bead_id("bd-claimed"), &stamp, Workflow::Open, claim);
+        let bead = make_bead_with(&bead_id("bd-claimed"), &stamp, IssueStatus::Todo, claim);
         let mut state = CanonicalState::new();
         state.insert(bead).unwrap();
 
@@ -1229,7 +1453,7 @@ mod tests {
     #[test]
     fn parse_state_rejects_partial_closed_redundant_fields() {
         let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
-        let workflow = Workflow::Closed(crate::core::Closure::new(None, None));
+        let workflow = IssueStatus::Done;
         let bead = make_bead_with(
             &bead_id("bd-partial-closed"),
             &stamp,
@@ -1254,7 +1478,7 @@ mod tests {
     #[test]
     fn parse_state_rejects_mismatched_closed_stamp() {
         let stamp = Stamp::new(WriteStamp::new(5, 1), actor_id("alice"));
-        let workflow = Workflow::Closed(crate::core::Closure::new(None, None));
+        let workflow = IssueStatus::Done;
         let bead = make_bead_with(&bead_id("bd-closed2"), &stamp, workflow, Claim::default());
         let mut state = CanonicalState::new();
         state.insert(bead).unwrap();
@@ -1326,7 +1550,8 @@ mod tests {
             external_ref: Lww::new(None, base.clone()),
             source_repo: Lww::new(None, base.clone()),
             estimated_minutes: Lww::new(None, base.clone()),
-            workflow: Lww::new(Workflow::default(), base.clone()),
+            status: Lww::new(IssueStatus::Todo, base.clone()),
+            closed_on_branch: Lww::new(None, base.clone()),
             claim: Lww::new(Claim::default(), base.clone()),
         };
         let mut state = CanonicalState::new();
@@ -2061,7 +2286,7 @@ mod tests {
                 .as_ref()
                 .map(|raw| BeadSlug::parse(raw).expect("slug parse"));
             match parsed.meta() {
-                StoreMeta::V1 {
+                StoreMeta::V2 {
                     root_slug,
                     last_write_stamp,
                     checksums: parsed_checksums,
@@ -2070,9 +2295,7 @@ mod tests {
                     prop_assert_eq!(last_write_stamp, &write_stamp);
                     prop_assert_eq!(parsed_checksums.as_ref(), Some(&checksums));
                 }
-                StoreMeta::Legacy => {
-                    prop_assert!(false, "expected v1 meta");
-                }
+                StoreMeta::Legacy | StoreMeta::V1 { .. } => prop_assert!(false, "expected v2 meta"),
             }
         }
     }
@@ -2304,7 +2527,7 @@ mod tests {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
-        value["format_version"] = serde_json::Value::from(2);
+        value["format_version"] = serde_json::Value::from(3);
         let mutated = serde_json::to_vec(&value).expect("json");
 
         let err = parse_supported_meta(&mutated).expect_err("unsupported version should fail");
@@ -2316,6 +2539,7 @@ mod tests {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        value["format_version"] = serde_json::Value::from(1);
         value
             .as_object_mut()
             .expect("object")
@@ -2332,6 +2556,7 @@ mod tests {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
         let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        value["format_version"] = serde_json::Value::from(1);
         let obj = value.as_object_mut().expect("object");
         obj.remove("state_sha256");
         obj.remove("tombstones_sha256");
@@ -2374,7 +2599,10 @@ mod tests {
     fn parse_supported_meta_accepts_v1_with_checksums() {
         let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
         let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
-        let parsed = parse_supported_meta(&bytes).expect("parse meta");
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        value["format_version"] = serde_json::Value::from(1);
+        let mutated = serde_json::to_vec(&value).expect("json");
+        let parsed = parse_supported_meta(&mutated).expect("parse meta");
         match parsed.meta() {
             StoreMeta::V1 {
                 root_slug,
@@ -2388,7 +2616,41 @@ mod tests {
                 assert_eq!(last_write_stamp, &None);
                 assert_eq!(parsed_checksums.as_ref(), Some(&checksums));
             }
-            StoreMeta::Legacy => panic!("expected v1 meta"),
+            StoreMeta::Legacy | StoreMeta::V2 { .. } => panic!("expected v1 meta"),
         }
+    }
+
+    #[test]
+    fn parse_supported_meta_accepts_v2_with_checksums() {
+        let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
+        let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
+        let parsed = parse_supported_meta(&bytes).expect("parse meta");
+        match parsed.meta() {
+            StoreMeta::V2 {
+                root_slug,
+                last_write_stamp,
+                checksums: parsed_checksums,
+            } => {
+                assert_eq!(
+                    root_slug,
+                    &Some(BeadSlug::parse("valid-slug").expect("slug"))
+                );
+                assert_eq!(last_write_stamp, &None);
+                assert_eq!(parsed_checksums.as_ref(), Some(&checksums));
+            }
+            StoreMeta::Legacy | StoreMeta::V1 { .. } => panic!("expected v2 meta"),
+        }
+    }
+
+    #[test]
+    fn parse_current_meta_rejects_legacy_v1() {
+        let checksums = StoreChecksums::from_bytes(b"state", b"tombs", b"deps", Some(b"notes"));
+        let bytes = serialize_meta(Some("valid-slug"), None, &checksums).expect("meta bytes");
+        let mut value: serde_json::Value = serde_json::from_slice(&bytes).expect("json");
+        value["format_version"] = serde_json::Value::from(1);
+        let mutated = serde_json::to_vec(&value).expect("json");
+
+        let err = parse_current_meta(&mutated).expect_err("strict current meta should reject v1");
+        assert!(matches!(err, WireError::InvalidValue(_)));
     }
 }

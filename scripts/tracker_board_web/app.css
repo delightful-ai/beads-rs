@@ -1,0 +1,447 @@
+:root {
+  --bg: #f4eee2;
+  --bg-deep: #e7d9bf;
+  --paper: rgba(255, 251, 245, 0.84);
+  --ink: #1f1b16;
+  --muted: #62574c;
+  --line: rgba(54, 42, 27, 0.15);
+  --accent: #ab3f2f;
+  --accent-soft: #f0c0a7;
+  --olive: #576b3d;
+  --warning: #bd7f17;
+  --shadow: 0 22px 60px rgba(59, 41, 22, 0.14);
+  --title-font: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+  --body-font: "Avenir Next", "Segoe UI", "Helvetica Neue", sans-serif;
+  --mono-font: "SF Mono", "Menlo", "Liberation Mono", monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  color: var(--ink);
+  font-family: var(--body-font);
+  background:
+    radial-gradient(circle at top left, rgba(201, 112, 66, 0.22), transparent 32%),
+    radial-gradient(circle at bottom right, rgba(86, 115, 68, 0.22), transparent 26%),
+    linear-gradient(160deg, var(--bg) 0%, #f8f4ee 48%, var(--bg-deep) 100%);
+}
+
+.ambient {
+  position: fixed;
+  border-radius: 999px;
+  filter: blur(40px);
+  opacity: 0.45;
+  pointer-events: none;
+}
+
+.ambient-a {
+  top: 2rem;
+  right: 6rem;
+  width: 16rem;
+  height: 16rem;
+  background: rgba(171, 63, 47, 0.2);
+}
+
+.ambient-b {
+  left: 3rem;
+  bottom: 4rem;
+  width: 18rem;
+  height: 18rem;
+  background: rgba(87, 107, 61, 0.18);
+}
+
+.app-shell {
+  position: relative;
+  max-width: 1500px;
+  margin: 0 auto;
+  padding: 2rem 1.3rem 3rem;
+}
+
+.hero,
+.control-strip,
+.create-panel,
+.board-column,
+.comment-form {
+  backdrop-filter: blur(10px);
+}
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 20rem;
+  gap: 1.2rem;
+  padding: 1.5rem;
+  border: 1px solid var(--line);
+  border-radius: 1.8rem;
+  background: linear-gradient(140deg, rgba(255, 252, 248, 0.92), rgba(242, 233, 217, 0.82));
+  box-shadow: var(--shadow);
+}
+
+.eyebrow,
+.panel-kicker {
+  margin: 0 0 0.35rem;
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-family: var(--title-font);
+  font-weight: 700;
+  line-height: 0.96;
+}
+
+h1 {
+  font-size: clamp(2.6rem, 4vw, 4.6rem);
+  letter-spacing: -0.04em;
+}
+
+.lede {
+  max-width: 58rem;
+  margin: 0.8rem 0 0;
+  color: var(--muted);
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+.hero-panel {
+  display: grid;
+  gap: 0.8rem;
+  align-content: start;
+  padding: 1rem;
+  border-radius: 1.3rem;
+  background: rgba(31, 27, 22, 0.06);
+  border: 1px solid rgba(31, 27, 22, 0.08);
+}
+
+.hero-stat {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.hero-label {
+  color: var(--muted);
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+
+.hero-stat strong {
+  font-family: var(--mono-font);
+  font-size: 1.1rem;
+}
+
+.control-strip,
+.create-panel {
+  margin-top: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 1.4rem;
+  background: var(--paper);
+  box-shadow: var(--shadow);
+}
+
+.control-strip,
+.create-form {
+  display: grid;
+  gap: 0.9rem;
+}
+
+.control-strip {
+  grid-template-columns: 2fr 1fr 16rem;
+}
+
+.create-header {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 0.8rem;
+}
+
+.flash-message {
+  min-height: 1.25rem;
+  margin: 0;
+  color: var(--accent);
+  font-size: 0.92rem;
+}
+
+.create-form {
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr) 9rem 10rem;
+  align-items: end;
+}
+
+.field {
+  display: grid;
+  gap: 0.38rem;
+}
+
+.field-wide {
+  grid-column: span 2;
+}
+
+.field span {
+  color: var(--muted);
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+input,
+select,
+textarea,
+button {
+  font: inherit;
+}
+
+input,
+select,
+textarea {
+  width: 100%;
+  padding: 0.72rem 0.8rem;
+  border: 1px solid rgba(61, 49, 34, 0.16);
+  border-radius: 0.95rem;
+  background: rgba(255, 255, 255, 0.74);
+  color: var(--ink);
+  transition: border-color 120ms ease, transform 120ms ease, box-shadow 120ms ease;
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: rgba(171, 63, 47, 0.46);
+  box-shadow: 0 0 0 4px rgba(171, 63, 47, 0.12);
+}
+
+button {
+  cursor: pointer;
+  border: 0;
+  border-radius: 999px;
+  padding: 0.8rem 1.1rem;
+  font-weight: 700;
+  transition: transform 120ms ease, box-shadow 120ms ease, opacity 120ms ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+}
+
+button:disabled {
+  opacity: 0.55;
+  cursor: wait;
+  transform: none;
+}
+
+.primary-button {
+  color: #fff6f2;
+  background: linear-gradient(135deg, var(--accent), #8a291f);
+  box-shadow: 0 10px 28px rgba(138, 41, 31, 0.24);
+}
+
+.ghost-button {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.68);
+  border: 1px solid rgba(61, 49, 34, 0.12);
+}
+
+.board {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(5, minmax(16rem, 1fr));
+  margin-top: 1rem;
+  padding-bottom: 1rem;
+  overflow-x: auto;
+}
+
+.board-column {
+  display: grid;
+  gap: 0.8rem;
+  align-content: start;
+  min-height: 24rem;
+  padding: 1rem;
+  border: 1px solid var(--line);
+  border-radius: 1.5rem;
+  background: rgba(255, 249, 242, 0.72);
+  box-shadow: var(--shadow);
+}
+
+.column-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.8rem;
+  align-items: center;
+}
+
+.column-head h2 {
+  font-size: 1.45rem;
+}
+
+.column-count {
+  min-width: 2rem;
+  padding: 0.25rem 0.55rem;
+  border-radius: 999px;
+  text-align: center;
+  font-family: var(--mono-font);
+  background: rgba(31, 27, 22, 0.08);
+}
+
+.issue-card {
+  display: grid;
+  gap: 0.8rem;
+  padding: 1rem;
+  border-radius: 1.25rem;
+  border: 1px solid rgba(54, 42, 27, 0.1);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(247, 240, 229, 0.92));
+  box-shadow: 0 14px 28px rgba(61, 49, 34, 0.08);
+}
+
+.issue-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.issue-id {
+  margin: 0 0 0.35rem;
+  color: var(--muted);
+  font-family: var(--mono-font);
+  font-size: 0.76rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.issue-title {
+  font-size: 1.2rem;
+  line-height: 1.06;
+}
+
+.priority-pill {
+  align-self: start;
+  padding: 0.28rem 0.6rem;
+  border-radius: 999px;
+  color: #fffaf3;
+  background: linear-gradient(135deg, var(--warning), #8e5f10);
+  font-family: var(--mono-font);
+  font-size: 0.78rem;
+}
+
+.issue-description,
+.blocked-by {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.42;
+}
+
+.issue-meta {
+  display: grid;
+  gap: 0.55rem;
+}
+
+.labels {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+}
+
+.label-pill {
+  padding: 0.25rem 0.5rem;
+  border-radius: 999px;
+  color: var(--olive);
+  background: rgba(87, 107, 61, 0.14);
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.issue-actions {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.issue-actions label {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.issue-actions span {
+  color: var(--muted);
+  font-size: 0.74rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.comment-dialog {
+  width: min(38rem, calc(100vw - 2rem));
+  border: 1px solid var(--line);
+  border-radius: 1.4rem;
+  padding: 0;
+  background: rgba(255, 248, 240, 0.98);
+  box-shadow: 0 24px 90px rgba(31, 27, 22, 0.24);
+}
+
+.comment-dialog::backdrop {
+  background: rgba(35, 25, 17, 0.32);
+  backdrop-filter: blur(5px);
+}
+
+.comment-form {
+  display: grid;
+  gap: 1rem;
+  padding: 1.2rem;
+}
+
+.comment-form menu {
+  display: flex;
+  justify-content: end;
+  gap: 0.7rem;
+  padding: 0;
+  margin: 0;
+}
+
+.empty-column {
+  margin: 0;
+  color: var(--muted);
+  font-style: italic;
+}
+
+@media (max-width: 1100px) {
+  .hero,
+  .control-strip,
+  .create-form {
+    grid-template-columns: 1fr;
+  }
+
+  .field-wide {
+    grid-column: auto;
+  }
+
+  .board {
+    grid-template-columns: repeat(3, minmax(16rem, 1fr));
+  }
+}
+
+@media (max-width: 720px) {
+  .app-shell {
+    padding: 1rem 0.8rem 2rem;
+  }
+
+  .hero {
+    padding: 1rem;
+  }
+
+  .board {
+    grid-template-columns: 1fr;
+  }
+}

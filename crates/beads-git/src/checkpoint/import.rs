@@ -1060,10 +1060,10 @@ mod tests {
     use uuid::Uuid;
 
     use crate::checkpoint::{CheckpointFileKind, CheckpointShardPath, ManifestFile, shard_name};
-    use crate::core::wire_bead::{WireClaimSnapshot, WireWorkflowSnapshot};
+    use crate::core::wire_bead::WireClaimSnapshot;
     use crate::core::{
-        ActorId, BeadId, BeadType, CanonicalState, CheckpointContentSha256, Dvv, NamespaceId,
-        Priority, ReplicaId, StoreEpoch, StoreId,
+        ActorId, BeadId, BeadType, CanonicalState, CheckpointContentSha256, Dvv, IssueStatus,
+        NamespaceId, Priority, ReplicaId, StoreEpoch, StoreId,
     };
     use crate::wire::{serialize_deps, serialize_state, serialize_tombstones};
 
@@ -1120,7 +1120,8 @@ mod tests {
             external_ref: None,
             source_repo: None,
             estimated_minutes: None,
-            workflow: WireWorkflowSnapshot::Open,
+            status: IssueStatus::Todo,
+            closed_on_branch: None,
             claim: WireClaimSnapshot::unclaimed(),
             notes: Vec::new(),
             at: WireStamp(1, 0),

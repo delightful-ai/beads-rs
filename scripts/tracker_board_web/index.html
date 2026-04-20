@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Beads Tracker Board</title>
+    <link rel="stylesheet" href="/app.css">
+  </head>
+  <body>
+    <div class="ambient ambient-a"></div>
+    <div class="ambient ambient-b"></div>
+
+    <main class="app-shell">
+      <header class="hero">
+        <div>
+          <p class="eyebrow">Beads HTTP Tracker</p>
+          <h1>Board Control Room</h1>
+          <p class="lede">
+            A browserable board for the Symphony-style tracker surface, backed by
+            the daemon RPC instead of a separate app-only schema.
+          </p>
+        </div>
+
+        <section class="hero-panel">
+          <div class="hero-stat">
+            <span class="hero-label">Upstream</span>
+            <strong id="health-status">Checking</strong>
+          </div>
+          <div class="hero-stat">
+            <span class="hero-label">Issues</span>
+            <strong id="issue-count">0</strong>
+          </div>
+          <button id="refresh-button" class="ghost-button" type="button">Refresh</button>
+        </section>
+      </header>
+
+      <section class="control-strip">
+        <label class="field field-wide">
+          <span>Repo</span>
+          <input id="repo-input" type="text" placeholder="/path/to/repo">
+        </label>
+        <label class="field">
+          <span>Search</span>
+          <input id="search-input" type="search" placeholder="title, id, label">
+        </label>
+        <label class="field">
+          <span>Status Focus</span>
+          <select id="status-filter">
+            <option value="">All statuses</option>
+          </select>
+        </label>
+      </section>
+
+      <section class="create-panel">
+        <div class="create-header">
+          <div>
+            <p class="panel-kicker">Create</p>
+            <h2>Seed New Work</h2>
+          </div>
+          <p id="flash-message" class="flash-message" aria-live="polite"></p>
+        </div>
+        <form id="create-form" class="create-form">
+          <label class="field field-wide">
+            <span>Title</span>
+            <input name="title" type="text" required placeholder="Board demo issue">
+          </label>
+          <label class="field field-wide">
+            <span>Description</span>
+            <textarea
+              name="description"
+              rows="3"
+              placeholder="What matters about this issue?"
+            ></textarea>
+          </label>
+          <label class="field">
+            <span>Priority</span>
+            <select name="priority">
+              <option value="0">P0</option>
+              <option value="1">P1</option>
+              <option value="2" selected>P2</option>
+              <option value="3">P3</option>
+              <option value="4">P4</option>
+            </select>
+          </label>
+          <button class="primary-button" type="submit">Create Issue</button>
+        </form>
+      </section>
+
+      <section id="board" class="board" aria-live="polite"></section>
+    </main>
+
+    <dialog id="comment-dialog" class="comment-dialog">
+      <form method="dialog" class="comment-form">
+        <header>
+          <p class="panel-kicker">Tracker Comment</p>
+          <h2 id="comment-title">Issue</h2>
+        </header>
+        <textarea id="comment-text" rows="8" placeholder="## Codex Workpad"></textarea>
+        <menu>
+          <button type="button" class="ghost-button" id="comment-cancel">Cancel</button>
+          <button type="button" class="primary-button" id="comment-save">Add Comment</button>
+        </menu>
+      </form>
+    </dialog>
+
+    <template id="issue-card-template">
+      <article class="issue-card">
+        <header class="issue-head">
+          <div>
+            <p class="issue-id"></p>
+            <h3 class="issue-title"></h3>
+          </div>
+          <span class="priority-pill"></span>
+        </header>
+        <p class="issue-description"></p>
+        <div class="issue-meta">
+          <div class="labels"></div>
+          <p class="blocked-by"></p>
+        </div>
+        <div class="issue-actions">
+          <label>
+            <span>Move To</span>
+            <select class="status-select"></select>
+          </label>
+          <button type="button" class="primary-button move-button">Apply</button>
+          <button type="button" class="ghost-button comment-button">Comment</button>
+        </div>
+      </article>
+    </template>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

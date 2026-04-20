@@ -369,7 +369,10 @@ pub(super) fn op_result_from_delta(
         ParsedMutationRequest::Update { id, .. }
         | ParsedMutationRequest::AddLabels { id, .. }
         | ParsedMutationRequest::RemoveLabels { id, .. }
-        | ParsedMutationRequest::SetParent { id, .. } => Ok(OpResult::Updated { id: id.clone() }),
+        | ParsedMutationRequest::SetParent { id, .. }
+        | ParsedMutationRequest::TrackerTransition { id, .. } => {
+            Ok(OpResult::Updated { id: id.clone() })
+        }
         ParsedMutationRequest::Close { id, .. } => Ok(OpResult::Closed { id: id.clone() }),
         ParsedMutationRequest::Reopen { id } => Ok(OpResult::Reopened { id: id.clone() }),
         ParsedMutationRequest::Delete { id, .. } => Ok(OpResult::Deleted { id: id.clone() }),
@@ -382,6 +385,14 @@ pub(super) fn op_result_from_delta(
             to: to.clone(),
         }),
         ParsedMutationRequest::AddNote { id, .. } => {
+            let bead_id = id.clone();
+            let note_id = find_note_id(delta, &bead_id)?;
+            Ok(OpResult::NoteAdded {
+                bead_id,
+                note_id: note_id.as_str().to_string(),
+            })
+        }
+        ParsedMutationRequest::TrackerComment { id, .. } => {
             let bead_id = id.clone();
             let note_id = find_note_id(delta, &bead_id)?;
             Ok(OpResult::NoteAdded {

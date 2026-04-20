@@ -18,8 +18,8 @@ pub use error::{SyncError, WireError};
 pub use observe::{NoopSyncObserver, SyncObserver};
 pub use paths::init_data_dir_override;
 pub use sync::{
-    DivergenceInfo, LoadedStore, LoadedStoreMigration, MigrateStoreToV1Outcome, SyncDiff,
-    SyncOutcome, SyncProcess, init_beads_ref, load_state, load_store, migrate_store_ref_to_v1,
+    DivergenceInfo, LoadedStore, LoadedStoreMigration, MigrateStoreToV2Outcome, SyncDiff,
+    SyncOutcome, SyncProcess, init_beads_ref, load_state, load_store, migrate_store_ref_to_v2,
     read_state_at_oid, read_state_at_oid_for_migration, sync_with_retry,
     sync_with_retry_with_observer,
 };

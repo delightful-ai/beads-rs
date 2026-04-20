@@ -456,13 +456,13 @@ mod tests {
     use crate::core::{
         ActorId, Applied, Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, CanonicalState,
         CheckpointContentSha256, Claim, ContentHash, DepKey, DepKind, Durable, EventBody,
-        EventKindV1, HeadStatus, HlcMax, Limits, Lww, NamespaceId, NamespacePolicies,
+        EventKindV1, HeadStatus, HlcMax, IssueStatus, Limits, Lww, NamespaceId, NamespacePolicies,
         NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaDurabilityRole,
         ReplicaEntry, ReplicaId, ReplicaRoster, ReplicateMode, SegmentId, Seq0, Seq1, Sha256,
         Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, StoreState,
         TxnDeltaV1, TxnId, TxnOpV1, TxnV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch,
-        WireDepAddV1, WireDotV1, WireNoteV1, WireStamp, Workflow, WriteStamp,
-        encode_event_body_canonical, hash_event_body, sha256_bytes,
+        WireDepAddV1, WireDotV1, WireNoteV1, WireStamp, WriteStamp, encode_event_body_canonical,
+        hash_event_body, sha256_bytes,
     };
     use crate::git::checkpoint::{
         CHECKPOINT_FORMAT_VERSION, CheckpointExport, CheckpointExportInput, CheckpointFileKind,
@@ -1355,7 +1355,8 @@ mod tests {
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
-            workflow: Lww::new(Workflow::Open, stamp.clone()),
+            status: Lww::new(IssueStatus::Todo, stamp.clone()),
+            closed_on_branch: Lww::new(None, stamp.clone()),
             claim: Lww::new(Claim::default(), stamp),
         };
         Bead::new(core, fields)
