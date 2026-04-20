@@ -19,6 +19,8 @@ We use `jj` (jujutsu), not git directly. jj has different mental model—interna
 - Rewrites are trivial (`jj squash`, `jj rebase`, etc.)
 - You can reorganize history later, so capture progress NOW
 
+`bd` repo discovery now works from non-colocated `jj workspace add` checkouts too. If the checkout only has `.jj/`, beads resolves the backing Git repo automatically instead of requiring you to bounce back to the colocated root for tracker commands.
+
 ### JJ Rhythm
 
 **Commits are checkpoints, not milestones.**
