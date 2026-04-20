@@ -43,6 +43,7 @@ const ALLOWED_EDGES: &[&str] = &[
     "beads-rs -> beads-git",
     "beads-rs -> beads-daemon",
     "beads-rs -> beads-daemon-core",
+    "beads-rs -> beads-http",
 ];
 
 fn dependency_kind_allowed(dep_kind: Option<&str>) -> bool {

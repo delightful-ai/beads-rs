@@ -22,7 +22,7 @@ use super::git_worker::GitOp;
 use super::ipc::{
     AddNotePayload, ClaimPayload, ClosePayload, CreatePayload, DeletePayload, DepPayload,
     IdPayload, LabelsPayload, LeasePayload, MutationMeta, OpResponse, ParentPayload, Response,
-    ResponseExt, ResponsePayload, UpdatePayload,
+    ResponseExt, ResponsePayload, TrackerCommentPayload, TrackerTransitionPayload, UpdatePayload,
 };
 use super::mutation_engine::{
     DotAllocator, EventDraft, IdContext, MutationContext, MutationEngine, ParsedMutationRequest,
@@ -733,6 +733,38 @@ impl Daemon {
         )
     }
 
+    /// Transition a bead through the tracker-facing state model.
+    pub(crate) fn apply_tracker_transition(
+        &mut self,
+        repo: &Path,
+        meta: MutationMeta,
+        payload: TrackerTransitionPayload,
+        git_tx: &Sender<GitOp>,
+    ) -> HandleOutcome {
+        self.apply_mutation_request_with(
+            repo,
+            meta,
+            |_actor| ParsedMutationRequest::parse_tracker_transition(payload),
+            git_tx,
+        )
+    }
+
+    /// Add a tracker-facing comment/workpad note.
+    pub(crate) fn apply_tracker_comment(
+        &mut self,
+        repo: &Path,
+        meta: MutationMeta,
+        payload: TrackerCommentPayload,
+        git_tx: &Sender<GitOp>,
+    ) -> HandleOutcome {
+        self.apply_mutation_request_with(
+            repo,
+            meta,
+            |_actor| ParsedMutationRequest::parse_tracker_comment(payload),
+            git_tx,
+        )
+    }
+
     /// Claim a bead.
     pub(crate) fn apply_claim(
         &mut self,
@@ -799,10 +831,10 @@ mod tests {
     use crate::clock::Clock;
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadType, CanonicalState, Claim, ClientRequestId,
-        DurabilityClass, DurabilityReceipt, EventId, Labels, Limits, Lww, NamespaceId,
+        DurabilityClass, DurabilityReceipt, EventId, IssueStatus, Labels, Limits, Lww, NamespaceId,
         NamespacePolicy, NoteAppendV1, NoteId, Priority, ReplicaDurabilityRole, ReplicaEntry,
         ReplicaId, ReplicaRoster, Seq1, Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta,
-        StoreMetaVersions, TraceId, TxnId, TxnOpV1, WireBeadPatch, WireNoteV1, WireStamp, Workflow,
+        StoreMetaVersions, TraceId, TxnId, TxnOpV1, WireBeadPatch, WireNoteV1, WireStamp,
         WriteStamp,
     };
     use crate::remote::RemoteUrl;
@@ -924,7 +956,8 @@ mod tests {
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
-            workflow: Lww::new(Workflow::Open, stamp.clone()),
+            status: Lww::new(IssueStatus::Todo, stamp.clone()),
+            closed_on_branch: Lww::new(None, stamp.clone()),
             claim: Lww::new(Claim::Unclaimed, stamp),
         };
         let bead = Bead::new(core, fields);

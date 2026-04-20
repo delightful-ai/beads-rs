@@ -14,7 +14,7 @@ use beads_surface::ipc::{EmptyPayload, IpcError, RepoCtx, Request, Response, sen
 
 const CREATE_AFTER_HELP: &str = "Examples:\n  bd create \"Write CLI docs\" -p1 -t task\n  printf 'Detailed context\\n' | bd create \"Fix parser\" --stdin\n  bd create \"Refactor parser\" --body-file notes.md --design-file plan.md\n  bd create --file backlog.md";
 const SHOW_AFTER_HELP: &str = "Examples:\n  bd show beads-rs-k8u3\n  bd show --id beads-rs-k8u3 --id beads-rs-k8u3.5\n  bd show --current\n  bd show beads-rs-k8u3 --refs\n  bd show beads-rs-k8u3 --children\n  bd show beads-rs-k8u3 --short\n  bd help --advanced show";
-const LIST_AFTER_HELP: &str = "Examples:\n  bd list\n  bd list --all --long\n  bd list --parent beads-rs-k8u3 --tree\n  bd list --status open --label cli -L\n  bd list --sort priority:desc";
+const LIST_AFTER_HELP: &str = "Examples:\n  bd list\n  bd list --all --long\n  bd list --parent beads-rs-k8u3 --tree\n  bd list --status todo --label cli -L\n  bd list --sort priority:desc";
 const UPDATE_AFTER_HELP: &str = "Examples:\n  bd update beads-rs-k8u3 --status in_progress --priority 1\n  printf 'Refined description\\n' | bd update beads-rs-k8u3 --stdin\n  bd update beads-rs-k8u3 --body-file notes.md --design-file design.md\n  bd update beads-rs-k8u3 --add-label cli --notes \"help UX pass\"";
 const DEP_AFTER_HELP: &str = "Examples:\n  bd dep add beads-rs-k8u3.2 beads-rs-k8u3.9\n  bd dep beads-rs-k8u3.9 --blocks beads-rs-k8u3.2\n  bd dep beads-rs-k8u3.2 --depends-on beads-rs-k8u3.9\n  bd dep tree beads-rs-k8u3";
 const PRIME_AFTER_HELP: &str = "Examples:\n  bd prime\n  bd prime --mcp\n  bd prime --full --stealth\n  bd prime --export > /tmp/beads-context.txt";
@@ -102,7 +102,7 @@ pub enum Command {
     /// Show a bead.
     #[command(
         visible_alias = "view",
-        long_about = "Show the current state of one or more beads, including notes, dependency relationships, and child beads when that detail is available from the daemon. Use `--current` to resolve the active bead from your current jj change or claimed in-progress work, `--short` for a compact read, `--refs` for reverse references, and `--children` for a child-only view.",
+        long_about = "Show the current status of one or more beads, including notes, dependency relationships, and child beads when that detail is available from the daemon. Use `--current` to resolve the active bead from your current jj change or claimed in-progress work, `--short` for a compact read, `--refs` for reverse references, and `--children` for a child-only view.",
         after_help = SHOW_AFTER_HELP
     )]
     Show(commands::show::ShowArgs),
@@ -110,7 +110,7 @@ pub enum Command {
     /// List beads.
     #[command(
         visible_alias = "ls",
-        long_about = "List beads with optional text search, filters, sorting, and output tweaks. Alias: `ls`. Human-mode `bd list` defaults to open work; add `--all` for the full backlog, `--long` for multi-line detail, and `--tree` with `--parent` for descendant views.",
+        long_about = "List beads with optional text search, filters, sorting, and output tweaks. Alias: `ls`. Human-mode `bd list` defaults to hiding terminal work; add `--all` for the full backlog, `--long` for multi-line detail, and `--tree` with `--parent` for descendant views.",
         after_help = LIST_AFTER_HELP
     )]
     List(commands::list::ListArgs),
@@ -156,7 +156,7 @@ pub enum Command {
 
     /// Update a bead.
     #[command(
-        long_about = "Update bead fields, labels, notes, dependencies, assignee compatibility state, and workflow status in one invocation.",
+        long_about = "Update bead fields, labels, notes, dependencies, assignee lease state, and canonical status in one invocation.",
         after_help = UPDATE_AFTER_HELP
     )]
     Update(commands::update::UpdateArgs),

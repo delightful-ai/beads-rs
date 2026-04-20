@@ -9,6 +9,7 @@ use minicbor::{Decoder, Encoder};
 use sha2::{Digest, Sha256 as Sha2};
 use thiserror::Error;
 
+use super::IssueStatus;
 use super::dep::{DepKey, ParentEdge};
 use super::domain::DepKind;
 use super::identity::{
@@ -23,7 +24,7 @@ use super::watermark::Seq1;
 use super::wire_bead::{
     NoteAppendV1, TxnDeltaV1, TxnOpV1, WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireDotV1,
     WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireLineageStamp, WireNoteV1, WireParentAddV1,
-    WireParentRemoveV1, WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus,
+    WireParentRemoveV1, WirePatch, WireStamp, WireTombstoneV1,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1409,9 +1410,6 @@ fn encode_wire_bead_patch(
     if patch.status.is_some() {
         len += 1;
     }
-    if !patch.closed_reason.is_keep() {
-        len += 1;
-    }
     if !patch.closed_on_branch.is_keep() {
         len += 1;
     }
@@ -1439,10 +1437,6 @@ fn encode_wire_bead_patch(
     if !patch.closed_on_branch.is_keep() {
         enc.str("closed_on_branch")?;
         encode_wire_patch_branch(enc, &patch.closed_on_branch)?;
-    }
-    if !patch.closed_reason.is_keep() {
-        enc.str("closed_reason")?;
-        encode_wire_patch_str(enc, &patch.closed_reason)?;
     }
     if let Some(created_at) = patch.created_at {
         enc.str("created_at")?;
@@ -1524,9 +1518,6 @@ fn decode_wire_bead_patch(
             "closed_on_branch" => {
                 patch.closed_on_branch = decode_wire_patch_branch(dec, limits, "closed_on_branch")?;
             }
-            "closed_reason" => {
-                patch.closed_reason = decode_wire_patch_str(dec, limits)?;
-            }
             "created_at" => {
                 patch.created_at = Some(decode_wire_stamp(dec, limits, depth + 1)?);
             }
@@ -1575,7 +1566,7 @@ fn decode_wire_bead_patch(
                 let raw = decode_text(dec, limits)?;
                 patch.status =
                     Some(
-                        WorkflowStatus::parse(raw).ok_or_else(|| DecodeError::InvalidField {
+                        IssueStatus::parse(raw).ok_or_else(|| DecodeError::InvalidField {
                             field: "status",
                             reason: format!("unknown status {raw}"),
                         })?,
@@ -2975,9 +2966,8 @@ fn map_limit_violation_to_event(err: LimitViolation) -> EventValidationError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum WorkflowPatch {
     NoChange,
-    SetStatus {
-        status: WorkflowStatus,
-        closed_reason: WirePatch<String>,
+    SetState {
+        status: IssueStatus,
         closed_on_branch: WirePatch<BranchName>,
     },
 }
@@ -3255,17 +3245,14 @@ fn workflow_patch_from_wire(patch: &WireBeadPatch) -> Result<WorkflowPatch, Even
     match patch.status {
         None => Ok(WorkflowPatch::NoChange),
         Some(status) => {
-            if patch.closed_reason.is_keep() || patch.closed_on_branch.is_keep() {
+            if patch.closed_on_branch.is_keep() {
                 return Err(EventValidationError::InvalidWorkflowPatch {
                     id: patch.id.clone(),
-                    reason:
-                        "status updates must include explicit closed_reason and closed_on_branch"
-                            .to_string(),
+                    reason: "status updates must include explicit closed_on_branch".to_string(),
                 });
             }
-            Ok(WorkflowPatch::SetStatus {
+            Ok(WorkflowPatch::SetState {
                 status,
-                closed_reason: patch.closed_reason.clone(),
                 closed_on_branch: patch.closed_on_branch.clone(),
             })
         }
@@ -4121,7 +4108,7 @@ mod tests {
     fn validate_rejects_keep_workflow_patch_fields() {
         let mut body = sample_body();
         let mut patch = WireBeadPatch::new(BeadId::parse("bd-test1").unwrap());
-        patch.status = Some(WorkflowStatus::Closed);
+        patch.status = Some(crate::IssueStatus::Done);
         let mut delta = TxnDeltaV1::new();
         delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
         txn_mut(&mut body).delta = delta;
@@ -4137,7 +4124,7 @@ mod tests {
     fn decode_rejects_invalid_workflow_patch() {
         let mut body = sample_body();
         let mut patch = WireBeadPatch::new(BeadId::parse("bd-test1").unwrap());
-        patch.status = Some(WorkflowStatus::Closed);
+        patch.status = Some(crate::IssueStatus::Done);
         let mut delta = TxnDeltaV1::new();
         delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
         txn_mut(&mut body).delta = delta;
@@ -4796,7 +4783,7 @@ mod tests {
     #[test]
     fn validated_mutation_command_rejects_invalid_workflow_patch() {
         let mut patch = WireBeadPatch::new(BeadId::parse("bd-test1").unwrap());
-        patch.status = Some(WorkflowStatus::Closed);
+        patch.status = Some(crate::IssueStatus::Done);
 
         let mut delta = TxnDeltaV1::new();
         delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();

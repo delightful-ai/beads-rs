@@ -291,6 +291,22 @@ pub enum Request {
         payload: AddNotePayload,
     },
 
+    /// Transition a bead through the tracker-facing board state model.
+    TrackerTransition {
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: TrackerTransitionPayload,
+    },
+
+    /// Add a tracker-facing comment/workpad note.
+    TrackerComment {
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: TrackerCommentPayload,
+    },
+
     /// Claim a bead.
     Claim {
         #[serde(flatten)]
@@ -528,6 +544,8 @@ impl Request {
             Request::AddDep { ctx, .. } => info_from_mutation("add_dep", ctx),
             Request::RemoveDep { ctx, .. } => info_from_mutation("remove_dep", ctx),
             Request::AddNote { ctx, .. } => info_from_mutation("add_note", ctx),
+            Request::TrackerTransition { ctx, .. } => info_from_mutation("tracker_transition", ctx),
+            Request::TrackerComment { ctx, .. } => info_from_mutation("tracker_comment", ctx),
             Request::Claim { ctx, .. } => info_from_mutation("claim", ctx),
             Request::Unclaim { ctx, .. } => info_from_mutation("unclaim", ctx),
             Request::ExtendClaim { ctx, .. } => info_from_mutation("extend_claim", ctx),

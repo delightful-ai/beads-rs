@@ -7,7 +7,7 @@ use clap::Args;
 use super::common::{fmt_issue_ref, fmt_labels, fmt_wall_ms};
 use super::{CommandResult, print_ok};
 use crate::filters::{CommonFilterArgs, apply_common_filters};
-use crate::parsers::{parse_sort, parse_status};
+use crate::parsers::parse_sort;
 use crate::runtime::{CliRuntimeCtx, send};
 use crate::validation::{normalize_bead_id_for, validation_error};
 
@@ -16,7 +16,7 @@ pub struct ListArgs {
     #[command(flatten)]
     pub common: CommonFilterArgs,
 
-    /// Include closed beads instead of defaulting to open work.
+    /// Include terminal beads instead of hiding them by default.
     #[arg(long)]
     pub all: bool,
 
@@ -72,15 +72,7 @@ pub fn handle_list(ctx: &CliRuntimeCtx, args: ListArgs) -> CommandResult<()> {
         return Err(validation_error("all", "--all cannot be combined with --status").into());
     }
 
-    if let Some(status) = args.common.status.as_deref() {
-        filters.status = Some(parse_status(status));
-    } else if args.all {
-        filters.status = Some(String::from("all"));
-    } else if ctx.json {
-        filters.status = None;
-    } else {
-        filters.status = Some(String::from("open"));
-    }
+    filters.hide_terminal = !args.all && !ctx.json;
 
     filters.limit = args.limit;
     filters.search = search;
@@ -263,7 +255,7 @@ fn render_tree_node(out: &mut String, node: &TreeNode, show_labels: bool, depth:
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beads_core::{BeadType, NamespaceId, WorkflowStatus, WriteStamp};
+    use beads_core::{BeadType, IssueStatus, NamespaceId, WriteStamp};
 
     fn sample_summary(namespace: &str, id: &str) -> beads_api::IssueSummary {
         beads_api::IssueSummary {
@@ -273,7 +265,7 @@ mod tests {
             description: String::new(),
             design: None,
             acceptance_criteria: None,
-            status: WorkflowStatus::Open,
+            status: IssueStatus::Todo,
             priority: 1,
             issue_type: BeadType::Task,
             labels: Vec::new(),
@@ -293,7 +285,7 @@ mod tests {
     fn render_issue_list_includes_namespace() {
         let summary = sample_summary("wf", "bd-123");
         let output = render_issue_list_opts(&[summary], false);
-        assert_eq!(output, "wf/bd-123 [P1] [task] open - Title");
+        assert_eq!(output, "wf/bd-123 [P1] [task] Todo - Title");
     }
 
     #[test]
@@ -301,7 +293,7 @@ mod tests {
         let mut summary = sample_summary("core", "bd-123");
         summary.description = "Detailed description".to_string();
         let output = render_issue_list_long(&[summary], false);
-        assert!(output.contains("bd-123 [P1] [task] open - Title"));
+        assert!(output.contains("bd-123 [P1] [task] Todo - Title"));
         assert!(output.contains("Description: Detailed description"));
     }
 
@@ -316,7 +308,7 @@ mod tests {
         };
         let output = render_issue_tree("bd-123", &[child], false);
         assert!(output.contains("Children of bd-123:"));
-        assert!(output.contains("- core/bd-123.1 [P1] [task] open - Title"));
-        assert!(output.contains("  - core/bd-123.1.1 [P1] [task] open - Title"));
+        assert!(output.contains("- core/bd-123.1 [P1] [task] Todo - Title"));
+        assert!(output.contains("  - core/bd-123.1.1 [P1] [task] Todo - Title"));
     }
 }

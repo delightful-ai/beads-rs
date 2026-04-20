@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use thiserror::Error;
 
 use super::bead::{Bead, BeadCore, BeadFields};
-use super::composite::{Claim, Closure, Note, Workflow};
+use super::composite::{Claim, IssueStatus, Note};
 use super::crdt::Lww;
 use super::domain::{BeadType, Priority};
 use super::event::{
@@ -46,6 +46,8 @@ pub enum ApplyError {
     MissingCreationStamp { id: BeadId },
     #[error("invalid claim patch for {id}: {reason}")]
     InvalidClaimPatch { id: BeadId, reason: String },
+    #[error("invalid status patch for {id}: {reason}")]
+    InvalidStatusPatch { id: BeadId, reason: String },
     #[error(transparent)]
     InvalidDependency(#[from] super::error::InvalidDependency),
 }
@@ -407,14 +409,20 @@ fn fields_from_patch(
         );
     }
 
-    if let Some(status) = patch.status {
-        let workflow_value = build_workflow(
-            status,
-            &patch.closed_reason,
-            &patch.closed_on_branch,
-            &fields.workflow.value,
-        );
-        fields.workflow = Lww::new(workflow_value, event_stamp.clone());
+    let status_changed = patch.status.is_some();
+    let status_value = patch.status.unwrap_or(fields.status.value);
+    let closed_on_branch_value = build_closed_on_branch(
+        &patch.id,
+        status_value,
+        &patch.closed_on_branch,
+        fields.closed_on_branch.value.clone(),
+        status_changed,
+    )?;
+    if status_changed {
+        fields.status = Lww::new(status_value, event_stamp.clone());
+    }
+    if status_changed || !patch.closed_on_branch.is_keep() {
+        fields.closed_on_branch = Lww::new(closed_on_branch_value, event_stamp.clone());
     }
 
     if !patch.assignee.is_keep() || !patch.assignee_expires.is_keep() {
@@ -495,14 +503,24 @@ fn apply_patch_to_bead(
         );
     }
 
-    if let Some(status) = patch.status {
-        let workflow_value = build_workflow(
-            status,
-            &patch.closed_reason,
-            &patch.closed_on_branch,
-            &bead.fields.workflow.value,
+    let status_changed = patch.status.is_some();
+    let status_value = patch.status.unwrap_or(bead.fields.status.value);
+    let closed_on_branch_value = build_closed_on_branch(
+        bead.id(),
+        status_value,
+        &patch.closed_on_branch,
+        bead.fields.closed_on_branch.value.clone(),
+        status_changed,
+    )?;
+    if status_changed {
+        changed |= update_lww(&mut bead.fields.status, status_value, event_stamp);
+    }
+    if status_changed || !patch.closed_on_branch.is_keep() {
+        changed |= update_lww(
+            &mut bead.fields.closed_on_branch,
+            closed_on_branch_value,
+            event_stamp,
         );
-        changed |= update_lww(&mut bead.fields.workflow, workflow_value, event_stamp);
     }
 
     if !patch.assignee.is_keep() || !patch.assignee_expires.is_keep() {
@@ -518,24 +536,40 @@ fn apply_patch_to_bead(
     Ok(changed)
 }
 
-fn build_workflow(
-    status: super::wire_bead::WorkflowStatus,
-    closed_reason: &WirePatch<String>,
+fn build_closed_on_branch(
+    bead_id: &BeadId,
+    status: IssueStatus,
     closed_on_branch: &WirePatch<BranchName>,
-    existing: &Workflow,
-) -> Workflow {
-    match status {
-        super::wire_bead::WorkflowStatus::Open => Workflow::Open,
-        super::wire_bead::WorkflowStatus::InProgress => Workflow::InProgress,
-        super::wire_bead::WorkflowStatus::Closed => {
-            let (existing_reason, existing_branch) = match existing {
-                Workflow::Closed(c) => (c.reason.clone(), c.on_branch.clone()),
-                Workflow::Open | Workflow::InProgress => (None, None),
-            };
-            let reason = apply_patch_option(closed_reason, existing_reason);
-            let branch = apply_patch_option(closed_on_branch, existing_branch);
-            Workflow::Closed(Closure::new(reason, branch))
-        }
+    existing: Option<BranchName>,
+    status_changed: bool,
+) -> Result<Option<BranchName>, ApplyError> {
+    let next = if !closed_on_branch.is_keep() {
+        apply_patch_option(closed_on_branch, existing)
+    } else if status_changed {
+        None
+    } else {
+        existing
+    };
+
+    validate_closed_on_branch(bead_id, status, next.clone())?;
+    Ok(next)
+}
+
+fn validate_closed_on_branch(
+    bead_id: &BeadId,
+    status: IssueStatus,
+    closed_on_branch: Option<BranchName>,
+) -> Result<(), ApplyError> {
+    match (status.is_terminal(), closed_on_branch) {
+        (true, _) | (false, None) => Ok(()),
+        (false, Some(branch)) => Err(ApplyError::InvalidStatusPatch {
+            id: bead_id.clone(),
+            reason: format!(
+                "non-terminal status `{}` cannot carry closed_on_branch `{}`",
+                status.as_str(),
+                branch.as_str()
+            ),
+        }),
     }
 }
 
@@ -691,7 +725,8 @@ fn default_fields(stamp: Stamp) -> BeadFields {
         external_ref: Lww::new(None, stamp.clone()),
         source_repo: Lww::new(None, stamp.clone()),
         estimated_minutes: Lww::new(None, stamp.clone()),
-        workflow: Lww::new(Workflow::Open, stamp.clone()),
+        status: Lww::new(IssueStatus::Todo, stamp.clone()),
+        closed_on_branch: Lww::new(None, stamp.clone()),
         claim: Lww::new(Claim::Unclaimed, stamp),
     }
 }
@@ -883,6 +918,42 @@ mod tests {
             }
             Claim::Unclaimed => panic!("expected claimed"),
         }
+    }
+
+    #[test]
+    fn status_patch_reopen_clears_closed_on_branch() {
+        let mut state = CanonicalState::new();
+        let bead_id = BeadId::parse("bd-tracker-active").unwrap();
+        let create = bead_upsert_event(
+            bead_id.clone(),
+            WireStamp(10, 1),
+            actor_id("alice"),
+            "title",
+            10,
+        );
+        apply_event(&mut state, &create).unwrap();
+
+        let mut active_patch = WireBeadPatch::new(bead_id.clone());
+        active_patch.status = Some(super::super::IssueStatus::Done);
+        active_patch.closed_on_branch = WirePatch::Set(BranchName::parse("main").unwrap());
+        let mut active_delta = TxnDeltaV1::new();
+        active_delta
+            .insert(TxnOpV1::BeadUpsert(Box::new(active_patch)))
+            .unwrap();
+        apply_event(&mut state, &event_with_delta(active_delta, 20)).unwrap();
+
+        let mut reopen_patch = WireBeadPatch::new(bead_id.clone());
+        reopen_patch.status = Some(super::super::IssueStatus::InProgress);
+        reopen_patch.closed_on_branch = WirePatch::Clear;
+        let mut reopen_delta = TxnDeltaV1::new();
+        reopen_delta
+            .insert(TxnOpV1::BeadUpsert(Box::new(reopen_patch)))
+            .unwrap();
+        apply_event(&mut state, &event_with_delta(reopen_delta, 30)).unwrap();
+
+        let bead = state.get_live(&bead_id).expect("bead");
+        assert_eq!(bead.fields.status.value, IssueStatus::InProgress);
+        assert_eq!(bead.fields.closed_on_branch.value, None);
     }
 
     #[test]

@@ -18,6 +18,7 @@ This document is the canonical dependency policy for internal crate boundaries.
 `beads-bootstrap`, `beads-cli`, `beads-git`, `beads-daemon`, `beads-daemon-core`, and `beads-http` are first-class workspace crates.
 `beads-rs` is the tiny assembly crate/package entrypoint and depends on the leaf crates it assembles.
 It is not a compatibility umbrella or a reusable dependency surface for other internal crates.
+That includes assembly-test-only dev-dependencies when `crates/beads-rs/tests/**` must exercise a shipped product seam such as the HTTP transport over the real daemon boundary.
 
 ## Allowed edges
 
@@ -50,6 +51,7 @@ Only the directed edges below are allowed:
 - `beads-rs -> beads-git`
 - `beads-rs -> beads-daemon`
 - `beads-rs -> beads-daemon-core`
+- `beads-rs -> beads-http`
 
 ## Forbidden edges
 

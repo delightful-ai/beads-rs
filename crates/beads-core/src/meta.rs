@@ -9,14 +9,14 @@ use crate::BeadSlug;
 
 /// Format version for wire format.
 ///
-/// Current version is 1.
+/// Current version is 2.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct FormatVersion(u32);
 
 impl FormatVersion {
     /// Current format version.
-    pub const CURRENT: FormatVersion = FormatVersion(1);
+    pub const CURRENT: FormatVersion = FormatVersion(2);
 
     pub fn new(v: u32) -> Self {
         Self(v)
@@ -28,7 +28,7 @@ impl FormatVersion {
 
     /// Check if this version is compatible with current.
     ///
-    /// Currently only version 1 is supported.
+    /// Currently only version 2 is supported.
     pub fn is_compatible(&self) -> bool {
         self.0 == Self::CURRENT.0
     }
@@ -87,15 +87,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn current_version_is_1() {
-        assert_eq!(FormatVersion::CURRENT.get(), 1);
+    fn current_version_is_2() {
+        assert_eq!(FormatVersion::CURRENT.get(), 2);
     }
 
     #[test]
     fn version_compatibility() {
-        assert!(FormatVersion::new(1).is_compatible());
+        assert!(FormatVersion::new(2).is_compatible());
         assert!(!FormatVersion::new(0).is_compatible());
-        assert!(!FormatVersion::new(2).is_compatible());
+        assert!(!FormatVersion::new(1).is_compatible());
+        assert!(!FormatVersion::new(3).is_compatible());
     }
 
     #[test]

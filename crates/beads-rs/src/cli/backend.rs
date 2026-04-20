@@ -89,7 +89,7 @@ impl CliHostBackend for BeadsRsCliBackend {
         let repo = Repository::discover(&request.repo)
             .map_err(|err| beads_git::SyncError::OpenRepo(request.repo.clone(), err))?;
 
-        let migrated = match sync::migrate_store_ref_to_v1(
+        let migrated = match sync::migrate_store_ref_to_v2(
             &repo,
             &request.repo,
             request.dry_run,
@@ -122,6 +122,15 @@ impl CliHostBackend for BeadsRsCliBackend {
             Err(err) => return Err(err.into()),
         };
 
+        let mut warnings = migrated.warnings;
+        let previous_store_format =
+            beads_core::StoreMetaVersions::STORE_FORMAT_VERSION.saturating_sub(1);
+        if previous_store_format > 0 {
+            warnings.push(format!(
+                "local daemon-store caches at store_format_version {previous_store_format} will reset and rebuild from repo truth on next load"
+            ));
+        }
+
         Ok(MigrateToOutcome {
             dry_run: request.dry_run,
             from_effective_version: migrated.from_effective_version,
@@ -136,7 +145,7 @@ impl CliHostBackend for BeadsRsCliBackend {
                 sync::MigratePushDisposition::SkippedNoPush => PushDisposition::SkippedNoPush,
                 sync::MigratePushDisposition::SkippedNoRemote => PushDisposition::SkippedNoRemote,
             },
-            warnings: migrated.warnings,
+            warnings,
         })
     }
 
@@ -422,10 +431,7 @@ fn read_meta_probe(repo: &Repository, tree: &git2::Tree<'_>) -> Result<Option<(u
         return Ok(None);
     };
     let parsed = wire::parse_supported_meta(&bytes).map_err(beads_git::SyncError::from)?;
-    let format_version = match parsed.meta() {
-        wire::StoreMeta::Legacy => 0,
-        wire::StoreMeta::V1 { .. } => 1,
-    };
+    let format_version = parsed.meta().format_version().unwrap_or(0);
     let checksums_present = parsed
         .checksums()
         .is_some_and(|checksums| checksums.notes.is_some());

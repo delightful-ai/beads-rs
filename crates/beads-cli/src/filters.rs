@@ -2,7 +2,7 @@ use beads_core::{ActorId, BeadType, CoreError, Priority};
 use beads_surface::Filters;
 use clap::Args;
 
-use super::parsers::{parse_bead_type, parse_priority, parse_time_ms};
+use super::parsers::{parse_bead_type, parse_priority, parse_status, parse_time_ms};
 
 pub type Result<T> = std::result::Result<T, FilterError>;
 
@@ -24,9 +24,9 @@ pub fn validation_error(field: impl Into<String>, reason: impl Into<String>) -> 
 
 #[derive(Args, Debug, Clone)]
 pub struct CommonFilterArgs {
-    /// Filter by status (open, in_progress, blocked, closed).
-    #[arg(short = 's', long)]
-    pub status: Option<String>,
+    /// Filter by status (todo, in_progress, human_review, rework, merging, done, cancelled, duplicate).
+    #[arg(short = 's', long, value_parser = parse_status)]
+    pub status: Option<beads_core::IssueStatus>,
 
     /// Filter by priority (0-4).
     #[arg(short = 'p', long, value_parser = parse_priority)]
@@ -106,7 +106,7 @@ pub struct CommonFilterArgs {
 }
 
 pub fn apply_common_filters(args: &CommonFilterArgs, filters: &mut Filters) -> Result<()> {
-    filters.status = args.status.clone();
+    filters.status = args.status;
     filters.priority = args.priority;
     filters.priority_min = args.priority_min;
     filters.priority_max = args.priority_max;

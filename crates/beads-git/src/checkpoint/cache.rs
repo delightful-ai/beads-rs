@@ -409,14 +409,14 @@ mod tests {
         CheckpointExportInput, CheckpointSnapshotInput, build_snapshot, export_checkpoint,
     };
     use crate::core::bead::{BeadCore, BeadFields};
-    use crate::core::composite::{Claim, Workflow};
+    use crate::core::composite::Claim;
     use crate::core::crdt::Lww;
     use crate::core::domain::{BeadType, Priority};
     use crate::core::identity::BeadId;
     use crate::core::time::{Stamp, WriteStamp};
     use crate::core::{
-        ActorId, CanonicalState, ContentHash, Durable, HeadStatus, NamespaceId, ReplicaId, Seq0,
-        StoreEpoch, StoreId, StoreState, Watermarks,
+        ActorId, CanonicalState, ContentHash, Durable, HeadStatus, IssueStatus, NamespaceId,
+        ReplicaId, Seq0, StoreEpoch, StoreId, StoreState, Watermarks,
     };
     use crate::paths;
 
@@ -439,7 +439,8 @@ mod tests {
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
-            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            status: Lww::new(IssueStatus::Todo, stamp.clone()),
+            closed_on_branch: Lww::new(None, stamp.clone()),
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         crate::core::Bead::new(core, fields)

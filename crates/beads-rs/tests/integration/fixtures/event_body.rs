@@ -3,10 +3,9 @@
 use beads_core::BranchName;
 use beads_core::NoteAppendV1;
 use beads_core::{
-    ActorId, BeadId, BeadType, ClientRequestId, EventBody, EventKindV1, HlcMax, NamespaceId,
-    NoteId, Priority, ReplicaId, Seq1, StoreEpoch, StoreId, StoreIdentity, TraceId, TxnDeltaV1,
-    TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch, WireNoteV1, WirePatch, WireStamp,
-    WorkflowStatus,
+    ActorId, BeadId, BeadType, ClientRequestId, EventBody, EventKindV1, HlcMax, IssueStatus,
+    NamespaceId, NoteId, Priority, ReplicaId, Seq1, StoreEpoch, StoreId, StoreIdentity, TraceId,
+    TxnDeltaV1, TxnId, TxnOpV1, TxnV1, WallClock, WireBeadPatch, WireNoteV1, WirePatch, WireStamp,
 };
 use uuid::Uuid;
 
@@ -37,8 +36,7 @@ pub fn sample_bead_patch(seed: u8) -> WireBeadPatch {
     patch.bead_type = Some(BeadType::Task);
     patch.external_ref = WirePatch::Set(format!("ref-{seed:02x}"));
     patch.estimated_minutes = WirePatch::Set(45);
-    patch.status = Some(WorkflowStatus::Open);
-    patch.closed_reason = WirePatch::Clear;
+    patch.status = Some(IssueStatus::Todo);
     patch.closed_on_branch = WirePatch::Clear;
     patch.assignee = WirePatch::Set(actor_id(seed.wrapping_add(1)));
     patch.assignee_expires = WirePatch::Set(WallClock(20_000 + seed as u64));

@@ -7,7 +7,7 @@ use serde::Serialize;
 
 use crate::core::ParentEdge;
 use crate::core::Stamp;
-use crate::core::composite::{Note, Workflow};
+use crate::core::composite::{IssueStatus, Note};
 use crate::core::dep::DepKey;
 use crate::core::domain::{BeadType, DepKind};
 use crate::core::state::CanonicalState;
@@ -119,7 +119,7 @@ impl GoIssue {
         dep_stamp: Option<&Stamp>,
     ) -> Self {
         let bead = &projection.bead;
-        let status = derive_status(&bead.fields.workflow.value, is_blocked);
+        let status = derive_status(bead.fields.status.value, is_blocked);
 
         let closed_at = projection.closed_at.as_ref().map(write_stamp_to_rfc3339);
         let close_reason = projection.closed_reason.clone();
@@ -270,18 +270,19 @@ impl GoComment {
     }
 }
 
-/// Derive Go status from Rust workflow + blocked state.
-fn derive_status(workflow: &Workflow, is_blocked: bool) -> GoIssueStatus {
-    match workflow {
-        Workflow::Closed(_) => GoIssueStatus::Closed,
-        Workflow::InProgress => GoIssueStatus::InProgress,
-        Workflow::Open => {
-            if is_blocked {
-                GoIssueStatus::Blocked
-            } else {
-                GoIssueStatus::Open
-            }
+/// Derive Go status from canonical Rust status + blocked state.
+fn derive_status(status: IssueStatus, is_blocked: bool) -> GoIssueStatus {
+    if status.is_terminal() {
+        return GoIssueStatus::Closed;
+    }
+    if status == IssueStatus::Todo {
+        if is_blocked {
+            GoIssueStatus::Blocked
+        } else {
+            GoIssueStatus::Open
         }
+    } else {
+        GoIssueStatus::InProgress
     }
 }
 
@@ -324,7 +325,7 @@ pub fn is_bead_blocked(bead_id: &crate::core::identity::BeadId, state: &Canonica
 
         // Check if the target bead is not closed
         if let Some(target) = state.get(key.to())
-            && !target.fields.workflow.value.is_closed()
+            && !target.fields.status.value.is_terminal()
         {
             return true;
         }
@@ -358,22 +359,21 @@ mod tests {
 
     #[test]
     fn test_derive_status() {
-        use crate::core::composite::Closure;
-
-        assert_eq!(derive_status(&Workflow::Open, false), GoIssueStatus::Open);
-        assert_eq!(derive_status(&Workflow::Open, true), GoIssueStatus::Blocked);
+        assert_eq!(derive_status(IssueStatus::Todo, false), GoIssueStatus::Open);
         assert_eq!(
-            derive_status(&Workflow::InProgress, false),
+            derive_status(IssueStatus::Todo, true),
+            GoIssueStatus::Blocked
+        );
+        assert_eq!(
+            derive_status(IssueStatus::InProgress, false),
             GoIssueStatus::InProgress
         );
         assert_eq!(
-            derive_status(&Workflow::InProgress, true),
+            derive_status(IssueStatus::InProgress, true),
             GoIssueStatus::InProgress
         );
-
-        let closure = Closure::new(Some("done".into()), None);
         assert_eq!(
-            derive_status(&Workflow::Closed(closure), false),
+            derive_status(IssueStatus::Done, false),
             GoIssueStatus::Closed
         );
     }

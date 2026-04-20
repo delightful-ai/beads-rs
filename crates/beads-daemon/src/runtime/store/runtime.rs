@@ -299,6 +299,68 @@ fn normalize_pending_store_meta_transition(
     }
 }
 
+fn can_reset_local_store_for_store_format_mismatch(
+    got: StoreMetaVersions,
+    expected: StoreMetaVersions,
+) -> bool {
+    got.store_format_version < expected.store_format_version
+        && got.wal_format_version == expected.wal_format_version
+        && got.checkpoint_format_version == expected.checkpoint_format_version
+        && got.replication_protocol_version == expected.replication_protocol_version
+        && got.index_schema_version == expected.index_schema_version
+}
+
+fn remove_local_store_reset_path(path: &Path) -> Result<(), StoreRuntimeError> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() => {
+            Err(StoreRuntimeError::LocalStoreResetSymlink {
+                path: Box::new(path.to_path_buf()),
+            })
+        }
+        Ok(meta) if meta.is_dir() => {
+            fs::remove_dir_all(path).map_err(|source| StoreRuntimeError::LocalStoreReset {
+                path: Box::new(path.to_path_buf()),
+                source,
+            })
+        }
+        Ok(_) => fs::remove_file(path).map_err(|source| StoreRuntimeError::LocalStoreReset {
+            path: Box::new(path.to_path_buf()),
+            source,
+        }),
+        Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(StoreRuntimeError::LocalStoreReset {
+            path: Box::new(path.to_path_buf()),
+            source,
+        }),
+    }
+}
+
+fn reset_local_store_for_compatible_version_mismatch(
+    layout: &DaemonLayout,
+    store_id: StoreId,
+    replica_id: ReplicaId,
+    started_at_ms: u64,
+    daemon_version: &str,
+) -> Result<(), StoreRuntimeError> {
+    let _lock = StoreLock::acquire(
+        layout,
+        store_id,
+        replica_id,
+        started_at_ms,
+        daemon_version.to_owned(),
+    )?;
+    tracing::warn!(
+        store_id = %store_id,
+        "resetting older local store cache before rebuilding from canonical repo state"
+    );
+    remove_local_store_reset_path(&layout.store_meta_path(&store_id))?;
+    remove_local_store_reset_path(&layout.store_meta_pending_path(&store_id))?;
+    remove_local_store_reset_path(&layout.wal_dir(&store_id))?;
+    remove_local_store_reset_path(&layout.store_dir(&store_id).join("index"))?;
+    remove_local_store_reset_path(&layout.checkpoint_cache_dir(&store_id))?;
+    Ok(())
+}
+
 fn recover_pending_store_meta_transition(
     layout: &DaemonLayout,
     store_id: StoreId,
@@ -460,90 +522,140 @@ impl StoreRuntime {
         limits: &Limits,
         namespace_defaults: &BTreeMap<NamespaceId, NamespacePolicy>,
     ) -> Result<StoreRuntimeOpen, StoreRuntimeError> {
-        let meta_path = layout.store_meta_path(&store_id);
-        let pending_path = layout.store_meta_pending_path(&store_id);
-        let existing = read_store_meta_optional(&meta_path)?;
         let expected_versions = StoreMetaVersions::current();
-        let (authoritative_committed, committed_recovers_without_pending) = match existing.as_ref()
-        {
-            Some(meta) => {
-                if meta.store_id() != store_id {
-                    return Err(StoreRuntimeError::MetaMismatch {
-                        expected: store_id,
-                        got: meta.store_id(),
-                    });
-                }
+        let mut did_reset_older_store = false;
+        let (meta_path, pending_path, existing, mut meta_state, recovery_pending) = loop {
+            let meta_path = layout.store_meta_path(&store_id);
+            let pending_path = layout.store_meta_pending_path(&store_id);
+            let existing = read_store_meta_optional(&meta_path)?;
+            if !did_reset_older_store && let Some(meta) = existing.as_ref() {
                 let got_versions = meta.versions();
-                if got_versions == expected_versions {
-                    (Some(meta.clone()), true)
-                } else if can_upgrade_index_schema_only(got_versions, expected_versions) {
-                    (None, true)
-                } else {
-                    return Err(StoreRuntimeError::UnsupportedStoreMetaVersion {
-                        expected: expected_versions,
-                        got: got_versions,
-                    });
+                if can_reset_local_store_for_store_format_mismatch(got_versions, expected_versions)
+                {
+                    reset_local_store_for_compatible_version_mismatch(
+                        layout,
+                        store_id,
+                        meta.replica_id,
+                        now_ms,
+                        daemon_version,
+                    )?;
+                    did_reset_older_store = true;
+                    continue;
                 }
             }
-            None => (None, false),
-        };
-        let pending = if committed_recovers_without_pending {
-            read_pending_store_meta_transition_optional_when_committed_recovers(
-                &pending_path,
-                store_id,
-            )?
-        } else {
-            read_pending_store_meta_transition_optional(&pending_path)?
-        };
-        let normalized_pending = if authoritative_committed.is_some() {
-            None
-        } else {
-            pending
-                .as_ref()
-                .map(|pending| {
-                    normalize_pending_store_meta_transition(pending, store_id, expected_versions)
-                })
-                .transpose()?
-        };
-        let committed_is_authoritative = authoritative_committed.is_some();
-        let mut meta_state = if let Some(meta) = authoritative_committed {
-            // If committed meta is already current, it defines both startup state and
-            // lock identity. Pending cleanup still runs after we hold the lock.
-            StoreMetaOpenState::Ready(meta)
-        } else {
-            match normalized_pending.as_ref() {
-                Some(pending) => {
-                    let transition = if pending.marker_persisted {
-                        PendingStoreMetaTransition::persisted(
-                            meta_path.clone(),
-                            pending_path.clone(),
-                            pending.record.meta.clone(),
-                        )
-                    } else {
-                        PendingStoreMetaTransition::new(
-                            meta_path.clone(),
-                            pending_path.clone(),
-                            pending.record.meta.clone(),
-                        )
-                    };
-                    StoreMetaOpenState::Pending(transition)
-                }
-                None => derive_store_meta_open_state(
-                    existing.as_ref(),
-                    &meta_path,
+
+            let (authoritative_committed, committed_recovers_without_pending) =
+                match existing.as_ref() {
+                    Some(meta) => {
+                        if meta.store_id() != store_id {
+                            return Err(StoreRuntimeError::MetaMismatch {
+                                expected: store_id,
+                                got: meta.store_id(),
+                            });
+                        }
+                        let got_versions = meta.versions();
+                        if got_versions == expected_versions {
+                            (Some(meta.clone()), true)
+                        } else if can_upgrade_index_schema_only(got_versions, expected_versions) {
+                            (None, true)
+                        } else {
+                            return Err(StoreRuntimeError::UnsupportedStoreMetaVersion {
+                                expected: expected_versions,
+                                got: got_versions,
+                            });
+                        }
+                    }
+                    None => (None, false),
+                };
+
+            let pending = if committed_recovers_without_pending {
+                read_pending_store_meta_transition_optional_when_committed_recovers(
                     &pending_path,
                     store_id,
-                    now_ms,
-                    expected_versions,
-                )?,
+                )?
+            } else {
+                read_pending_store_meta_transition_optional(&pending_path)?
+            };
+            if !did_reset_older_store
+                && authoritative_committed.is_none()
+                && let Some(pending_meta) = pending.as_ref().map(|pending| &pending.meta)
+            {
+                let got_versions = pending_meta.versions();
+                if can_reset_local_store_for_store_format_mismatch(got_versions, expected_versions)
+                {
+                    reset_local_store_for_compatible_version_mismatch(
+                        layout,
+                        store_id,
+                        pending_meta.replica_id,
+                        now_ms,
+                        daemon_version,
+                    )?;
+                    did_reset_older_store = true;
+                    continue;
+                }
             }
-        };
-        let recovery_pending = if committed_is_authoritative {
-            pending.clone()
-        } else {
-            normalized_pending
-                .as_ref()
-                .map(|pending| pending.record.clone())
+
+            let normalized_pending = if authoritative_committed.is_some() {
+                None
+            } else {
+                pending
+                    .as_ref()
+                    .map(|pending| {
+                        normalize_pending_store_meta_transition(
+                            pending,
+                            store_id,
+                            expected_versions,
+                        )
+                    })
+                    .transpose()?
+            };
+            let committed_is_authoritative = authoritative_committed.is_some();
+            let meta_state = if let Some(meta) = authoritative_committed {
+                // If committed meta is already current, it defines both startup state and
+                // lock identity. Pending cleanup still runs after we hold the lock.
+                StoreMetaOpenState::Ready(meta)
+            } else {
+                match normalized_pending.as_ref() {
+                    Some(pending) => {
+                        let transition = if pending.marker_persisted {
+                            PendingStoreMetaTransition::persisted(
+                                meta_path.clone(),
+                                pending_path.clone(),
+                                pending.record.meta.clone(),
+                            )
+                        } else {
+                            PendingStoreMetaTransition::new(
+                                meta_path.clone(),
+                                pending_path.clone(),
+                                pending.record.meta.clone(),
+                            )
+                        };
+                        StoreMetaOpenState::Pending(transition)
+                    }
+                    None => derive_store_meta_open_state(
+                        existing.as_ref(),
+                        &meta_path,
+                        &pending_path,
+                        store_id,
+                        now_ms,
+                        expected_versions,
+                    )?,
+                }
+            };
+            let recovery_pending = if committed_is_authoritative {
+                pending.clone()
+            } else {
+                normalized_pending
+                    .as_ref()
+                    .map(|pending| pending.record.clone())
+            };
+            break (
+                meta_path,
+                pending_path,
+                existing,
+                meta_state,
+                recovery_pending,
+            );
         };
 
         let lock = StoreLock::acquire(
@@ -996,6 +1108,14 @@ pub enum StoreRuntimeError {
         expected: StoreMetaVersions,
         got: StoreMetaVersions,
     },
+    #[error("local store reset path is a symlink: {path:?}")]
+    LocalStoreResetSymlink { path: Box<std::path::PathBuf> },
+    #[error("local store reset failed at {path:?}: {source}")]
+    LocalStoreReset {
+        path: Box<std::path::PathBuf>,
+        #[source]
+        source: io::Error,
+    },
     #[error("store meta write failed at {path:?}: {source}")]
     MetaWrite {
         path: Box<std::path::PathBuf>,
@@ -1094,6 +1214,16 @@ impl StoreRuntimeError {
             StoreRuntimeError::UnsupportedStoreMetaVersion { .. } => {
                 ProtocolErrorCode::VersionIncompatible.into()
             }
+            StoreRuntimeError::LocalStoreResetSymlink { .. } => {
+                ProtocolErrorCode::PathSymlinkRejected.into()
+            }
+            StoreRuntimeError::LocalStoreReset { source, .. } => {
+                if source.kind() == io::ErrorKind::PermissionDenied {
+                    ProtocolErrorCode::PermissionDenied.into()
+                } else {
+                    ProtocolErrorCode::InternalError.into()
+                }
+            }
             StoreRuntimeError::NamespacePoliciesSymlink { .. }
             | StoreRuntimeError::ReplicaRosterSymlink { .. } => {
                 ProtocolErrorCode::PathSymlinkRejected.into()
@@ -1149,9 +1279,11 @@ impl StoreRuntimeError {
             StoreRuntimeError::MetaSymlink { .. } => Transience::Permanent,
             StoreRuntimeError::MetaParse { .. }
             | StoreRuntimeError::MetaMismatch { .. }
-            | StoreRuntimeError::UnsupportedStoreMetaVersion { .. } => Transience::Permanent,
+            | StoreRuntimeError::UnsupportedStoreMetaVersion { .. }
+            | StoreRuntimeError::LocalStoreResetSymlink { .. } => Transience::Permanent,
             StoreRuntimeError::MetaRead { source, .. }
-            | StoreRuntimeError::MetaWrite { source, .. } => {
+            | StoreRuntimeError::MetaWrite { source, .. }
+            | StoreRuntimeError::LocalStoreReset { source, .. } => {
                 if source.kind() == io::ErrorKind::PermissionDenied {
                     Transience::Permanent
                 } else {
@@ -1239,6 +1371,26 @@ impl IntoErrorPayload for StoreRuntimeError {
                 retryable,
             )
             .with_details(error_details::StoreMetaVersionMismatchDetails { expected, got }),
+            StoreRuntimeError::LocalStoreResetSymlink { path } => ErrorPayload::new(
+                ProtocolErrorCode::PathSymlinkRejected.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::PathSymlinkRejectedDetails {
+                path: path.display().to_string(),
+            }),
+            StoreRuntimeError::LocalStoreReset { path, source } => match source.kind() {
+                io::ErrorKind::PermissionDenied => ErrorPayload::new(
+                    ProtocolErrorCode::PermissionDenied.into(),
+                    message,
+                    retryable,
+                )
+                .with_details(error_details::PermissionDeniedDetails {
+                    path: path.display().to_string(),
+                    operation: error_details::PermissionOperation::Write,
+                }),
+                _ => ErrorPayload::new(ProtocolErrorCode::InternalError.into(), message, retryable),
+            },
             StoreRuntimeError::MetaWrite { path, source } => match source.kind() {
                 io::ErrorKind::PermissionDenied => ErrorPayload::new(
                     ProtocolErrorCode::PermissionDenied.into(),
@@ -1991,13 +2143,14 @@ mod tests {
     use tempfile::TempDir;
 
     use crate::core::bead::{BeadCore, BeadFields};
-    use crate::core::composite::{Claim, Workflow};
+    use crate::core::composite::Claim;
     use crate::core::crdt::Lww;
     use crate::core::domain::{BeadType, DepKind, Priority};
     use crate::core::identity::BeadId;
     use crate::core::time::{Stamp, WriteStamp};
     use crate::core::{
-        ActorId, CanonicalState, DepKey, Dot, ReplicaId, Seq0, StoreState, Watermark, WatermarkPair,
+        ActorId, CanonicalState, DepKey, Dot, IssueStatus, ReplicaId, Seq0, StoreState, Watermark,
+        WatermarkPair,
     };
     use crate::paths;
     use crate::remote::RemoteUrl;
@@ -2958,6 +3111,73 @@ mod tests {
     }
 
     #[test]
+    fn store_runtime_resets_older_store_format_and_rebuilds_cleanly() {
+        let temp = TempDir::new().expect("temp dir");
+        let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
+
+        let store_id = StoreId::new(Uuid::from_bytes([70u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([71u8; 16]));
+        let now_ms = 1_700_000_000_000;
+
+        let mut versions = StoreMetaVersions::current();
+        versions.store_format_version = versions.store_format_version.saturating_sub(1);
+        write_meta_with_versions_for(store_id, replica_id, now_ms, versions);
+
+        let wal_sentinel = paths::store_dir(store_id)
+            .join("wal")
+            .join(crate::core::NamespaceId::core().as_str())
+            .join("legacy-segment.wal");
+        fs::create_dir_all(wal_sentinel.parent().expect("wal sentinel parent"))
+            .expect("create wal dir");
+        fs::write(&wal_sentinel, b"legacy wal").expect("write wal sentinel");
+
+        let cache_sentinel = paths::checkpoint_cache_dir(store_id).join("CURRENT");
+        fs::create_dir_all(cache_sentinel.parent().expect("cache sentinel parent"))
+            .expect("create checkpoint cache dir");
+        fs::write(&cache_sentinel, b"legacy checkpoint").expect("write cache sentinel");
+
+        let config_path = paths::store_config_path(store_id);
+        write_store_config(&config_path, &StoreConfig::default()).expect("write store config");
+
+        let namespace_defaults = crate::config::Config::default()
+            .namespace_defaults
+            .namespaces;
+        let _open = StoreRuntime::open(
+            &crate::daemon_layout_from_paths(),
+            store_id,
+            RemoteUrl::new("example.com/test/repo"),
+            now_ms + 1,
+            "test",
+            &Limits::default(),
+            &namespace_defaults,
+        )
+        .expect("open runtime after local reset");
+
+        let persisted_meta = read_store_meta_optional(&paths::store_meta_path(store_id))
+            .expect("read rebuilt meta")
+            .expect("rebuilt meta exists");
+        assert_eq!(persisted_meta.versions(), StoreMetaVersions::current());
+        assert!(
+            !wal_sentinel.exists(),
+            "older local wal segments should be removed during reset"
+        );
+        assert!(
+            !cache_sentinel.exists(),
+            "older local checkpoint cache should be removed during reset"
+        );
+        assert!(
+            config_path.exists(),
+            "store-local config should survive the reset"
+        );
+        assert!(
+            read_pending_store_meta_transition_optional(&paths::store_meta_pending_path(store_id))
+                .expect("read pending meta after reset")
+                .is_none(),
+            "reset path should clear pending transition markers"
+        );
+    }
+
+    #[test]
     fn store_runtime_rejects_newer_index_schema_version() {
         let temp = TempDir::new().expect("temp dir");
         let _override = paths::override_data_dir_for_tests(Some(temp.path().to_path_buf()));
@@ -3370,7 +3590,8 @@ mod tests {
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
-            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            status: Lww::new(IssueStatus::Todo, stamp.clone()),
+            closed_on_branch: Lww::new(None, stamp.clone()),
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         let bead = crate::core::Bead::new(core, fields);

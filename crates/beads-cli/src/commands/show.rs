@@ -6,7 +6,7 @@ use crate::render::{print_json, print_line};
 use crate::runtime::{CliRuntimeCtx, send};
 use crate::validation::{normalize_bead_id, validation_error};
 use beads_api::{Issue, IssueSummary, Note, QueryResult};
-use beads_core::{BeadId, BeadType, NamespaceId, WorkflowStatus};
+use beads_core::{BeadId, BeadType, IssueStatus, NamespaceId};
 use beads_surface::ipc::{IdPayload, ListPayload, Request, ResponsePayload};
 use beads_surface::{Filters, SortField};
 use std::collections::{BTreeSet, HashMap};
@@ -611,18 +611,18 @@ fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
     let mut remaining: Vec<&IssueSummary> = Vec::new();
 
     for child in children {
-        if child.status == WorkflowStatus::Closed {
+        if child.status.is_terminal() {
             done.push(child);
         } else {
             remaining.push(child);
         }
     }
 
-    // Sort remaining by priority (P0 first), then by status (in_progress before open)
+    // Sort remaining by priority (P0 first), then by status (In Progress before Todo)
     remaining.sort_by_key(|child| {
         (
             child.priority,
-            std::cmp::Reverse(child.status == WorkflowStatus::InProgress),
+            std::cmp::Reverse(child.status == IssueStatus::InProgress),
         )
     });
 
@@ -644,7 +644,7 @@ fn render_epic_children(out: &mut String, children: &[IssueSummary]) {
     if !remaining.is_empty() {
         out.push_str(&format!("\nRemaining ({}):\n", remaining.len()));
         for child in &remaining {
-            let status_marker = if child.status == WorkflowStatus::InProgress {
+            let status_marker = if child.status == IssueStatus::InProgress {
                 ">"
             } else {
                 " "
@@ -685,7 +685,7 @@ fn resolve_current_issue_id(ctx: &CliRuntimeCtx) -> CommandResult<BeadId> {
 
     let filters = Filters {
         assignee: Some(ctx.actor_id()?),
-        status: Some(String::from("in_progress")),
+        hide_terminal: true,
         sort_by: Some(SortField::UpdatedAt),
         ascending: false,
         limit: Some(1),
@@ -741,7 +741,7 @@ fn extract_bead_id_from_text(text: &str) -> Option<BeadId> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beads_core::{BeadType, NamespaceId, WorkflowStatus, WriteStamp};
+    use beads_core::{BeadType, IssueStatus, NamespaceId, WriteStamp};
 
     fn sample_issue(namespace: &str, id: &str) -> Issue {
         Issue {
@@ -751,7 +751,7 @@ mod tests {
             description: String::new(),
             design: None,
             acceptance_criteria: None,
-            status: WorkflowStatus::Open,
+            status: IssueStatus::Todo,
             priority: 1,
             issue_type: BeadType::Task,
             labels: Vec::new(),
@@ -790,7 +790,7 @@ mod tests {
         let output = render_show(&issue, &[], &incoming, &[]);
         let expected = concat!(
             "\nbd-123: Title\n",
-            "Status: open\n",
+            "Status: Todo\n",
             "Priority: P1\n",
             "Type: task\n",
             "Created: 1970-01-01 00:00\n",
@@ -814,7 +814,7 @@ mod tests {
         let expected = concat!(
             "\nwf/bd-123: Title\n",
             "Namespace: wf\n",
-            "Status: open\n",
+            "Status: Todo\n",
             "Priority: P1\n",
             "Type: task\n",
             "Created: 1970-01-01 00:00\n",
@@ -858,7 +858,7 @@ mod tests {
     fn render_issue_summary_is_one_line() {
         let issue = sample_issue("core", "bd-123");
         let output = render_issue_summary(&issue);
-        assert_eq!(output, "bd-123 [P1] [task] open - Title");
+        assert_eq!(output, "bd-123 [P1] [task] Todo - Title");
     }
 
     #[test]

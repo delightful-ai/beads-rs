@@ -9,8 +9,8 @@ use std::path::Path;
 
 use beads_core::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, CanonicalState, Claim,
-    Closure, CoreError, DepKey, DepKind, Dot, Label, Labels, Lww, Note, NoteId, OrSetValue,
-    Priority, ReplicaId, Stamp, Tombstone, Workflow, WriteStamp,
+    CoreError, DepKey, DepKind, Dot, IssueStatus, Label, Labels, Lww, Note, NoteId, OrSetValue,
+    Priority, ReplicaId, Stamp, Tombstone, WriteStamp,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256 as Sha2};
@@ -204,8 +204,8 @@ pub fn import_go_export(
             labels.insert(label);
         }
 
-        // Workflow.
-        let (workflow_value, workflow_stamp) = workflow_from_status(
+        // Canonical status.
+        let (status_value, status_stamp) = status_from_legacy_status(
             &status_norm,
             issue.close_reason.clone(),
             issue.closed_at.as_deref(),
@@ -226,13 +226,13 @@ pub fn import_go_export(
             }
         }
 
-        // If claimed but status open, follow rust spec and treat as in_progress.
-        let mut workflow_value = workflow_value;
-        let mut workflow_stamp = workflow_stamp;
-        if matches!(claim_value, Claim::Claimed { .. }) && matches!(workflow_value, Workflow::Open)
+        // If claimed but state todo, follow rust spec and treat as in_progress.
+        let mut status_value = status_value;
+        let mut status_stamp = status_stamp;
+        if matches!(claim_value, Claim::Claimed { .. }) && matches!(status_value, IssueStatus::Todo)
         {
-            workflow_value = Workflow::InProgress;
-            workflow_stamp = updated_stamp.clone();
+            status_value = IssueStatus::InProgress;
+            status_stamp = updated_stamp.clone();
         }
 
         // Fields: stamp everything at updated for simplicity.
@@ -249,7 +249,8 @@ pub fn import_go_export(
                 issue.estimated_minutes.and_then(|m| u32::try_from(m).ok()),
                 updated_stamp.clone(),
             ),
-            workflow: Lww::new(workflow_value, workflow_stamp),
+            status: Lww::new(status_value, status_stamp),
+            closed_on_branch: Lww::new(None, updated_stamp.clone()),
             claim: Lww::new(claim_value, updated_stamp.clone()),
         };
 
@@ -438,13 +439,13 @@ fn parse_dep_kind(raw: &str) -> Result<DepKind> {
     }
 }
 
-fn workflow_from_status(
+fn status_from_legacy_status(
     status_norm: &str,
     close_reason: Option<String>,
     closed_at_raw: Option<&str>,
     updated_stamp: &Stamp,
     actor: &ActorId,
-) -> Result<(Workflow, Stamp)> {
+) -> Result<(IssueStatus, Stamp)> {
     match status_norm {
         "closed" => {
             let closed_ms = if let Some(raw) = closed_at_raw {
@@ -453,14 +454,24 @@ fn workflow_from_status(
                 updated_stamp.at.wall_ms
             };
             let closed_stamp = Stamp::new(WriteStamp::new(closed_ms, 0), actor.clone());
-            let reason = close_reason.filter(|s| !s.trim().is_empty());
-            Ok((Workflow::Closed(Closure::new(reason, None)), closed_stamp))
+            let status = match close_reason
+                .as_deref()
+                .map(str::trim)
+                .filter(|reason| !reason.is_empty())
+                .map(|reason| reason.to_ascii_lowercase())
+                .as_deref()
+            {
+                Some("cancelled" | "canceled") => IssueStatus::Cancelled,
+                Some("duplicate") => IssueStatus::Duplicate,
+                Some("done") | Some(_) | None => IssueStatus::Done,
+            };
+            Ok((status, closed_stamp))
         }
-        "in_progress" | "inprogress" => Ok((Workflow::InProgress, updated_stamp.clone())),
-        "open" | "blocked" => Ok((Workflow::Open, updated_stamp.clone())),
+        "in_progress" | "inprogress" => Ok((IssueStatus::InProgress, updated_stamp.clone())),
+        "open" | "blocked" => Ok((IssueStatus::Todo, updated_stamp.clone())),
         _other => {
             // Unknown/custom statuses are treated as open; preserve via warning at caller.
-            Ok((Workflow::Open, updated_stamp.clone()))
+            Ok((IssueStatus::Todo, updated_stamp.clone()))
         }
     }
 }

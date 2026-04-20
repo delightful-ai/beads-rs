@@ -8,13 +8,12 @@
 use serde::{Deserialize, Serialize};
 
 use super::collections::Labels;
-use super::composite::{Claim, Note, Workflow};
+use super::composite::{Claim, IssueStatus, Note};
 use super::crdt::Lww;
 use super::domain::{BeadType, Priority};
 use super::error::{CollisionError, CoreError};
 use super::identity::{ActorId, BeadId, BranchName, ContentHash};
 use super::time::{Stamp, WallClock, WriteStamp};
-use super::wire_bead::WorkflowStatus;
 
 /// Immutable creation provenance.
 ///
@@ -150,7 +149,8 @@ define_bead_fields! {
     pub external_ref: Option<String>,
     pub source_repo: Option<String>,
     pub estimated_minutes: Option<u32>,
-    pub workflow: Workflow,
+    pub status: IssueStatus,
+    pub closed_on_branch: Option<BranchName>,
     pub claim: Claim,
 }
 
@@ -191,8 +191,8 @@ impl Bead {
         &self.fields.title.value
     }
 
-    pub fn status(&self) -> &'static str {
-        self.fields.workflow.value.status()
+    pub fn status(&self) -> IssueStatus {
+        self.fields.status.value
     }
 
     pub fn priority(&self) -> Priority {
@@ -263,7 +263,7 @@ impl BeadView {
 #[derive(Clone, Debug)]
 pub struct BeadProjection {
     pub bead: Bead,
-    pub status: WorkflowStatus,
+    pub status: IssueStatus,
     pub issue_type: BeadType,
     pub labels: Labels,
     pub notes: Vec<Note>,
@@ -286,10 +286,6 @@ impl BeadProjection {
 
     pub fn status(&self) -> &'static str {
         self.status.as_str()
-    }
-
-    pub fn workflow_status(&self) -> WorkflowStatus {
-        self.status
     }
 
     pub fn issue_type(&self) -> BeadType {
@@ -324,7 +320,7 @@ impl BeadProjection {
 impl From<&BeadView> for BeadProjection {
     fn from(view: &BeadView) -> Self {
         let bead = view.bead.clone();
-        let status = WorkflowStatus::from_workflow(&bead.fields.workflow.value);
+        let status = bead.fields.status.value;
         let issue_type = bead.fields.bead_type.value;
         let updated_stamp = view.updated_stamp().clone();
 
@@ -338,14 +334,15 @@ impl From<&BeadView> for BeadProjection {
         };
 
         let (closed_at, closed_by, closed_reason, closed_on_branch) =
-            match &bead.fields.workflow.value {
-                Workflow::Closed(closure) => (
-                    Some(bead.fields.workflow.stamp.at.clone()),
-                    Some(bead.fields.workflow.stamp.by.clone()),
-                    closure.reason.clone(),
-                    closure.on_branch.clone(),
-                ),
-                Workflow::Open | Workflow::InProgress => (None, None, None, None),
+            if bead.fields.status.value.is_terminal() {
+                (
+                    Some(bead.fields.status.stamp.at.clone()),
+                    Some(bead.fields.status.stamp.by.clone()),
+                    bead.fields.status.value.closed_reason().map(str::to_string),
+                    bead.fields.closed_on_branch.value.clone(),
+                )
+            } else {
+                (None, None, None, None)
             };
 
         Self {
@@ -424,16 +421,28 @@ impl MutateForTest for BeadType {
 }
 
 #[cfg(test)]
-impl MutateForTest for Workflow {
+impl MutateForTest for IssueStatus {
     fn mutate_for_test(&mut self) {
         *self = match self {
-            Workflow::Open => Workflow::InProgress,
-            Workflow::InProgress => Workflow::Closed(super::composite::Closure::new(
-                Some("done".to_string()),
-                None,
-            )),
-            Workflow::Closed(_) => Workflow::Open,
+            IssueStatus::Todo => IssueStatus::InProgress,
+            IssueStatus::InProgress => IssueStatus::HumanReview,
+            IssueStatus::HumanReview => IssueStatus::Rework,
+            IssueStatus::Rework => IssueStatus::Merging,
+            IssueStatus::Merging => IssueStatus::Done,
+            IssueStatus::Done => IssueStatus::Cancelled,
+            IssueStatus::Cancelled => IssueStatus::Duplicate,
+            IssueStatus::Duplicate => IssueStatus::Todo,
         };
+    }
+}
+
+#[cfg(test)]
+impl MutateForTest for Option<BranchName> {
+    fn mutate_for_test(&mut self) {
+        match self {
+            Some(branch) => branch.mutate_for_test(),
+            None => *self = Some(BranchName::parse("closed-branch").unwrap()),
+        }
     }
 }
 
@@ -496,10 +505,8 @@ impl MutateForTest for BeadCore {
 mod tests {
     use super::*;
     use crate::collections::Label;
-    use crate::composite::Closure;
     use crate::identity::ActorId;
     use crate::time::WriteStamp;
-    use crate::wire_bead::WorkflowStatus;
 
     fn stamp(wall_ms: u64, counter: u32, actor: &str) -> Stamp {
         Stamp::new(
@@ -520,7 +527,8 @@ mod tests {
             external_ref: Lww::new(None, created.clone()),
             source_repo: Lww::new(None, created.clone()),
             estimated_minutes: Lww::new(None, created.clone()),
-            workflow: Lww::new(Workflow::Open, created.clone()),
+            status: Lww::new(IssueStatus::Todo, created.clone()),
+            closed_on_branch: Lww::new(None, created.clone()),
             claim: Lww::new(Claim::Unclaimed, created),
         };
         Bead::new(core, fields)
@@ -578,24 +586,27 @@ mod tests {
 
         let closed_by = ActorId::new("carol").expect("closed by");
         let closed_stamp = Stamp::new(WriteStamp::new(1_500, 0), closed_by.clone());
-        let closure = Closure::new(
-            Some("done".into()),
+        bead.fields.status = Lww::new(IssueStatus::Done, closed_stamp.clone());
+        bead.fields.closed_on_branch = Lww::new(
             Some(BranchName::parse("main").unwrap()),
+            closed_stamp.clone(),
         );
-        bead.fields.workflow = Lww::new(Workflow::Closed(closure.clone()), closed_stamp.clone());
 
         let view = BeadView::new(bead, Labels::new(), Vec::new(), None);
         let projection = BeadProjection::from_view(&view);
 
-        assert_eq!(projection.status, WorkflowStatus::Closed);
+        assert_eq!(projection.status, IssueStatus::Done);
         assert_eq!(projection.issue_type, BeadType::Task);
         assert_eq!(projection.assignee.as_ref(), Some(&assignee));
         assert_eq!(projection.assignee_at, Some(claim_stamp.at.clone()));
         assert_eq!(projection.assignee_expires, Some(WallClock(9_999)));
         assert_eq!(projection.closed_at, Some(closed_stamp.at.clone()));
         assert_eq!(projection.closed_by.as_ref(), Some(&closed_by));
-        assert_eq!(projection.closed_reason, closure.reason);
-        assert_eq!(projection.closed_on_branch, closure.on_branch);
+        assert_eq!(projection.closed_reason.as_deref(), Some("done"));
+        assert_eq!(
+            projection.closed_on_branch,
+            Some(BranchName::parse("main").unwrap())
+        );
         assert_eq!(projection.updated_at(), &closed_stamp.at);
         assert_eq!(projection.updated_by(), &closed_by);
     }
@@ -709,8 +720,12 @@ fn compute_content_hash(bead: &Bead, labels: &Labels, notes: &[Note]) -> Content
     bead.fields.description.value.hash_content(&mut h);
     h.update([0]);
 
+    // coarse workflow status
+    bead.fields.status.value.bucket_str().hash_content(&mut h);
+    h.update([0]);
+
     // status
-    bead.fields.workflow.value.status().hash_content(&mut h);
+    bead.fields.status.value.hash_content(&mut h);
     h.update([0]);
 
     // priority (as decimal)
@@ -768,24 +783,29 @@ fn compute_content_hash(bead: &Bead, labels: &Labels, notes: &[Note]) -> Content
     bead.core.created_on_branch().hash_content(&mut h);
     h.update([0]);
 
-    // closed_at/by/reason/on_branch
-    if let Workflow::Closed(closure) = &bead.fields.workflow.value {
-        let closed_stamp = &bead.fields.workflow.stamp;
+    // closed_at/by/reason
+    if bead.fields.status.value.is_terminal() {
+        let closed_stamp = &bead.fields.status.stamp;
         closed_stamp.at.hash_content(&mut h);
         h.update([0]);
         closed_stamp.by.hash_content(&mut h);
         h.update([0]);
-        closure.reason.hash_content(&mut h);
-        h.update([0]);
-        closure.on_branch.hash_content(&mut h);
+        bead.fields
+            .status
+            .value
+            .closed_reason()
+            .hash_content(&mut h);
         h.update([0]);
     } else {
-        // Not closed - emit 4 null separators for compatibility
+        // Not closed - emit 3 null separators for compatibility
         h.update([0]); // closed_at
         h.update([0]); // closed_by
         h.update([0]); // closed_reason
-        h.update([0]); // closed_on_branch
     }
+
+    // closed_on_branch
+    bead.fields.closed_on_branch.value.hash_content(&mut h);
+    h.update([0]);
 
     // external_ref
     bead.fields.external_ref.value.hash_content(&mut h);

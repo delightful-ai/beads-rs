@@ -33,6 +33,7 @@ pub mod server;
 pub mod store;
 pub mod subscription;
 pub mod test_hooks;
+pub(crate) mod tracker;
 pub mod wal;
 mod wal_atomic_commit;
 

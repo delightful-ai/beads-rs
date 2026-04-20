@@ -128,13 +128,13 @@ fi
 # Select hot-path IDs from real data where possible.
 ISSUE_ID="$(bd_cmd ready --json | jq -r '.data.issues[0].id // empty')"
 if [[ -z "$ISSUE_ID" ]]; then
-  ISSUE_ID="$(bd_cmd list --status open --json | jq -r '.data[0].id // empty')"
+  ISSUE_ID="$(bd_cmd list --status todo --json | jq -r '.data[0].id // empty')"
 fi
 if [[ -z "$ISSUE_ID" ]]; then
   ISSUE_ID="$(bd_cmd --namespace tmp create "perf-seed-read" --description "hotpath benchmark seed issue" --type task --priority 2 --json | jq -r '.data.id')"
 fi
 
-EPIC_ID="$(bd_cmd list --status open --type epic --json | jq -r '.data[0].id // empty')"
+EPIC_ID="$(bd_cmd list --status todo --type epic --json | jq -r '.data[0].id // empty')"
 
 # Seed mutation-path IDs in tmp namespace (isolated from core workflow state).
 MUT_A="$(bd_cmd --namespace tmp create "perf-seed-mut-a" --description "hotpath benchmark mutation seed A" --type task --priority 2 --json | jq -r '.data.id')"
@@ -182,11 +182,11 @@ hyperfine \
   --runs "$RUNS" \
   --export-json "$OUT_DIR/hyperfine-read.json" \
   "${BD_BIN_Q} --repo ${ROOT_Q} ready >/dev/null 2>&1" \
-  "${BD_BIN_Q} --repo ${ROOT_Q} list --status open >/dev/null 2>&1" \
+  "${BD_BIN_Q} --repo ${ROOT_Q} list --status todo >/dev/null 2>&1" \
   "${BD_BIN_Q} --repo ${ROOT_Q} blocked >/dev/null 2>&1" \
   "${BD_BIN_Q} --repo ${ROOT_Q} stale >/dev/null 2>&1" \
   "${BD_BIN_Q} --repo ${ROOT_Q} search auth >/dev/null 2>&1" \
-  "${BD_BIN_Q} --repo ${ROOT_Q} count --status open >/dev/null 2>&1" \
+  "${BD_BIN_Q} --repo ${ROOT_Q} count --status todo >/dev/null 2>&1" \
   "${BD_BIN_Q} --repo ${ROOT_Q} show '${ISSUE_ID}' >/dev/null 2>&1" \
   "${BD_BIN_Q} --repo ${ROOT_Q} show '${ISSUE_ID}' --json >/dev/null 2>&1" \
   "${BD_BIN_Q} --repo ${ROOT_Q} dep tree '${ISSUE_ID}' >/dev/null 2>&1" \
@@ -210,7 +210,7 @@ hyperfine \
 # Stress representative workflows to enrich logs.
 for _ in $(seq 1 "$HOTPATH_ITERS"); do
   bd_cmd ready >/dev/null 2>&1
-  bd_cmd list --status open --limit 50 >/dev/null 2>&1
+  bd_cmd list --status todo --limit 50 >/dev/null 2>&1
   bd_cmd show "$ISSUE_ID" >/dev/null 2>&1
   bd_cmd show "$ISSUE_ID" --json >/dev/null 2>&1
   bd_cmd dep tree "$ISSUE_ID" >/dev/null 2>&1

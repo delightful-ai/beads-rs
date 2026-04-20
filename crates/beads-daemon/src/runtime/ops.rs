@@ -613,7 +613,7 @@ fn legacy_deps_migration_hint(err: &SyncError) -> Option<OpError> {
     }
     Some(OpError::ValidationFailed {
         field: "migrate".into(),
-        reason: "legacy deps store detected; run `bd migrate detect` and then `bd migrate to 1`"
+        reason: "legacy deps store detected; run `bd migrate detect` and then `bd migrate to 2`"
             .into(),
     })
 }
@@ -732,7 +732,7 @@ mod tests {
         match mapped {
             OpError::ValidationFailed { field, reason } => {
                 assert_eq!(field, "migrate");
-                assert!(reason.contains("bd migrate to 1"), "{reason}");
+                assert!(reason.contains("bd migrate to 2"), "{reason}");
             }
             other => panic!("expected validation hint, got {other:?}"),
         }
