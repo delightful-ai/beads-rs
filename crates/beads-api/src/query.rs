@@ -14,6 +14,7 @@ use crate::issues::{
     BlockedIssue, CountResult, DeletedLookup, EpicStatus, Issue, IssueSummary, Note, ReadyResult,
     StatusOutput, Tombstone,
 };
+use crate::tracker::TrackerIssue;
 use beads_core::BeadId;
 
 /// Aggregated payload for rich `show` views.
@@ -38,6 +39,9 @@ pub enum QueryResult {
 
     /// List of issues (summaries).
     Issues(Vec<IssueSummary>),
+
+    /// Tracker-facing issues for board/Symphony consumers.
+    TrackerIssues(Vec<TrackerIssue>),
 
     /// Dependency tree.
     DepTree { root: BeadId, edges: Vec<DepEdge> },

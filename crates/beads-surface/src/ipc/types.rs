@@ -348,6 +348,14 @@ pub enum Request {
         payload: ListPayload,
     },
 
+    /// List tracker-facing issues for board/Symphony consumers.
+    TrackerList {
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: TrackerListPayload,
+    },
+
     /// Get ready beads.
     Ready {
         #[serde(flatten)]
@@ -527,6 +535,7 @@ impl Request {
             Request::ShowMultiple { ctx, .. } => info_from_read("show_multiple", ctx),
             Request::ShowDetails { ctx, .. } => info_from_read("show_details", ctx),
             Request::List { ctx, .. } => info_from_read("list", ctx),
+            Request::TrackerList { ctx, .. } => info_from_read("tracker_list", ctx),
             Request::Ready { ctx, .. } => info_from_read("ready", ctx),
             Request::DepTree { ctx, .. } => info_from_read("dep_tree", ctx),
             Request::DepCycles { ctx, .. } => info_from_read("dep_cycles", ctx),

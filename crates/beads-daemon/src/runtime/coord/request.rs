@@ -119,6 +119,12 @@ impl Daemon {
                     .into()
             }
 
+            Request::TrackerList { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.query_tracker_list(&repo, &payload, read, git_tx).into()
+            }
+
             Request::Ready { ctx, payload } => {
                 let repo = ctx.repo.path;
                 let read = ctx.read;

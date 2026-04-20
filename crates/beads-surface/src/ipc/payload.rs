@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use beads_api::{AdminFingerprintMode, AdminFingerprintSample};
+use beads_api::{AdminFingerprintMode, AdminFingerprintSample, TrackerState};
 use beads_core::{BeadId, BeadType, BranchName, DepKind, NamespaceId, Priority, StoreId};
 
 use crate::ops::BeadPatch;
@@ -114,6 +114,16 @@ pub struct LeasePayload {
 pub struct ListPayload {
     #[serde(default)]
     pub filters: Filters,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackerListPayload {
+    #[serde(default)]
+    pub ids: Option<Vec<BeadId>>,
+    #[serde(default)]
+    pub states: Option<Vec<TrackerState>>,
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

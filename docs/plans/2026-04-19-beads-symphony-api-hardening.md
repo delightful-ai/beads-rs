@@ -12,6 +12,7 @@
 - `beads-rs-suj8.2` — typed tracker/board daemon RPC surface
 - `beads-rs-suj8.3` — Symphony beads tracker adapter
 - `beads-rs-suj8.4` — simple board app + end-to-end proof
+- `beads-rs-suj8.5` — make tracker state first-class in core instead of deriving it
 
 ## Scope Boundary
 
@@ -57,6 +58,13 @@ Add a typed tracker-oriented RPC layer that can support:
 - tracker comments / workpad notes
 - board-friendly issue projections
 
+Current branch status:
+- added `TrackerIssue`, `TrackerBlocker`, and `TrackerState` to `beads-api`
+- added `Request::TrackerList` plus `TrackerListPayload` to `beads-surface`
+- added daemon-side tracker projection and state derivation in `query_executor.rs`
+- verified the read surface compiles across `beads-api`, `beads-surface`, `beads-daemon`, and `beads-http`
+- remaining gap: first-class tracker write operations still need to be added so Symphony and a board client do not have to synthesize raw bead ops
+
 ### Tracker State Model
 
 Current best direction:
@@ -64,7 +72,22 @@ Current best direction:
 - expose an explicit tracker/board state model for app consumers
 - make the storage mapping deterministic and validated
 
-This is still the main design hinge. If the implementation proves that tracker state must become first-class in core to remain truthful, promote it there instead of hiding permanent semantics in a loose adapter.
+Current execution choice:
+- start with a validated derived mapping for the Symphony-facing API so the branch can prove the end-to-end contract quickly
+- track the honest long-term fix separately as `beads-rs-suj8.5`
+
+Derived mapping currently in flight:
+- `Open` -> `Todo`
+- `InProgress` -> `In Progress` unless a reserved `tracker-state:*` label upgrades it to `Human Review`, `Rework`, or `Merging`
+- `Closed(reason=done)` -> `Done`
+- `Closed(reason=cancelled|canceled)` -> `Cancelled`
+- `Closed(reason=duplicate)` -> `Duplicate`
+- other closed reasons -> `Closed`
+
+Guardrails:
+- open beads may not carry reserved tracker-state labels
+- closed beads may not carry reserved tracker-state labels
+- in-progress beads may carry at most one reserved tracker-state label
 
 ### Symphony Integration
 
@@ -76,11 +99,40 @@ Modify the local Symphony Elixir prototype to add:
 ## Execution Order
 
 1. Keep this execution note current while the branch evolves.
-2. Define the tracker-state model and typed RPC shapes in `beads-api` / `beads-surface`.
-3. Implement daemon handlers and HTTP coverage for the tracker surface.
-4. Add a simple board client and automated end-to-end proof.
-5. Modify Symphony to use a beads tracker adapter.
-6. Run local end-to-end verification with Symphony against a beads-backed issue set.
+2. Finish the typed tracker-state model and RPC shapes in `beads-api` / `beads-surface`.
+3. Add first-class tracker write operations so state transitions and comments do not leak raw bead internals.
+4. Add daemon and transport coverage for the tracker surface.
+5. Modify Symphony to use a beads tracker adapter over the HTTP RPC surface.
+6. Add a simple board client and exercise the main board flows locally.
+7. Run local end-to-end verification with Symphony against a beads-backed issue set.
+
+## Detailed TODOs
+
+- `beads-rs-suj8.1`
+  - [x] Create and maintain the execution note
+  - [ ] Keep verification evidence current as each surface lands
+  - [ ] Record exact Symphony runtime steps once the adapter runs locally
+- `beads-rs-suj8.2`
+  - [x] Add a Symphony-shaped tracker read model
+  - [x] Add `tracker_list` to the daemon RPC request surface
+  - [ ] Add first-class tracker mutation payloads and request variants
+  - [ ] Add daemon planner support for atomic tracker state transitions
+  - [ ] Add daemon planner support for tracker comments as a named surface
+  - [ ] Add focused owner-crate tests for tracker mapping and transition validation
+- `beads-rs-suj8.3`
+  - [ ] Add `tracker.kind: beads` to Symphony config validation
+  - [ ] Add a beads HTTP client in the Elixir prototype
+  - [ ] Add a beads tracker adapter that returns `SymphonyElixir.Linear.Issue` structs
+  - [ ] Route tracker adapter selection to the beads backend
+  - [ ] Cover the adapter with Elixir tests that do not require a live Linear token
+- `beads-rs-suj8.4`
+  - [ ] Add a small client or board app that talks to `/rpc`
+  - [ ] Prove list-by-state, refresh-by-id, transition, and comment flows
+  - [ ] Add one process-level daemon/HTTP assembly test
+  - [ ] Run a local manual/browser sanity pass against the simple app
+- `beads-rs-suj8.5`
+  - [ ] Leave the bead detailed enough that a later pass can cut over cleanly
+  - [ ] Revisit only if the derived mapping starts lying or blocking the Symphony flow
 
 ## Verification Log
 
@@ -89,10 +141,13 @@ Modify the local Symphony Elixir prototype to add:
   - created sibling workspace `/Users/darin/src/personal/beads-rs-symphony-api`
   - confirmed workspace base revision is `claude/api-layer-beads-tQP3A@origin`
   - inspected `crates/beads-http`, `beads-surface`, and local Symphony Elixir tracker boundary
-  - created epic `beads-rs-suj8` with child beads `.1` through `.4`
+  - created epic `beads-rs-suj8` with child beads `.1` through `.5`
+  - ran `cargo test -p beads-http`
+  - ran `cargo check -p beads-api -p beads-surface -p beads-daemon -p beads-http`
 
 ## Open Risks
 
 1. The honest place for tracker state may be deeper than a transport-layer addition.
 2. Symphony assumes richer state names than the current beads core model exposes.
 3. A thin raw RPC bridge is easy to test but not enough proof by itself; browser/manual exercise must catch shape or ergonomics problems.
+4. If tracker writes stay as raw `Update` / `Close` / label operations, the API layer will remain leaky even if Symphony can be made to work.

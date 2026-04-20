@@ -9,17 +9,17 @@ use crossbeam::channel::Sender;
 
 use super::core::{Daemon, ReadScope};
 use super::git_worker::GitOp;
-use super::ipc::{ReadConsistency, Response, ResponseExt, ResponsePayload};
+use super::ipc::{ReadConsistency, Response, ResponseExt, ResponsePayload, TrackerListPayload};
 use super::ops::{MapLiveError, OpError};
 use super::query::{Filters, QueryResult};
 use super::store::runtime::StoreRuntime;
-use crate::core::{BeadId, CanonicalState, DepKey, DepKind, WallClock};
+use crate::core::{BeadId, BeadProjection, BeadView, CanonicalState, DepKey, DepKind, Workflow, WallClock};
 use crate::git_lane::GitLaneState;
 use crate::remote::RemoteUrl;
 use beads_api::{
     BlockedIssue, CountGroup, CountResult, DeletedLookup, DepCycles, DepEdge, EpicStatus, Issue,
     IssueSummary, Note, ReadyResult, ShowDetails, StatusOutput, StatusSummary, SyncStatus,
-    SyncWarning, Tombstone,
+    SyncWarning, Tombstone, TrackerBlocker, TrackerIssue, TrackerState,
 };
 
 mod helpers;
@@ -42,6 +42,8 @@ struct StatusParts {
     consecutive_failures: u32,
     remote_url: RemoteUrl,
 }
+
+const TRACKER_STATE_LABEL_PREFIX: &str = "tracker-state:";
 
 impl Daemon {
     fn with_read_ctx<F, T>(
@@ -320,6 +322,46 @@ impl Daemon {
             }
 
             Ok(ResponsePayload::query(QueryResult::Issues(views)))
+        })
+    }
+
+    /// List tracker-facing issues for board/Symphony consumers.
+    pub(in crate::runtime) fn query_tracker_list(
+        &mut self,
+        repo: &Path,
+        payload: &TrackerListPayload,
+        read: ReadConsistency,
+        git_tx: &Sender<GitOp>,
+    ) -> Response {
+        self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
+            let mut issues = if let Some(ids) = payload.ids.as_ref() {
+                let mut selected = Vec::with_capacity(ids.len());
+                for id in ids {
+                    if let Some(view) = ctx.state.bead_view(id) {
+                        selected.push(tracker_issue_from_view(&ctx, &view)?);
+                    }
+                }
+                selected
+            } else {
+                let mut selected = Vec::new();
+                for (id, _) in ctx.state.iter_live() {
+                    if let Some(view) = ctx.state.bead_view(id) {
+                        selected.push(tracker_issue_from_view(&ctx, &view)?);
+                    }
+                }
+                sort_tracker_issues(&mut selected);
+                selected
+            };
+
+            if let Some(states) = payload.states.as_ref() {
+                issues.retain(|issue| states.contains(&issue.state));
+            }
+
+            if let Some(limit) = payload.limit {
+                issues.truncate(limit);
+            }
+
+            Ok(ResponsePayload::query(QueryResult::TrackerIssues(issues)))
         })
     }
 
@@ -1013,6 +1055,148 @@ impl Daemon {
             let cycles = dep_cycles_from_state(ctx.state);
             Ok(ResponsePayload::query(QueryResult::DepCycles(cycles)))
         })
+    }
+}
+
+fn sort_tracker_issues(issues: &mut [TrackerIssue]) {
+    issues.sort_by(|a, b| {
+        a.priority
+            .cmp(&b.priority)
+            .then_with(|| {
+                a.created_at_ms
+                    .unwrap_or(u64::MAX)
+                    .cmp(&b.created_at_ms.unwrap_or(u64::MAX))
+            })
+            .then_with(|| a.identifier.cmp(&b.identifier))
+    });
+}
+
+fn tracker_issue_from_view(ctx: &ReadCtx<'_>, view: &BeadView) -> Result<TrackerIssue, OpError> {
+    let projection = BeadProjection::from_view(view);
+    let state = tracker_state_from_projection(&projection)?;
+
+    Ok(TrackerIssue {
+        id: projection.bead.id().as_str().to_string(),
+        identifier: projection.bead.id().as_str().to_string(),
+        title: projection.bead.fields.title.value.clone(),
+        description: projection.bead.fields.description.value.clone(),
+        priority: projection.bead.fields.priority.value.value(),
+        state,
+        labels: projection
+            .labels
+            .iter()
+            .map(|label| label.as_str().to_ascii_lowercase())
+            .collect(),
+        assignee: projection
+            .assignee
+            .as_ref()
+            .map(|assignee| assignee.as_str().to_string()),
+        branch_name: projection
+            .created_on_branch()
+            .map(|branch| branch.as_str().to_string()),
+        url: None,
+        blocked_by: tracker_blockers_for_issue(ctx, projection.bead.id())?,
+        assigned_to_worker: true,
+        created_at_ms: Some(projection.created_at().wall_ms),
+        updated_at_ms: Some(projection.updated_at().wall_ms),
+    })
+}
+
+fn tracker_blockers_for_issue(
+    ctx: &ReadCtx<'_>,
+    id: &BeadId,
+) -> Result<Vec<TrackerBlocker>, OpError> {
+    let mut blockers = Vec::new();
+
+    for (blocker_id, kind) in ctx.state.dep_indexes().out_edges(id) {
+        if *kind != DepKind::Blocks {
+            continue;
+        }
+        let Some(blocker_view) = ctx.state.bead_view(blocker_id) else {
+            continue;
+        };
+        let blocker_projection = BeadProjection::from_view(&blocker_view);
+        blockers.push(TrackerBlocker {
+            id: blocker_id.as_str().to_string(),
+            identifier: blocker_id.as_str().to_string(),
+            state: tracker_state_from_projection(&blocker_projection)?,
+        });
+    }
+
+    blockers.sort_by(|a, b| a.identifier.cmp(&b.identifier));
+    Ok(blockers)
+}
+
+fn tracker_state_from_projection(projection: &BeadProjection) -> Result<TrackerState, OpError> {
+    let mut active_state_labels = Vec::new();
+
+    for label in projection.labels.iter() {
+        let normalized = label.as_str().trim().to_ascii_lowercase();
+        if !normalized.starts_with(TRACKER_STATE_LABEL_PREFIX) {
+            continue;
+        }
+        let Some(state) = tracker_state_from_label(&normalized) else {
+            return Err(tracker_state_validation_error(format!(
+                "unknown tracker-state label `{normalized}`"
+            )));
+        };
+        active_state_labels.push(state);
+    }
+
+    match &projection.bead.fields.workflow.value {
+        Workflow::Open => {
+            if !active_state_labels.is_empty() {
+                return Err(tracker_state_validation_error(
+                    "open bead cannot carry tracker-state labels",
+                ));
+            }
+            Ok(TrackerState::Todo)
+        }
+        Workflow::InProgress => match active_state_labels.as_slice() {
+            [] => Ok(TrackerState::InProgress),
+            [state] => Ok(*state),
+            _ => Err(tracker_state_validation_error(
+                "in-progress bead cannot carry multiple tracker-state labels",
+            )),
+        },
+        Workflow::Closed(closure) => {
+            if !active_state_labels.is_empty() {
+                return Err(tracker_state_validation_error(
+                    "closed bead cannot carry tracker-state labels",
+                ));
+            }
+            Ok(tracker_terminal_state(closure.reason.as_deref()))
+        }
+    }
+}
+
+fn tracker_state_from_label(label: &str) -> Option<TrackerState> {
+    match label {
+        "tracker-state:human-review" => Some(TrackerState::HumanReview),
+        "tracker-state:rework" => Some(TrackerState::Rework),
+        "tracker-state:merging" => Some(TrackerState::Merging),
+        _ => None,
+    }
+}
+
+fn tracker_terminal_state(reason: Option<&str>) -> TrackerState {
+    let Some(reason) = reason.map(|value| value.trim().to_ascii_lowercase()) else {
+        return TrackerState::Closed;
+    };
+
+    match reason.as_str() {
+        "" | "closed" => TrackerState::Closed,
+        "done" => TrackerState::Done,
+        "cancelled" | "canceled" => TrackerState::Cancelled,
+        "duplicate" => TrackerState::Duplicate,
+        _ => TrackerState::Closed,
+    }
+}
+
+fn tracker_state_validation_error(reason: impl Into<String>) -> OpError {
+    OpError::ValidationFailed {
+        field: "tracker_state".into(),
+        reason: reason.into(),
     }
 }
 
