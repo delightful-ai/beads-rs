@@ -1,3 +1,4 @@
+use beads_bootstrap::repo as bootstrap_repo;
 use beads_cli::backend::{
     CliHostBackend, DepsFormat, MigrateApplyImportOutcome, MigrateApplyImportRequest,
     MigrateDetectOutcome, MigrateDetectRequest, MigrateRefreshRequest, MigrateToOutcome,
@@ -69,7 +70,7 @@ impl CliHostBackend for BeadsRsCliBackend {
     }
 
     fn run_migrate_detect(&self, request: MigrateDetectRequest) -> Result<MigrateDetectOutcome> {
-        let repo = Repository::discover(&request.repo)
+        let (repo, _) = bootstrap_repo::discover(&request.repo)
             .map_err(|err| beads_git::SyncError::OpenRepo(request.repo, err))?;
         detect_store_migration_state(&repo)
     }
@@ -86,7 +87,7 @@ impl CliHostBackend for BeadsRsCliBackend {
             }));
         }
 
-        let repo = Repository::discover(&request.repo)
+        let (repo, _) = bootstrap_repo::discover(&request.repo)
             .map_err(|err| beads_git::SyncError::OpenRepo(request.repo.clone(), err))?;
 
         let migrated = match sync::migrate_store_ref_to_v1(
@@ -144,7 +145,7 @@ impl CliHostBackend for BeadsRsCliBackend {
         &self,
         request: MigrateApplyImportRequest,
     ) -> Result<MigrateApplyImportOutcome> {
-        let repo = git2::Repository::discover(&request.repo)
+        let (repo, _) = bootstrap_repo::discover(&request.repo)
             .map_err(|err| beads_git::SyncError::OpenRepo(request.repo.clone(), err))?;
 
         if repo.refname_to_id("refs/heads/beads/store").is_ok() && !request.force {

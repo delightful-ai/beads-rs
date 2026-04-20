@@ -3,6 +3,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use beads_bootstrap::repo as bootstrap_repo;
 use git2::{ErrorCode as GitErrorCode, Repository};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -114,8 +115,8 @@ impl StoreCaches {
             return Ok(remote.clone());
         }
 
-        let repo =
-            Repository::open(repo_path).map_err(|_| OpError::NotAGitRepo(repo_path.to_owned()))?;
+        let (repo, _) = bootstrap_repo::discover(repo_path)
+            .map_err(|_| OpError::NotAGitRepo(repo_path.to_owned()))?;
         let remote = repo
             .find_remote("origin")
             .map_err(|_| OpError::NoRemote(repo_path.to_owned()))?;
@@ -155,7 +156,7 @@ impl StoreCaches {
             if resolution.is_verified() {
                 return Ok(resolution);
             }
-            if let Ok(repo) = Repository::open(repo_path)
+            if let Ok((repo, _)) = bootstrap_repo::discover(repo_path)
                 && let Some(resolution) = resolve_verified_store_id(&repo)?
             {
                 return Ok(resolution);
@@ -164,7 +165,7 @@ impl StoreCaches {
         }
 
         if let Some(resolution) = mapped {
-            if let Ok(repo) = Repository::open(repo_path)
+            if let Ok((repo, _)) = bootstrap_repo::discover(repo_path)
                 && let Some(resolution) = resolve_verified_store_id(&repo)?
             {
                 return Ok(resolution);
@@ -172,8 +173,8 @@ impl StoreCaches {
             return Ok(resolution);
         }
 
-        let repo =
-            Repository::open(repo_path).map_err(|_| OpError::NotAGitRepo(repo_path.to_owned()))?;
+        let (repo, _) = bootstrap_repo::discover(repo_path)
+            .map_err(|_| OpError::NotAGitRepo(repo_path.to_owned()))?;
 
         if let Some(resolution) = resolve_verified_store_id(&repo)? {
             return Ok(resolution);
