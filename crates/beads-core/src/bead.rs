@@ -238,7 +238,11 @@ pub struct BeadView {
 
 impl BeadView {
     pub fn new(bead: Bead, labels: Labels, notes: Vec<Note>, label_stamp: Option<Stamp>) -> Self {
-        let updated_stamp = compute_updated_stamp(&bead, label_stamp.as_ref(), &notes);
+        let note_stamp = notes
+            .iter()
+            .map(|note| Stamp::new(note.at.clone(), note.author.clone()))
+            .max();
+        let updated_stamp = compute_updated_stamp(&bead, label_stamp.as_ref(), note_stamp.as_ref());
         let content_hash = compute_content_hash(&bead, &labels, &notes);
         Self {
             bead,
@@ -667,12 +671,12 @@ mod tests {
     }
 }
 
-fn compute_updated_stamp(bead: &Bead, label_stamp: Option<&Stamp>, notes: &[Note]) -> Stamp {
+pub fn compute_updated_stamp(
+    bead: &Bead,
+    label_stamp: Option<&Stamp>,
+    note_stamp: Option<&Stamp>,
+) -> Stamp {
     let field_max = bead.fields.all_stamps().max().cloned();
-    let note_max = notes
-        .iter()
-        .map(|note| Stamp::new(note.at.clone(), note.author.clone()))
-        .max();
 
     let mut max_stamp = field_max;
     if let Some(label_stamp) = label_stamp {
@@ -681,10 +685,10 @@ fn compute_updated_stamp(bead: &Bead, label_stamp: Option<&Stamp>, notes: &[Note
             None => label_stamp.clone(),
         });
     }
-    if let Some(note_stamp) = note_max {
+    if let Some(note_stamp) = note_stamp {
         max_stamp = Some(match max_stamp {
-            Some(existing) => std::cmp::max(existing, note_stamp),
-            None => note_stamp,
+            Some(existing) => std::cmp::max(existing, note_stamp.clone()),
+            None => note_stamp.clone(),
         });
     }
 

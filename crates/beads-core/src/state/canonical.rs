@@ -4,7 +4,7 @@ use std::sync::OnceLock;
 
 use serde::{Deserialize, Serialize};
 
-use crate::bead::{Bead, BeadView, SameLineageBead};
+use crate::bead::{Bead, BeadView, SameLineageBead, compute_updated_stamp};
 use crate::collections::{Label, Labels};
 use crate::composite::Note;
 use crate::crdt::Crdt;
@@ -433,21 +433,13 @@ impl CanonicalState {
 
     fn updated_stamp_for_merge(&self, id: &BeadId, bead: &Bead) -> Stamp {
         let lineage = bead.core.created();
-        let labels = self.labels_for_lineage(id, lineage);
-        let notes = self
-            .notes
-            .notes_for(id, lineage)
-            .into_iter()
-            .cloned()
-            .collect::<Vec<_>>();
         let label_stamp = self
             .labels
             .state(id, lineage)
-            .and_then(|state| state.stamp())
-            .cloned();
-        BeadView::new(bead.clone(), labels, notes, label_stamp)
-            .updated_stamp()
-            .clone()
+            .and_then(|state| state.stamp());
+        let note_stamp = self.notes.max_stamp_for(id, lineage);
+
+        compute_updated_stamp(bead, label_stamp, note_stamp.as_ref())
     }
 
     pub fn apply_label_add(
