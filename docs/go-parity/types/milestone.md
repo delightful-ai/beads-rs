@@ -4,6 +4,8 @@
 
 **Parity status:** `deferred`
 
+**Namespace:** core
+
 **Aliases:** `ms` (Go `types.go:597-598`, `Normalize()`).
 
 ## Purpose

@@ -4,6 +4,8 @@
 
 **Parity status:** `deferred`
 
+**Namespace:** core
+
 **See also:** `convoy.md`, `primitives/vcs-integration.md` (TBD).
 
 ## Purpose

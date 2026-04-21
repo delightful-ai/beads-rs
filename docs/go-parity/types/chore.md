@@ -4,6 +4,8 @@
 
 **Parity status:** `faithful`
 
+**Namespace:** core
+
 ## Purpose
 
 Repo hygiene with no behavior delta: dependency bumps, lint fixes, renames,

@@ -4,6 +4,8 @@
 
 **Parity status:** `deferred`
 
+**Namespace:** core
+
 **See also:** `primitives/convergence-loops.md` (TBD),
 `primitives/metadata-remapping.md` (TBD).
 

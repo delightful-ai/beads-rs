@@ -4,6 +4,8 @@
 
 **Parity status:** `deferred`
 
+**Namespace:** core
+
 **See also:** `molecule.md`, `primitives/molecules.md` (TBD),
 `merge-request.md`.
 

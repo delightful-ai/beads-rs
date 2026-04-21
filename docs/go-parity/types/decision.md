@@ -4,6 +4,8 @@
 
 **Parity status:** `deferred`
 
+**Namespace:** core
+
 **Aliases:** `dec`, `adr` (Go `types.go:588-591`, `Normalize()`).
 
 ## Purpose

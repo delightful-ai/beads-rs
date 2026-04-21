@@ -2,8 +2,8 @@
 
 **Go source:** `cmd/bd/show.go` + `show_display.go`, `show_format.go`, `show_children.go`, `show_refs.go`, `show_thread.go`, `show_unit_helpers.go`
 **Pin:** v1.0.2 (c446a2ef)
-**Parity status:** `deferred` — beads-rs `bd show` exists but emits a different JSON shape (see Rust parity notes).
-**Rust source:** `crates/beads-cli/src/commands/show/` (diverged)
+**Parity status:** `simplified` — beads-rs `bd show` exists but emits a different JSON envelope + field shape than Go. Command is implemented; wire compat pending (see `../GASCITY_SURFACE.md` for the full delta).
+**Rust source:** `crates/beads-cli/src/commands/show.rs`
 
 ## Purpose
 
@@ -175,39 +175,41 @@ Two artifacts: a human-readable `Error fetching ...` line on stderr AND a JSON e
 
 ## Rust parity notes
 
-### Current divergence (v0.2.0-alpha)
+### Current state (v0.2.0-alpha)
 
-beads-rs's `bd show` emits a **different JSON shape** than Go. Key differences from the beads-rs `Issue` schema (`crates/beads-api/src/issues.rs`):
+beads-rs has `bd show` and it works. The gap is wire-shape, not capability. Key divergences:
 
-| Field | Go v1.0.2 | beads-rs | Notes |
-|-------|-----------|----------|-------|
-| type | `issue_type` | `type` (serde-renamed) | Go uses longer key; Rust matches internal field name. |
-| timestamps | RFC3339 string | `{wall_ms: u64, counter: u32}` | Rust emits structured HLC `WriteStamp`; breaks RFC3339 parsing on Go consumers. |
-| assignee | `owner` (email) | `assignee` (string) | Go v1.0.0 renamed to `owner` in output; Rust kept `assignee`. |
-| dependencies | flattened when present | `deps_incoming` / `deps_outgoing` arrays | Rust splits direction into two typed lists. |
-| metadata | absent from default output; `--long` surfaces slots | no metadata field at all | Rust has no metadata primitive yet (see `primitives/slots.md`). |
-| namespace | implicit | `namespace` always present | Rust has first-class namespaces; Go uses prefix-in-ID. |
-| content_hash | absent | `content_hash` always present | Rust exposes CRDT content hash for dedup/sync. |
+| Dimension | Go v1.0.2 | beads-rs | Decision |
+|-----------|-----------|----------|----------|
+| Envelope | bare array `[{...}]` | wrapped `{"result": "issue"\|"issues", "data": ...}` | **Drop the wrapper for gascity-shaped commands** — user decided to adopt Go's CLI shape. |
+| Type field | `"issue_type"` | `"type"` (serde-renamed internally) | **Rename the wire serialization to `"issue_type"`** — keep internal `type` field, serde-rename only. |
+| Timestamps | RFC3339 string | `{wall_ms: u64, counter: u32}` | **Emit RFC3339 on the wire** — keep HLC `WriteStamp` as the internal ordering primitive; lossy wire is fine, domain model stays rich. |
+| Assignee | `"owner"` (email, v1.0.0 rename) | `"assignee"` | **Rename wire to `"owner"`** — matches Go v1.0.0+ convention. |
+| Dependencies | flattened to full issue objects with `dependency_type` grafted | `deps_incoming[]` / `deps_outgoing[]` with `{from, to, kind}` shape | **Emit flattened Go shape on wire** — keep the directional split internally (it's the right model), project to Go's shape at the wire layer. |
+| Metadata | `metadata{}` arbitrary JSON | absent | **Stays absent** — see `../primitives/metadata-remapping.md` (typed fields on typed variants replace metadata). Keys gascity uses surface as typed enums on typed bead variants. |
+| Namespace | implicit in ID prefix | explicit `"namespace"` field | Keep Rust's explicit namespace; Go doesn't have first-class namespaces. See `../primitives/namespaces.md`. |
+| Content hash | absent | `"content_hash"` always present | Keep — load-bearing for CRDT dedup + sync. |
 
 ### Forcing functions
 
-- **`WriteStamp` is not RFC3339.** beads-rs's ordering primitive is an HLC pair `(wall_ms, counter)`, deliberately exposed on the wire so consumers can reason about causality without parsing timestamps back into HLC ordering. Emitting RFC3339 would lose the counter dimension and make "same wall_ms different counter" events indistinguishable — which is the exact problem HLCs exist to solve.
-- **CRDT content hash is load-bearing.** `content_hash` is how replicas confirm they agree on a bead's state without full comparison. Omitting it from output would hide useful consumer-side deduplication.
-- **No metadata field yet.** This is the direct mapping question this spec subtree exists to answer. Go's Slots (v1.0.0+) is the closest concept — see `primitives/slots.md` (to be written).
+- **Wire vs domain are different layers.** `WriteStamp` stays `{wall_ms, counter}` internally; the wire serialization emits RFC3339. Losing the counter dimension on the wire is acceptable because consumers who need causality query the daemon directly, not parse wire JSON.
+- **No metadata field.** Intentional — see `../primitives/metadata-remapping.md` and the per-type files under `../types/`. Every key gascity writes (`convergence.*`, `gc.*`, `convoy.*`, session state, extmsg records) has a typed home on a typed bead variant.
 
 ### Parity path
 
-To reach `faithful` status, beads-rs needs (in priority order):
+Gascity-compat depends on beads-rs work not in this file:
 
-1. **Compat JSON mode** on read commands: `--wire=go` or similar, emitting RFC3339 timestamps, `issue_type`/`owner` field names, flattened `dependencies[]`. This is the gascity unblocker.
-2. **Slots primitive** to host consumer-owned scratch, matching Go's `SlotSet`/`SlotGet`/`SlotClear` shape.
-3. **`--as-of` declined explicitly** — CRDT stamps don't map to Dolt commit hashes. Document the equivalent beads-rs path (query at a specific `WriteStamp`).
-4. **`--current`** requires a session-state concept beads-rs doesn't have yet. Deferred until hooks/sessions land.
-5. **`--thread`** depends on message type + replies-to dependency edges, both deferred.
+1. **Envelope + field-rename wire layer** — top-priority structural CLI work (see `../GASCITY_SURFACE.md §0`).
+2. **Open BeadType enum** so `--type=molecule` (etc.) doesn't error. Prerequisite for any custom-type consumer.
+3. **Namespace cross-ref fix** so `show` of a bead whose dep points at another namespace returns coherent deps, not orphans. See `../primitives/namespaces.md`.
+4. **`--as-of`** declined — CRDT stamps don't map to Dolt commit hashes. Equivalent beads-rs path is query at a specific `WriteStamp`.
+5. **`--current`** requires session-state lookup; blocked on the sessions namespace landing.
+6. **`--thread`** requires `Message` type + `replies-to` dep kind (see `../types/message.md`).
 
 ### What matches today
 
 - Positional multi-ID invocation works.
 - `--json` flag honored.
-- Core field set (id, title, description, status, priority, labels, assignee) populated.
+- Core field set (id, title, description, status, priority, labels, assignee, created_at, updated_at) populated.
 - Unknown-ID error path has a JSON envelope and non-zero exit.
+- Hierarchical child IDs (`rs-id-test-vd0.1`) parse and display correctly — confirmed via `BeadId::parse` at `crates/beads-core/src/identity.rs:535-536`.

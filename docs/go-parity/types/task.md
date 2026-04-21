@@ -4,6 +4,8 @@
 
 **Parity status:** `faithful`
 
+**Namespace:** core
+
 ## Purpose
 
 The default issue type — a generic unit of actionable work. `task` has no

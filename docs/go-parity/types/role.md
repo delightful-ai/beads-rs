@@ -4,6 +4,8 @@
 
 **Parity status:** `deferred`
 
+**Namespace:** core
+
 **See also:** `agent.md`, `session.md` (TBD at `primitives/sessions.md`),
 `rig.md`.
 

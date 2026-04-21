@@ -4,6 +4,8 @@
 
 **Parity status:** `deferred`
 
+**Namespace:** core
+
 **Aliases:** `investigation`, `timebox` (Go `types.go:593-594`, `Normalize()`).
 
 ## Purpose

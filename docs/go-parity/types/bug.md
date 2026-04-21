@@ -4,6 +4,8 @@
 
 **Parity status:** `faithful`
 
+**Namespace:** core
+
 ## Purpose
 
 A defect in shipped behavior: the system does X when it should do Y. `bug`

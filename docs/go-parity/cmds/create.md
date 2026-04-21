@@ -2,8 +2,8 @@
 
 **Go source:** `cmd/bd/create.go` + `create_embedded_test.go`, `create_graph.go`, `create_embedded_graph_test.go`
 **Pin:** v1.0.2 (c446a2ef)
-**Parity status:** `simplified` — beads-rs `bd create` exists but covers a narrow subset of Go's flag surface.
-**Rust source:** `crates/beads-cli/src/commands/create.rs` (partial)
+**Parity status:** `simplified` — beads-rs `bd create` covers most of Go's single-issue field surface; lifecycle, event-typing, and batch-graph flags are deferred. Wire envelope + type field name diverge (see `../GASCITY_SURFACE.md §0`).
+**Rust source:** `crates/beads-cli/src/commands/create.rs`
 
 ## Purpose
 
@@ -311,46 +311,59 @@ Exit code `1`. Error envelope is a flat `{"error": "..."}` object. The validatio
 
 ## Rust parity notes
 
-### Current divergence (v0.2.0-alpha)
+### Current state (v0.2.0-alpha)
 
-beads-rs's `bd create` covers the basic field set (title, description, type, priority, labels, assignee) but is missing most of Go's structural and lifecycle flags. Major gaps:
+beads-rs has `bd create` with most of Go's single-issue flags. Confirmed by live capture + reading `crates/beads-cli/src/commands/create.rs`:
 
-| Capability | Go v1.0.2 | beads-rs | Parity gap |
-|------------|-----------|----------|------------|
-| `--metadata` | first-class, arbitrary JSON | not implemented | Deferred until Slots primitive lands. |
-| `--parent` + hierarchical IDs | dotted suffix convention | not implemented | beads-rs uses flat IDs + explicit `parent-child` dep edges. Deliberate divergence. |
-| `--deps type:id` | typed edges on create | not implemented | Must currently two-step: `bd create` then `bd dep add`. |
-| `--file <md>` batch | bulk create from markdown | not implemented | |
-| `--graph <json>` | bulk create from plan | not implemented | |
-| `--ephemeral` / `--wisp-type` | wisp lifecycle | not implemented | Deferred until wisp primitive lands. |
-| `--mol-type` | molecule typing | not implemented | Deferred until molecule primitive lands. |
-| `--event-*` | event-type fields | not implemented | Deferred until event type lands. |
-| `--waits-for` | fanout gate dep | not implemented | Deferred until gate primitive lands. |
-| `--dry-run` | preview envelope | not implemented | |
-| `--validate` | section-required validation | not implemented | |
-| `--silent` | ID-only output | not implemented | |
-| `--defer` / `--due` | scheduled visibility | not implemented | |
+**Implemented in Rust today** — aligned with Go:
+- `--title` (positional or flag), `-t/--type`, `-p/--priority`, `-d/--description`, `--body-file`, `--stdin`
+- `-a/--assignee`, `-l/--labels`, `--design`, `--design-file`, `--acceptance`
+- `--external-ref`, `-e/--estimate`, `--id` (explicit ID), `--force` (no-op)
+- **`--parent`** — adds `parent` dep edge **and** produces hierarchical child IDs (`rs-id-test-vd0.1`); `BeadId::parse` at `crates/beads-core/src/identity.rs:535-536` accepts hierarchical children
+- **`--deps`** — accepts `"type:id,type:id"` comma-list or repeated flag, same syntax as Go
+- **`-f/--file`** — batch create from markdown
+- `--json`, `--quiet`, `--verbose`, namespace/durability/idempotency globals
 
-### Forcing functions
+**Missing from Rust** — gaps vs Go:
 
-- **Metadata needs a home.** The "Slots as opaque consumer scratch" primitive (see `primitives/slots.md`, to be written) is the canonical answer. Until it lands, `--metadata` has no target shape in beads-rs.
-- **Hierarchical IDs vs flat + dep edges.** Go overloads the ID string with parentage (`bd-8mz.1`). beads-rs uses flat hash IDs plus explicit `parent-child` dependency edges, matching the CRDT substrate better. A flag like `--parent` becomes sugar for "create + dep-add parent-child".
-- **Dotted IDs on `children` lookup.** Go's children query can scan by ID prefix (`bd-8mz.*`); beads-rs must go through the dep graph. Equivalent, not identical.
-- **Dry-run envelope shape.** The zero-valued timestamp placeholder is arguably a Go design wart (`0001-01-01T00:00:00Z` is the nil `time.Time`). beads-rs should emit an envelope WITHOUT those fields rather than reproducing the zero-value quirk.
+| Capability | Go v1.0.2 | Target shape in beads-rs |
+|------------|-----------|--------------------------|
+| `--metadata` | arbitrary JSON | **Decline.** Every gascity metadata key has a typed home — see `../primitives/metadata-remapping.md`. Typed flags replace `--metadata` per bead variant (e.g., `--gate-mode`, `--mol-kind`, `--convoy-merge`). |
+| `--notes`, `--append-notes` | attach notes at creation | Add — notes are already typed in `BeadProjection`. |
+| `--context` | extra unstructured context | Deferred — figure out if context belongs in description or separately. |
+| `--spec-id`, `--skills` | soft refs to external state | Deferred — may become typed fields or labels; decide per `../primitives/metadata-remapping.md`. |
+| `--no-inherit-labels` | opt out of parent's labels | Add once label-inheritance semantics are decided. |
+| `--waits-for`, `--waits-for-gate` | fanout gate dep | Add when Gate type + `waits-for` dep kind land (see `../types/gate.md`, `../primitives/dep-kinds.md`). |
+| `--defer`, `--due` | scheduled visibility | Deferred — needs a scheduling primitive; `../primitives/metadata-remapping.md` flags this as Revisit material. |
+| `--ephemeral`, `--wisp-type` | wisp lifecycle | Replace with **namespace-level** ephemeral/GC policy — see `../primitives/namespaces.md` + `../types/wisp.md`. |
+| `--mol-type` | molecule kind (swarm/patrol/work) | Add as typed flag once `Molecule` variant lands (see `../types/molecule.md`). |
+| `--event-actor/-category/-payload/-target` | event-type fields | Add once `Event` variant lands (see `../types/event.md`). |
+| `--no-history` | skip Dolt commit entry | Decline — Dolt-specific. Rust equivalent is namespace with `persist_to_git=false` (see `../primitives/namespaces.md`). |
+| `--graph` | bulk create from JSON plan | Add — structural, gascity uses this in `bdstore_graph_apply.go`. |
+| `--dry-run` | preview what would be created | Add. Don't reproduce Go's zero-timestamp placeholder quirk; emit an envelope without timestamps. |
+| `--validate` | required-sections check | Add once `RequiredSections` per type is defined. |
+| `--silent` | emit ID only | Add — trivial, script-friendly. |
+| `--repo` | target repo routing | Deferred — multi-repo sync is its own design. |
 
-### Parity path
+### Wire-shape gaps (not per-flag)
 
-1. **Slots primitive + `--metadata` support** — critical for gascity integration.
-2. **`--parent` as syntactic sugar** — translate to flat ID creation + `parent-child` dep edge. Preserves Go's CLI ergonomics without adopting Go's ID overloading.
-3. **`--deps type:id` multi-value parsing** — translate to one dep-add call per entry in the same transaction.
-4. **Lifecycle flags as the corresponding primitives land** — `--ephemeral`, `--wisp-type`, `--mol-type`, `--event-*`, `--waits-for`.
-5. **Dry-run as the CRDT-stamp-ID-preview envelope** — beads-rs can show the computed ID and planned `WriteStamp` without persisting. Don't reproduce Go's zero-timestamp placeholder.
-6. **Batch (`--file`, `--graph`) last** — these are convenience, not structural.
+From `../GASCITY_SURFACE.md §0`:
+
+1. **Envelope:** Go returns bare object `{...}`; Rust returns `{"result":"issue","data":{...}}`. Decision: drop the wrapper.
+2. **Field rename:** Go emits `"issue_type"`, Rust emits `"type"`. Decision: serde-rename Rust to `"issue_type"` on the wire.
+3. **Timestamp format:** Go emits RFC3339 string, Rust emits `{wall_ms, counter}`. Decision: emit RFC3339 on the wire; keep HLC internally.
+4. **Assignee → owner rename:** Go v1.0.0+ renamed to `"owner"`. Decision: serde-rename Rust's `assignee` to `"owner"` on the wire.
+5. **Dependencies shape:** Go flattens `dependencies[]{…full issue…, dependency_type}` + `dependents[]`. Rust splits `deps_incoming`/`deps_outgoing` with `{from,to,kind}`. Decision: project to Go's flattened shape at the wire layer; keep the directional split in the domain model.
+
+### Forcing functions that didn't survive the re-scoping
+
+The earlier draft of this file claimed Rust uses "flat IDs + explicit parent-child dep edges" as a deliberate divergence from Go's dotted-suffix convention. **That was wrong.** Rust accepts and produces hierarchical IDs. `BeadId::parse` at `crates/beads-core/src/identity.rs:535-536` explicitly accepts `<slug>-<root>.<n>[.<n>...]` forms, and `bd create --parent <id>` produces `<id>.<n>` children. Same mechanism as Go.
 
 ### What matches today
 
 - Positional title → new issue works.
-- `--type`, `--priority`, `--labels`, `--description` honored.
-- `--json` produces a bare object (not array).
-- Default values for `--type` (`task`) and `--priority` (`P2`) align.
+- `--type`, `--priority`, `--labels`, `--description`, `--parent`, `--deps`, `--design`, `--acceptance`, `--external-ref`, `--id`, `--file`, `--estimate` all honored.
+- Hierarchical child IDs (`<parent>.<n>`) produced when `--parent` given.
+- `--json` produces a single-object response (wrapped in the envelope).
+- Default `--type` = `task` and `--priority` = `P2` align with Go.
 - Validation error path returns non-zero exit.

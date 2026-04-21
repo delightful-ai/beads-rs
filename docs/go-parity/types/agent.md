@@ -4,6 +4,8 @@
 
 **Parity status:** `deferred`
 
+**Namespace:** core
+
 **See also:** `role.md`, `rig.md`, `primitives/sessions.md` (TBD).
 
 ## Purpose

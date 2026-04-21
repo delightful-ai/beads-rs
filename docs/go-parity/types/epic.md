@@ -3,6 +3,8 @@
 **Pin:** v1.0.2, c446a2ef
 
 **Parity status:** `extended` (ships today as `faithful`, will extend once
+
+**Namespace:** core
 molecule semantics land)
 
 ## Purpose

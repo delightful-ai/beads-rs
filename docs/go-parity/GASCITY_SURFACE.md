@@ -1,3 +1,5 @@
+> **Note:** This file has been split into per-command files under [`cmds/gascity/`](cmds/gascity/README.md). That directory is the editing surface going forward; this monolithic copy is retained as a single-page reference. If you update one side, update the other.
+
 # Gascity Surface — Parity Backlog
 
 **Pin:** Go `bd` v1.0.2 (`c446a2ef`) vs. beads-rs at current HEAD (`bd 0.2.0-alpha`).

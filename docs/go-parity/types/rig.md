@@ -4,6 +4,8 @@
 
 **Parity status:** `deferred`
 
+**Namespace:** core
+
 **See also:** `primitives/namespaces.md` (TBD), `agent.md`, `role.md`.
 
 ## Purpose

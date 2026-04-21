@@ -4,6 +4,8 @@
 
 **Parity status:** `faithful`
 
+**Namespace:** core
+
 ## Purpose
 
 A user-visible capability delta: new behavior, new API surface, new UI path.

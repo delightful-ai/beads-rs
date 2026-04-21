@@ -4,6 +4,8 @@
 
 **Parity status:** `deferred`
 
+**Namespace:** core
+
 **See also:** `primitives/slots.md` (TBD — the mechanism), `agent.md`.
 
 ## Purpose

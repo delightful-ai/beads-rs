@@ -4,6 +4,8 @@
 
 **Parity status:** `deferred`
 
+**Namespace:** core
+
 **See also:** `primitives/mail.md` (TBD), `event.md`,
 `primitives/metadata-remapping.md` (TBD).
 

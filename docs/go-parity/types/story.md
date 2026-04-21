@@ -4,6 +4,8 @@
 
 **Parity status:** `deferred`
 
+**Namespace:** core
+
 **Aliases:** `user-story`, `user_story` (Go `types.go:595-596`, `Normalize()`).
 
 ## Purpose

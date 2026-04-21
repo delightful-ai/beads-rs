@@ -4,6 +4,8 @@
 
 **Parity status:** `deferred`
 
+**Namespace:** core
+
 **See also:** `primitives/molecules.md` (TBD), `primitives/formulas.md` (TBD),
 `convoy.md`, `wisp.md`.
 
