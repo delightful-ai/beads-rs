@@ -3153,6 +3153,44 @@ mod tests {
     }
 
     #[test]
+    fn repeated_checkpoint_import_does_not_require_imported_events_in_local_wal() {
+        let _tmp = test_store_dir();
+        let mut daemon = Daemon::new(test_actor());
+        let remote = test_remote();
+
+        let repo_dir = TempDir::new().unwrap();
+        let _repo = Repository::init(repo_dir.path()).unwrap();
+
+        let store_id = store_id_from_remote(&remote);
+        insert_store_for_tests(&mut daemon, store_id, remote.clone(), repo_dir.path())
+            .expect("store init");
+
+        let origin = daemon
+            .store_sessions
+            .get(&store_id)
+            .expect("store session")
+            .runtime()
+            .meta
+            .replica_id;
+        let policy_hash = store_policy_hash(&daemon, store_id);
+        write_valid_checkpoint_cache_entry(
+            store_id,
+            "core",
+            origin,
+            3,
+            policy_hash,
+            "bd-cache-replay",
+        );
+
+        daemon
+            .apply_loaded_repo_state(store_id, &remote, repo_dir.path(), empty_load_result())
+            .expect("initial checkpoint import");
+        daemon
+            .apply_loaded_repo_state(store_id, &remote, repo_dir.path(), empty_load_result())
+            .expect("checkpoint import should remain replayable after restart");
+    }
+
+    #[test]
     fn incompatible_checkpoint_git_still_schedules_rebuild_when_cache_import_succeeds() {
         let _tmp = test_store_dir();
         let mut daemon = Daemon::new(test_actor());

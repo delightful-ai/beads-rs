@@ -213,6 +213,7 @@ impl Daemon {
             }
         }
 
+        let replay_floor = checkpoint_replay_floor(&checkpoint_imports.imports);
         let pending_replay = {
             let store_dir = self.layout().store_dir(&store_id);
             let store = self
@@ -220,7 +221,13 @@ impl Daemon {
                 .get(&store_id)
                 .expect("loaded store missing from state")
                 .runtime();
-            replay_event_wal(&store_dir, store.wal_index.as_ref(), state, self.limits())?
+            replay_event_wal(
+                &store_dir,
+                store.wal_index.as_ref(),
+                state,
+                &replay_floor,
+                self.limits(),
+            )?
         };
 
         {

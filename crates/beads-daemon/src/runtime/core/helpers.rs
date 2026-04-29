@@ -130,6 +130,27 @@ pub(super) fn apply_checkpoint_watermarks(
     Ok(())
 }
 
+pub(super) fn checkpoint_replay_floor(
+    imports: &[CheckpointImport],
+) -> BTreeMap<(NamespaceId, ReplicaId), Seq0> {
+    let mut floor = BTreeMap::new();
+    for import in imports {
+        for (namespace, origin_map) in &import.included {
+            for (origin, seq) in origin_map {
+                floor
+                    .entry((namespace.clone(), *origin))
+                    .and_modify(|current: &mut Seq0| {
+                        if current.get() < *seq {
+                            *current = Seq0::new(*seq);
+                        }
+                    })
+                    .or_insert_with(|| Seq0::new(*seq));
+            }
+        }
+    }
+    floor
+}
+
 pub(super) fn checkpoint_head_status(
     included_heads: Option<&IncludedHeads>,
     namespace: &NamespaceId,
@@ -287,6 +308,7 @@ pub fn replay_event_wal(
     store_dir: &Path,
     wal_index: &dyn WalIndex,
     state: StoreState,
+    replay_floor: &BTreeMap<(NamespaceId, ReplicaId), Seq0>,
     limits: &Limits,
 ) -> Result<PendingReplayApply, StoreRuntimeError> {
     let mut state = state;
@@ -322,7 +344,10 @@ pub fn replay_event_wal(
         })?;
 
         let state_for_namespace = state.ensure_namespace(namespace.clone());
-        let mut from_seq_excl = Seq0::ZERO;
+        let mut from_seq_excl = replay_floor
+            .get(&(namespace.clone(), row.origin))
+            .copied()
+            .unwrap_or(Seq0::ZERO);
         while from_seq_excl.get() < row.applied().seq().get() {
             let items = wal_index.reader().iter_from(
                 &namespace,

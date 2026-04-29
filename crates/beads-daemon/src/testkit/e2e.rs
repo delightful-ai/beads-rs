@@ -394,9 +394,15 @@ impl TestNode {
             let store_dir = crate::daemon_layout_from_paths().store_dir(&store_id);
             if let Some(store) = inner.daemon.store_runtime_by_id_mut(store_id) {
                 let state = std::mem::take(&mut store.state);
-                replay_event_wal(&store_dir, store.wal_index.as_ref(), state, &limits)
-                    .expect("replay wal")
-                    .acknowledge_checkpoint_dirty(store);
+                replay_event_wal(
+                    &store_dir,
+                    store.wal_index.as_ref(),
+                    state,
+                    &BTreeMap::new(),
+                    &limits,
+                )
+                .expect("replay wal")
+                .acknowledge_checkpoint_dirty(store);
             }
         }
 
