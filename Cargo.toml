@@ -10,6 +10,7 @@ members = [
     "crates/beads-git",
     "crates/beads-daemon",
     "crates/beads-daemon-core",
+    "crates/beads-http",
     "crates/beads-rs",
     "crates/beads_stateright_models",
     "crates/fuzz",
@@ -24,6 +25,7 @@ default-members = [
     "crates/beads-git",
     "crates/beads-daemon",
     "crates/beads-daemon-core",
+    "crates/beads-http",
     "crates/beads-rs",
 ]
 

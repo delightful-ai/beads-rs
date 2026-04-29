@@ -1,0 +1,23 @@
+[package]
+name = "beads-http"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "HTTP transport for the beads daemon Request/Response surface"
+
+[dependencies]
+beads-core = { path = "../beads-core" }
+beads-api = { path = "../beads-api" }
+beads-surface = { path = "../beads-surface" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "macros", "signal"] }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

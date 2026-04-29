@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use beads_core::{ActorId, BeadId, BeadType, BeadView, Claim, Priority};
+use beads_core::{ActorId, BeadId, BeadType, BeadView, Claim, IssueStatus, Priority};
 
 // =============================================================================
 // Filters - Filtering criteria
@@ -9,9 +9,13 @@ use beads_core::{ActorId, BeadId, BeadType, BeadView, Claim, Priority};
 /// Filters for list queries.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Filters {
-    /// Filter by status (open, in_progress, closed).
+    /// Filter by canonical issue status.
     #[serde(default)]
-    pub status: Option<String>,
+    pub status: Option<IssueStatus>,
+
+    /// Exclude terminal issues unless the caller explicitly asked for them.
+    #[serde(default)]
+    pub hide_terminal: bool,
 
     /// Filter by priority.
     #[serde(default)]
@@ -126,15 +130,17 @@ impl Filters {
     /// Check if a bead matches these filters.
     pub fn matches(&self, view: &BeadView) -> bool {
         let bead = &view.bead;
+        let status = bead.fields.status.value;
+
+        if self.hide_terminal && status.is_terminal() {
+            return false;
+        }
+
         // Status filter
-        if let Some(ref status) = self.status {
-            // NOTE: "blocked" is derived and handled by higher-level queries when needed.
-            if status != "all"
-                && status != "blocked"
-                && bead.fields.workflow.value.status() != status
-            {
-                return false;
-            }
+        if let Some(expected) = self.status
+            && status != expected
+        {
+            return false;
         }
 
         // Priority filter
@@ -291,10 +297,10 @@ impl Filters {
 
         let closed_ms = bead
             .fields
-            .workflow
+            .status
             .value
-            .is_closed()
-            .then_some(bead.fields.workflow.stamp.at.wall_ms);
+            .is_terminal()
+            .then_some(bead.fields.status.stamp.at.wall_ms);
         if let Some(after) = self.closed_after
             && closed_ms.map(|t| t < after).unwrap_or(true)
         {

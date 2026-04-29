@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use beads_api::{AdminFingerprintMode, AdminFingerprintSample};
+use beads_api::{AdminFingerprintMode, AdminFingerprintSample, IssueStatus};
 use beads_core::{BeadId, BeadType, BranchName, DepKind, NamespaceId, Priority, StoreId};
 
 use crate::ops::BeadPatch;
@@ -98,6 +98,18 @@ pub struct AddNotePayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackerTransitionPayload {
+    pub id: BeadId,
+    pub status: IssueStatus,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackerCommentPayload {
+    pub id: BeadId,
+    pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ClaimPayload {
     pub id: BeadId,
     #[serde(default = "super::default_lease_secs")]
@@ -117,6 +129,16 @@ pub struct ListPayload {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackerListPayload {
+    #[serde(default)]
+    pub ids: Option<Vec<BeadId>>,
+    #[serde(default)]
+    pub statuses: Option<Vec<IssueStatus>>,
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReadyPayload {
     #[serde(default)]
     pub limit: Option<usize>,
@@ -127,7 +149,7 @@ pub struct StalePayload {
     #[serde(default)]
     pub days: u32,
     #[serde(default)]
-    pub status: Option<String>,
+    pub status: Option<IssueStatus>,
     #[serde(default)]
     pub limit: Option<usize>,
 }
@@ -245,5 +267,31 @@ mod tests {
         let decoded: ClosePayload = serde_json::from_str(&encoded).unwrap();
         assert_eq!(decoded.reason.as_deref(), Some("done"));
         assert!(decoded.on_branch.is_none());
+    }
+
+    #[test]
+    fn tracker_transition_payload_decodes_symphony_state_names() {
+        let payload = json!({
+            "id": "bd-xyz123",
+            "status": "Human Review"
+        });
+        let encoded = serde_json::to_string(&payload).unwrap();
+        let decoded: TrackerTransitionPayload = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.status, IssueStatus::HumanReview);
+    }
+
+    #[test]
+    fn stale_payload_rejects_blocked_pseudo_status() {
+        let payload = json!({
+            "days": 30,
+            "status": "blocked"
+        });
+        let encoded = serde_json::to_string(&payload).unwrap();
+        let err = serde_json::from_str::<StalePayload>(&encoded).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("blocked") || msg.contains("unknown variant"),
+            "unexpected error: {msg}"
+        );
     }
 }

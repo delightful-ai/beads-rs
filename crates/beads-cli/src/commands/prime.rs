@@ -100,10 +100,10 @@ Search and filter:
 ```bash
 bd search auth                    # Text search in title/description
 bd list --type=bug --priority=0   # Critical bugs
-bd list --status=open -l security # Open issues labeled security
+bd list --status=todo -l security # Todo issues labeled security
 ```
 
-Combine filters: `bd list --status=open --type=feature --assignee=me`
+Combine filters: `bd list --status=todo --type=feature --assignee=me`
 
 ## Understanding Structure
 
@@ -119,7 +119,7 @@ bd epic status                    # Epic completion percentages
 ```bash
 bd claim <id>                     # Claim it (I'm working on this)
 # ... do the work ...
-bd close <id>                     # Done (or: --reason="Won't fix: out of scope")
+bd close <id>                     # Done (or: --reason duplicate --note "duplicate of ...")
 ```
 
 Found something while working? Capture it and keep going:

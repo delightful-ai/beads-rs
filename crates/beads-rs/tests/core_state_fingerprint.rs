@@ -5,7 +5,7 @@
 //! live in beads-rs rather than beads-core.
 
 use beads_core::bead::{Bead, BeadCore, BeadFields};
-use beads_core::composite::{Claim, Workflow};
+use beads_core::composite::Claim;
 use beads_core::crdt::Lww;
 use beads_core::domain::{BeadType, DepKind, Priority};
 use beads_core::identity::{ActorId, BeadId, ReplicaId};
@@ -13,7 +13,7 @@ use beads_core::orset::Dot;
 use beads_core::state::CanonicalState;
 use beads_core::time::{Stamp, WriteStamp};
 use beads_core::tombstone::Tombstone;
-use beads_core::{DepKey, ParentEdge};
+use beads_core::{DepKey, IssueStatus, ParentEdge};
 use beads_git::wire;
 use proptest::prelude::*;
 use uuid::Uuid;
@@ -38,7 +38,8 @@ fn make_bead(id: &BeadId, stamp: &Stamp) -> Bead {
         external_ref: Lww::new(None, stamp.clone()),
         source_repo: Lww::new(None, stamp.clone()),
         estimated_minutes: Lww::new(None, stamp.clone()),
-        workflow: Lww::new(Workflow::default(), stamp.clone()),
+        status: Lww::new(IssueStatus::Todo, stamp.clone()),
+        closed_on_branch: Lww::new(None, stamp.clone()),
         claim: Lww::new(Claim::default(), stamp.clone()),
     };
     Bead::new(core, fields)

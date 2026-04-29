@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 
 use beads_core::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey, Durable,
-    HeadStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp, StoreState, Tombstone,
-    Watermarks, Workflow, WriteStamp,
+    HeadStatus, IssueStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp, StoreState,
+    Tombstone, Watermarks, WriteStamp,
 };
 use beads_core::{ContentHash, Dot, StoreEpoch, StoreId};
 use beads_git::checkpoint::{
@@ -163,7 +163,8 @@ fn make_bead(id: &BeadId, stamp: &Stamp, title: &str) -> Bead {
         external_ref: Lww::new(None, stamp.clone()),
         source_repo: Lww::new(None, stamp.clone()),
         estimated_minutes: Lww::new(None, stamp.clone()),
-        workflow: Lww::new(Workflow::default(), stamp.clone()),
+        status: Lww::new(IssueStatus::Todo, stamp.clone()),
+        closed_on_branch: Lww::new(None, stamp.clone()),
         claim: Lww::new(Claim::default(), stamp.clone()),
     };
     Bead::new(core, fields)

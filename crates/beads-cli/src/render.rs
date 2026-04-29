@@ -5,7 +5,7 @@ use beads_api::{
     AdminRotateReplicaIdOutput, AdminScrubOutput, AdminStatusOutput, AdminStoreLockInfoOutput,
     AdminStoreUnlockOutput, BlockedIssue, CountResult, DaemonInfo, DeletedLookup, DepCycles,
     DepEdge, EpicStatus, Issue, IssueSummary, Note, QueryResult, ReadyResult, StatusOutput,
-    Tombstone,
+    Tombstone, TrackerIssue,
 };
 use beads_surface::OpResult;
 use beads_surface::ipc::ResponsePayload;
@@ -25,6 +25,7 @@ pub trait HumanRenderer {
     fn render_claim_extended(&self, id: &str, expires: u64) -> String;
     fn render_issue(&self, issue: &Issue) -> String;
     fn render_issues(&self, issues: &[IssueSummary]) -> String;
+    fn render_tracker_issues(&self, issues: &[TrackerIssue]) -> String;
     fn render_dep_tree(&self, root: &str, edges: &[DepEdge]) -> String;
     fn render_deps(&self, incoming: &[DepEdge], outgoing: &[DepEdge]) -> String;
     fn render_dep_cycles(&self, out: &DepCycles) -> String;
@@ -97,6 +98,7 @@ pub fn render_query<R: HumanRenderer>(q: &QueryResult, renderer: &R) -> String {
         QueryResult::Issue(issue) => renderer.render_issue(issue),
         QueryResult::ShowDetails(details) => renderer.render_issue(&details.issue),
         QueryResult::Issues(views) => renderer.render_issues(views),
+        QueryResult::TrackerIssues(issues) => renderer.render_tracker_issues(issues),
         QueryResult::DepTree { root, edges } => renderer.render_dep_tree(root.as_str(), edges),
         QueryResult::Deps { incoming, outgoing } => renderer.render_deps(incoming, outgoing),
         QueryResult::DepCycles(out) => renderer.render_dep_cycles(out),

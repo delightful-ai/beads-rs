@@ -169,12 +169,21 @@ fn test_create_show_close_workflow() {
         .stdout(predicate::str::contains("critical bug"));
 
     repo.bd()
-        .args(["close", id, "--reason=Fixed it", "--json"])
+        .args([
+            "close",
+            id,
+            "--reason=done",
+            "--note=completed through canonical status path",
+            "--json",
+        ])
         .assert()
-        .success();
+        .success()
+        .stdout(predicate::str::contains(
+            "completed through canonical status path",
+        ));
 
     repo.bd()
-        .args(["list", "--status=closed", "--json"])
+        .args(["list", "--status=done", "--json"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Bug to fix"));
@@ -210,7 +219,7 @@ fn test_claim_and_unclaim() {
         .args(["show", id, "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("in_progress"));
+        .stdout(predicate::str::contains("\"status\": \"In Progress\""));
 
     repo.bd().args(["unclaim", id]).assert().success();
 
@@ -218,7 +227,7 @@ fn test_claim_and_unclaim() {
         .args(["show", id, "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"status\": \"open\""));
+        .stdout(predicate::str::contains("\"status\": \"Todo\""));
 }
 
 #[test]
@@ -751,7 +760,7 @@ fn test_update_bead() {
 
     // Close via update with reason.
     repo.bd()
-        .args(["update", id, "--status=closed", "--reason=Done", "--json"])
+        .args(["update", id, "--status=done", "--reason=Done", "--json"])
         .assert()
         .success();
 
@@ -764,7 +773,7 @@ fn test_update_bead() {
         .stdout
         .clone();
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["data"]["closed_reason"].as_str(), Some("Done"));
+    assert_eq!(json["data"]["closed_reason"].as_str(), Some("done"));
 }
 
 #[cfg(feature = "slow-tests")]
@@ -833,7 +842,7 @@ fn test_reopen_closed() {
 
     // Close it
     repo.bd()
-        .args(["close", id, "--reason=Fixed"])
+        .args(["close", id, "--reason=done"])
         .assert()
         .success();
 
@@ -841,7 +850,7 @@ fn test_reopen_closed() {
         .args(["show", id, "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("closed"));
+        .stdout(predicate::str::contains("\"status\": \"Done\""));
 
     // Reopen it
     repo.bd().args(["reopen", id]).assert().success();
@@ -850,7 +859,7 @@ fn test_reopen_closed() {
         .args(["show", id, "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"status\": \"open\""));
+        .stdout(predicate::str::contains("\"status\": \"Todo\""));
 }
 
 #[cfg(feature = "slow-tests")]
@@ -1390,7 +1399,7 @@ fn test_epic_close_eligible() {
         .args(["show", &epic_id, "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("closed"));
+        .stdout(predicate::str::contains("\"status\": \"Done\""));
 }
 
 #[cfg(feature = "slow-tests")]
@@ -2355,7 +2364,7 @@ fn test_epic_close_with_open_children() {
             .args(["show", &epic_id, "--json"])
             .assert()
             .success()
-            .stdout(predicate::str::contains("closed"));
+            .stdout(predicate::str::contains("\"status\": \"Done\""));
     } else {
         // If it failed, should have clear error about open children
         let stderr = String::from_utf8_lossy(&output.stderr);

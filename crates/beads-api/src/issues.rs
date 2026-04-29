@@ -4,8 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::deps::DepEdge;
 use beads_core::{
-    BeadProjection, BeadType, BeadView, BranchName, NamespaceId, SegmentId,
-    Tombstone as CoreTombstone, WallClock, WorkflowStatus, WriteStamp,
+    BeadProjection, BeadType, BeadView, BranchName, IssueStatus, NamespaceId, SegmentId,
+    Tombstone as CoreTombstone, WallClock, WriteStamp,
 };
 
 // =============================================================================
@@ -211,7 +211,7 @@ pub struct Issue {
     pub description: String,
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
-    pub status: WorkflowStatus,
+    pub status: IssueStatus,
     pub priority: u8,
     #[serde(rename = "type")]
     pub issue_type: BeadType,
@@ -262,7 +262,7 @@ pub struct IssueSummary {
     pub description: String,
     pub design: Option<String>,
     pub acceptance_criteria: Option<String>,
-    pub status: WorkflowStatus,
+    pub status: IssueStatus,
     pub priority: u8,
     #[serde(rename = "type")]
     pub issue_type: BeadType,
@@ -408,9 +408,8 @@ mod tests {
     use super::{Issue, IssueSummary};
     use beads_core::orset::Dot;
     use beads_core::{
-        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Label, Lww,
-        NamespaceId, Note as CoreNote, NoteId, Priority, ReplicaId, Stamp, Workflow,
-        WorkflowStatus, WriteStamp,
+        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, IssueStatus,
+        Label, Lww, NamespaceId, Note as CoreNote, NoteId, Priority, ReplicaId, Stamp, WriteStamp,
     };
     use serde_json::Value;
     use uuid::Uuid;
@@ -435,7 +434,8 @@ mod tests {
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
-            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            status: Lww::new(IssueStatus::Todo, stamp.clone()),
+            closed_on_branch: Lww::new(None, stamp.clone()),
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         Bead::new(core, fields)
@@ -512,18 +512,18 @@ mod tests {
 
         let view = state.bead_view(&id).expect("bead view");
         let issue = Issue::from_view(&NamespaceId::core(), &view);
-        assert_eq!(issue.status, WorkflowStatus::Open);
+        assert_eq!(issue.status, IssueStatus::Todo);
         assert_eq!(issue.issue_type, BeadType::Task);
 
         let value = serde_json::to_value(&issue).expect("serialize issue");
-        assert_eq!(value.get("status").and_then(Value::as_str), Some("open"));
+        assert_eq!(value.get("status").and_then(Value::as_str), Some("Todo"));
         assert_eq!(value.get("type").and_then(Value::as_str), Some("task"));
 
         let summary = IssueSummary::from_view(&NamespaceId::core(), &view);
         let summary_value = serde_json::to_value(&summary).expect("serialize summary");
         assert_eq!(
             summary_value.get("status").and_then(Value::as_str),
-            Some("open")
+            Some("Todo")
         );
         assert_eq!(
             summary_value.get("type").and_then(Value::as_str),

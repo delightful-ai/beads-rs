@@ -1,4 +1,5 @@
 use beads_api::QueryResult;
+use beads_core::IssueStatus;
 use beads_surface::ipc::{Request, ResponsePayload, StalePayload};
 use clap::Args;
 
@@ -12,9 +13,9 @@ pub struct StaleArgs {
     #[arg(short = 'd', long, default_value_t = 30)]
     pub days: u32,
 
-    /// Filter by status (open|in_progress|blocked).
-    #[arg(short = 's', long)]
-    pub status: Option<String>,
+    /// Filter by status (todo, in_progress, human_review, rework, merging, done, cancelled, duplicate).
+    #[arg(short = 's', long, value_parser = crate::parsers::parse_status)]
+    pub status: Option<IssueStatus>,
 
     /// Maximum issues to show.
     #[arg(short = 'n', long, default_value_t = 50)]
@@ -26,7 +27,7 @@ pub fn handle(ctx: &CliRuntimeCtx, args: StaleArgs) -> CommandResult<()> {
         ctx: ctx.read_ctx(),
         payload: StalePayload {
             days: args.days,
-            status: args.status.clone(),
+            status: args.status,
             limit: Some(args.limit),
         },
     };

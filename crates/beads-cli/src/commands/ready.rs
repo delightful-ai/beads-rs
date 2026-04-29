@@ -80,7 +80,7 @@ pub fn render_ready(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use beads_core::{BeadType, NamespaceId, WorkflowStatus, WriteStamp};
+    use beads_core::{BeadType, IssueStatus, NamespaceId, WriteStamp};
 
     fn sample_summary(namespace: &str, id: &str) -> beads_api::IssueSummary {
         beads_api::IssueSummary {
@@ -90,7 +90,7 @@ mod tests {
             description: String::new(),
             design: None,
             acceptance_criteria: None,
-            status: WorkflowStatus::Open,
+            status: IssueStatus::Todo,
             priority: 1,
             issue_type: BeadType::Task,
             labels: Vec::new(),

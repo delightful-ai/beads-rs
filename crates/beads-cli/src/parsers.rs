@@ -1,4 +1,6 @@
-use beads_core::{BeadId, BeadType, DepKind, Priority, ValidatedBeadId, ValidatedDepKind};
+use beads_core::{
+    BeadId, BeadType, DepKind, IssueStatus, Priority, ValidatedBeadId, ValidatedDepKind,
+};
 use beads_surface::SortField;
 use time::format_description::well_known::Rfc3339;
 use time::{Date, OffsetDateTime, Time};
@@ -72,15 +74,8 @@ pub fn parse_priority(raw: &str) -> Result<Priority> {
     }
 }
 
-pub fn parse_status(raw: &str) -> String {
-    let s = raw.trim().to_lowercase().replace(['-', ' '], "_");
-    let canon = match s.as_str() {
-        "open" | "todo" => "open",
-        "inprogress" | "in_progress" | "doing" | "wip" => "in_progress",
-        "closed" | "done" | "complete" => "closed",
-        other => other,
-    };
-    canon.to_string()
+pub fn parse_status(raw: &str) -> Result<IssueStatus> {
+    IssueStatus::parse(raw).ok_or_else(|| ParseError::reason(format!("unknown status `{raw}`")))
 }
 
 pub fn parse_dep_kind(raw: &str) -> Result<DepKind> {
@@ -235,6 +230,14 @@ mod tests {
                 }
                 _ => panic!("Expected UnknownBeadType error for '{}'", input),
             }
+        }
+    }
+
+    #[test]
+    fn parse_status_rejects_derived_non_statuses() {
+        for raw in ["blocked", "all", "open", "closed"] {
+            let err = parse_status(raw).expect_err("derived selector should not parse as status");
+            assert!(err.to_string().contains(raw));
         }
     }
 }

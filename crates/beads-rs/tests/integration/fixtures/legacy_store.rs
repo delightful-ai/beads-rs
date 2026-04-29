@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use beads_core::{
-    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, Lww, Priority,
-    Stamp, Workflow, WriteStamp,
+    ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, IssueStatus, Lww,
+    Priority, Stamp, WriteStamp,
 };
 use beads_git::wire::{StoreChecksums, serialize_meta};
 use git2::{FetchOptions, ObjectType, Oid, Repository, Signature, Time};
@@ -357,7 +357,8 @@ fn make_bead(id: &str, stamp: &Stamp) -> Bead {
         external_ref: Lww::new(None, stamp.clone()),
         source_repo: Lww::new(None, stamp.clone()),
         estimated_minutes: Lww::new(None, stamp.clone()),
-        workflow: Lww::new(Workflow::Open, stamp.clone()),
+        status: Lww::new(IssueStatus::Todo, stamp.clone()),
+        closed_on_branch: Lww::new(None, stamp.clone()),
         claim: Lww::new(Claim::default(), stamp.clone()),
     };
     Bead::new(core, fields)

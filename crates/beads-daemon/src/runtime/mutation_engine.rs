@@ -2,9 +2,11 @@
 
 use std::collections::BTreeMap;
 
+use beads_api::IssueStatus;
 use uuid::Uuid;
 
 use super::ops::{MapLiveError, OpError, ValidatedSurfaceBeadPatch};
+use super::tracker::{status_transition_plan, terminal_status_from_close_reason};
 use crate::core::limits::LimitViolation;
 use crate::core::{
     ActorId, BeadId, BeadPatchWireV1, BeadSlug, BeadType, BranchName, CanonicalState,
@@ -14,16 +16,17 @@ use crate::core::{
     TxnOpV1, TxnV1, ValidatedBeadPatch, ValidatedEventBody, ValidatedEventKindV1,
     ValidatedMutationCommand, ValidatedTxnV1, WallClock, WireDepAddV1, WireDepRemoveV1, WireDotV1,
     WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireNoteV1, WireParentAddV1, WireParentRemoveV1,
-    WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical,
-    sha256_bytes, to_canon_json_bytes,
+    WirePatch, WireStamp, WireTombstoneV1, encode_event_body_canonical, sha256_bytes,
+    to_canon_json_bytes,
 };
 use crate::remote::RemoteUrl;
 use crate::runtime::ipc::{
     AddNotePayload, ClaimPayload, ClosePayload, CreatePayload, DeletePayload, DepPayload,
-    IdPayload, LabelsPayload, LeasePayload, ParentPayload, UpdatePayload,
+    IdPayload, LabelsPayload, LeasePayload, ParentPayload, TrackerCommentPayload,
+    TrackerTransitionPayload, UpdatePayload,
 };
 use crate::runtime::wal::record::RECORD_HEADER_BASE_LEN;
-use beads_surface::ops::{OpenInProgress, Patch};
+use beads_surface::ops::Patch;
 
 #[derive(Clone, Debug)]
 pub struct MutationContext {
@@ -196,6 +199,14 @@ pub enum ParsedMutationRequest {
         id: BeadId,
         content: String,
     },
+    TrackerTransition {
+        id: BeadId,
+        state: IssueStatus,
+    },
+    TrackerComment {
+        id: BeadId,
+        content: String,
+    },
     Claim {
         id: BeadId,
         lease_secs: u64,
@@ -330,6 +341,16 @@ impl ParsedMutationRequest {
         Ok(ParsedMutationRequest::AddNote { id, content })
     }
 
+    pub fn parse_tracker_transition(payload: TrackerTransitionPayload) -> Result<Self, OpError> {
+        let TrackerTransitionPayload { id, status } = payload;
+        Ok(ParsedMutationRequest::TrackerTransition { id, state: status })
+    }
+
+    pub fn parse_tracker_comment(payload: TrackerCommentPayload) -> Result<Self, OpError> {
+        let TrackerCommentPayload { id, content } = payload;
+        Ok(ParsedMutationRequest::TrackerComment { id, content })
+    }
+
     pub fn parse_claim(payload: ClaimPayload) -> Result<Self, OpError> {
         let ClaimPayload { id, lease_secs } = payload;
         Ok(ParsedMutationRequest::Claim { id, lease_secs })
@@ -444,6 +465,12 @@ impl MutationEngine {
             }
             ParsedMutationRequest::AddNote { id, content } => {
                 self.plan_add_note(state, &stamp, id, content)?
+            }
+            ParsedMutationRequest::TrackerTransition { id, state: status } => {
+                self.plan_tracker_transition(state, &stamp, id, status, dot_alloc, &mut durability)?
+            }
+            ParsedMutationRequest::TrackerComment { id, content } => {
+                self.plan_tracker_comment(state, &stamp, id, content)?
             }
             ParsedMutationRequest::Claim { id, lease_secs } => {
                 self.plan_claim(state, &stamp, now_ms, id, lease_secs)?
@@ -658,6 +685,19 @@ impl MutationEngine {
                     content: content.clone(),
                 })
             }
+            ParsedMutationRequest::TrackerTransition { id, state } => {
+                Ok(CanonicalMutationOp::TrackerTransition {
+                    id: id.clone(),
+                    state: *state,
+                })
+            }
+            ParsedMutationRequest::TrackerComment { id, content } => {
+                enforce_note_limit(content, &self.limits)?;
+                Ok(CanonicalMutationOp::TrackerComment {
+                    id: id.clone(),
+                    content: content.clone(),
+                })
+            }
             ParsedMutationRequest::Claim { id, lease_secs } => Ok(CanonicalMutationOp::Claim {
                 id: id.clone(),
                 lease_secs: *lease_secs,
@@ -842,8 +882,7 @@ impl MutationEngine {
             let expires = WallClock(stamp.at.wall_ms.saturating_add(3600 * 1000));
             patch.assignee = WirePatch::Set(assignee);
             patch.assignee_expires = WirePatch::Set(expires);
-            patch.status = Some(WorkflowStatus::InProgress);
-            patch.closed_reason = WirePatch::Clear;
+            patch.status = Some(IssueStatus::InProgress);
             patch.closed_on_branch = WirePatch::Clear;
         }
 
@@ -1018,20 +1057,17 @@ impl MutationEngine {
         on_branch: Option<BranchName>,
     ) -> Result<PlannedDelta, OpError> {
         let bead = state.require_live(&id).map_live_err(&id)?;
-        if bead.fields.workflow.value.is_closed() {
+        if bead.fields.status.value.is_terminal() {
             return Err(OpError::InvalidTransition {
                 from: "closed".into(),
                 to: "closed".into(),
             });
         }
 
+        let status = terminal_status_from_close_reason(reason.as_deref())?;
         let mut patch = BeadPatchWireV1::new(id.clone());
-        patch.status = Some(WorkflowStatus::Closed);
-        patch.closed_reason = WirePatch::Clear;
+        patch.status = Some(status);
         patch.closed_on_branch = WirePatch::Clear;
-        if let Some(reason) = reason.clone() {
-            patch.closed_reason = WirePatch::Set(reason);
-        }
         if let Some(branch) = on_branch.clone() {
             patch.closed_on_branch = WirePatch::Set(branch);
         }
@@ -1050,8 +1086,8 @@ impl MutationEngine {
 
     fn plan_reopen(&self, state: &CanonicalState, id: BeadId) -> Result<PlannedDelta, OpError> {
         let bead = state.require_live(&id).map_live_err(&id)?;
-        if !bead.fields.workflow.value.is_closed() {
-            let from_status = bead.fields.workflow.value.status().to_string();
+        if !bead.fields.status.value.is_terminal() {
+            let from_status = bead.fields.status.value.bucket_str().to_string();
             return Err(OpError::InvalidTransition {
                 from: from_status,
                 to: "open".into(),
@@ -1059,8 +1095,7 @@ impl MutationEngine {
         }
 
         let mut patch = BeadPatchWireV1::new(id.clone());
-        patch.status = Some(WorkflowStatus::Open);
-        patch.closed_reason = WirePatch::Clear;
+        patch.status = Some(IssueStatus::Todo);
         patch.closed_on_branch = WirePatch::Clear;
 
         let mut delta = TxnDeltaV1::new();
@@ -1300,6 +1335,51 @@ impl MutationEngine {
         Ok(PlannedDelta { delta, canonical })
     }
 
+    fn plan_tracker_transition(
+        &self,
+        state: &CanonicalState,
+        _stamp: &Stamp,
+        id: BeadId,
+        status: IssueStatus,
+        _dot_alloc: &mut dyn DotAllocator,
+        _durability: &mut PendingPlanningDurabilityEffects,
+    ) -> Result<PlannedDelta, OpError> {
+        let bead = state.require_live(&id).map_live_err(&id)?;
+        let current_state = bead.fields.status.value;
+        if current_state == status {
+            return Err(OpError::ValidationFailed {
+                field: "status".into(),
+                reason: format!("bead already has status {}", status.as_str()),
+            });
+        }
+
+        let plan = status_transition_plan(status)?;
+
+        let mut patch = BeadPatchWireV1::new(id.clone());
+        patch.status = Some(plan.status);
+        patch.closed_on_branch = WirePatch::Clear;
+
+        let mut delta = TxnDeltaV1::new();
+        insert_bead_upsert(&mut delta, patch)?;
+
+        let canonical = CanonicalMutationOp::TrackerTransition { id, state: status };
+
+        Ok(PlannedDelta { delta, canonical })
+    }
+
+    fn plan_tracker_comment(
+        &self,
+        state: &CanonicalState,
+        stamp: &Stamp,
+        id: BeadId,
+        content: String,
+    ) -> Result<PlannedDelta, OpError> {
+        let PlannedDelta { delta, .. } =
+            self.plan_add_note(state, stamp, id.clone(), content.clone())?;
+        let canonical = CanonicalMutationOp::TrackerComment { id, content };
+        Ok(PlannedDelta { delta, canonical })
+    }
+
     fn plan_claim(
         &self,
         state: &CanonicalState,
@@ -1334,8 +1414,7 @@ impl MutationEngine {
         let mut patch = BeadPatchWireV1::new(id.clone());
         patch.assignee = WirePatch::Set(stamp.by.clone());
         patch.assignee_expires = WirePatch::Set(expires);
-        patch.status = Some(WorkflowStatus::InProgress);
-        patch.closed_reason = WirePatch::Clear;
+        patch.status = Some(IssueStatus::InProgress);
         patch.closed_on_branch = WirePatch::Clear;
 
         let mut delta = TxnDeltaV1::new();
@@ -1365,8 +1444,7 @@ impl MutationEngine {
         let mut patch = BeadPatchWireV1::new(id.clone());
         patch.assignee = WirePatch::Clear;
         patch.assignee_expires = WirePatch::Clear;
-        patch.status = Some(WorkflowStatus::Open);
-        patch.closed_reason = WirePatch::Clear;
+        patch.status = Some(IssueStatus::Todo);
         patch.closed_on_branch = WirePatch::Clear;
 
         let mut delta = TxnDeltaV1::new();
@@ -1408,8 +1486,7 @@ impl MutationEngine {
         let mut patch = BeadPatchWireV1::new(id.clone());
         patch.assignee = WirePatch::Set(assignee);
         patch.assignee_expires = WirePatch::Set(expires);
-        patch.status = Some(WorkflowStatus::InProgress);
-        patch.closed_reason = WirePatch::Clear;
+        patch.status = Some(IssueStatus::InProgress);
         patch.closed_on_branch = WirePatch::Clear;
 
         let mut delta = TxnDeltaV1::new();
@@ -1509,6 +1586,14 @@ enum CanonicalMutationOp {
         id: BeadId,
         content: String,
     },
+    TrackerTransition {
+        id: BeadId,
+        state: IssueStatus,
+    },
+    TrackerComment {
+        id: BeadId,
+        content: String,
+    },
     Claim {
         id: BeadId,
         lease_secs: u64,
@@ -1543,7 +1628,7 @@ struct CanonicalBeadPatch {
     #[serde(skip_serializing_if = "Patch::is_keep")]
     estimated_minutes: Patch<u32>,
     #[serde(skip_serializing_if = "Patch::is_keep")]
-    status: Patch<OpenInProgress>,
+    status: Patch<IssueStatus>,
 }
 
 fn request_sha256(ctx: &MutationContext, op: &CanonicalMutationOp) -> Result<[u8; 32], OpError> {
@@ -1690,8 +1775,7 @@ fn normalize_patch(
     wire.estimated_minutes = patch_to_wire_u32(&patch.estimated_minutes);
 
     if let Patch::Set(status) = &patch.status {
-        wire.status = Some((*status).into());
-        wire.closed_reason = WirePatch::Clear;
+        wire.status = Some(*status);
         wire.closed_on_branch = WirePatch::Clear;
     }
 
@@ -2021,8 +2105,7 @@ where
 mod tests {
     use super::*;
     use crate::core::{
-        Bead, BeadCore, BeadFields, Claim, Dot, Lww, ReplicaId, Stamp, StoreId, Workflow,
-        WriteStamp,
+        Bead, BeadCore, BeadFields, Claim, Dot, Lww, ReplicaId, Stamp, StoreId, WriteStamp,
     };
     use beads_surface::ops::BeadPatch;
 
@@ -2050,7 +2133,8 @@ mod tests {
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
-            workflow: Lww::new(Workflow::Open, stamp.clone()),
+            status: Lww::new(IssueStatus::Todo, stamp.clone()),
+            closed_on_branch: Lww::new(None, stamp.clone()),
             claim: Lww::new(Claim::Unclaimed, stamp),
         };
         Bead::new(core, fields)
@@ -2221,9 +2305,8 @@ mod tests {
             .expect("bead upsert");
         assert_eq!(effects.dot_meta_sync_boundaries, 0);
 
-        assert_eq!(patch.status, Some(WorkflowStatus::InProgress));
+        assert_eq!(patch.status, Some(IssueStatus::InProgress));
         assert!(matches!(patch.assignee, WirePatch::Set(_)));
-        assert!(matches!(patch.closed_reason, WirePatch::Clear));
         assert!(matches!(patch.closed_on_branch, WirePatch::Clear));
     }
 
@@ -2238,7 +2321,7 @@ mod tests {
             Claim::claimed(actor.clone(), Some(WallClock(20))),
             stamp.clone(),
         );
-        bead.fields.workflow = Lww::new(Workflow::Open, stamp.clone());
+        bead.fields.status = Lww::new(IssueStatus::Todo, stamp.clone());
         let mut state = CanonicalState::new();
         state.insert(bead).unwrap();
 
@@ -2271,16 +2354,104 @@ mod tests {
             .expect("bead upsert");
         assert_eq!(effects.dot_meta_sync_boundaries, 0);
 
-        assert_eq!(patch.status, Some(WorkflowStatus::InProgress));
+        assert_eq!(patch.status, Some(IssueStatus::InProgress));
         assert!(matches!(patch.assignee, WirePatch::Set(_)));
-        assert!(matches!(patch.closed_reason, WirePatch::Clear));
+        assert!(matches!(patch.closed_on_branch, WirePatch::Clear));
+    }
+
+    #[test]
+    fn tracker_transition_reopens_closed_issue_into_human_review() {
+        let engine = MutationEngine::new(Limits::default());
+        let actor = actor_id("alice");
+        let bead_id = BeadId::parse("bd-track").unwrap();
+        let stamp = make_stamp(10, &actor);
+        let mut bead = make_bead(bead_id.as_str(), &actor);
+        bead.fields.status = Lww::new(IssueStatus::Done, stamp.clone());
+        let mut state = CanonicalState::new();
+        state.insert(bead).unwrap();
+
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([8u8; 16])),
+        };
+        let stamped = make_stamped_context(ctx, stamp.clone());
+        let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([6u8; 16])), 0.into());
+        let req = ParsedMutationRequest::parse_tracker_transition(TrackerTransitionPayload {
+            id: bead_id.clone(),
+            status: IssueStatus::HumanReview,
+        })
+        .unwrap();
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([9u8; 16])));
+
+        let planned = engine
+            .plan(&state, 10, stamped, store, None, req, &mut dots)
+            .unwrap();
+        let (draft, effects) = planned.acknowledge_durability();
+        let ops: Vec<_> = draft.command.raw_delta().iter().collect();
+        let patch = ops
+            .iter()
+            .find_map(|op| match op {
+                TxnOpV1::BeadUpsert(patch) => Some(patch.as_ref()),
+                _ => None,
+            })
+            .expect("bead upsert");
+
+        assert_eq!(effects.dot_meta_sync_boundaries, 0);
+        assert_eq!(patch.status, Some(IssueStatus::HumanReview));
+        assert!(matches!(patch.closed_on_branch, WirePatch::Clear));
+        assert!(!ops.iter().any(|op| matches!(op, TxnOpV1::LabelAdd(_))));
+    }
+
+    #[test]
+    fn close_defaults_to_done_reason() {
+        let engine = MutationEngine::new(Limits::default());
+        let actor = actor_id("alice");
+        let bead_id = BeadId::parse("bd-close").unwrap();
+        let stamp = make_stamp(10, &actor);
+        let bead = make_bead(bead_id.as_str(), &actor);
+        let mut state = CanonicalState::new();
+        state.insert(bead).unwrap();
+
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([7u8; 16])),
+        };
+        let stamped = make_stamped_context(ctx, stamp.clone());
+        let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([5u8; 16])), 0.into());
+        let req = ParsedMutationRequest::parse_close(ClosePayload {
+            id: bead_id,
+            reason: None,
+            on_branch: None,
+        })
+        .unwrap();
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([6u8; 16])));
+
+        let planned = engine
+            .plan(&state, 10, stamped, store, None, req, &mut dots)
+            .unwrap();
+        let (draft, _) = planned.acknowledge_durability();
+        let patch = draft
+            .command
+            .raw_delta()
+            .iter()
+            .find_map(|op| match op {
+                TxnOpV1::BeadUpsert(patch) => Some(patch.as_ref()),
+                _ => None,
+            })
+            .expect("bead upsert");
+
+        assert_eq!(patch.status, Some(IssueStatus::Done));
         assert!(matches!(patch.closed_on_branch, WirePatch::Clear));
     }
 
     #[test]
     fn invalid_workflow_patch_rejected_in_planning() {
         let mut patch = BeadPatchWireV1::new(BeadId::parse("bd-invalid").unwrap());
-        patch.status = Some(WorkflowStatus::Closed);
+        patch.status = Some(IssueStatus::Done);
 
         let err = validate_bead_patch(patch).unwrap_err();
         assert!(matches!(

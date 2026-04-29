@@ -7,7 +7,8 @@ use std::fs;
 use std::path::Path;
 use std::time::Duration;
 
-use crate::fixtures::bd_runtime::BdRuntimeRepo;
+use crate::fixtures::bd_runtime::{BdRuntimeRepo, wait_for_store_id};
+use crate::fixtures::daemon_runtime::shutdown_daemon;
 use crate::fixtures::legacy_store::{
     backup_ref_oid, backup_ref_targets, create_backup_ref, create_detached_store_commit,
     fetch_remote_store_ref, fixture, push_store_ref, read_store_blob, read_store_meta_json,
@@ -15,8 +16,8 @@ use crate::fixtures::legacy_store::{
     store_first_parent_oid, store_ref_oid, wait_for_fetched_remote_store_ref,
     write_nonempty_strict_store_commit, write_store_commit, write_strict_store_commit,
 };
-use beads_core::{BeadId, CanonicalState, Claim, DepKey, DepKind, Workflow, WriteStamp};
-use beads_git::sync::migrate_store_ref_to_v1_with_before_push_for_testing;
+use beads_core::{BeadId, CanonicalState, Claim, DepKey, DepKind, StoreMetaVersions, WriteStamp};
+use beads_git::sync::migrate_store_ref_to_v2_with_before_push_for_testing;
 use beads_git::wire::{StoreChecksums, serialize_meta};
 use git2::{ObjectType, Repository};
 use predicates::prelude::*;
@@ -277,7 +278,7 @@ fn assert_rich_workflow_state(
         .bead_view(&bead_id("bd-rich-closed"))
         .expect("closed bead should exist after migration");
     assert!(
-        matches!(closed.bead.fields.workflow.value, Workflow::Closed(_)),
+        closed.bead.fields.status.value.is_terminal(),
         "closed bead should remain closed"
     );
     assert_eq!(
@@ -492,11 +493,11 @@ fn test_migrate_detect_returns_structural_payload() {
     );
 
     let json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
-    assert_detect_outcome(&json, Some(1), "orset_v1", true, true, 1, false, &[]);
+    assert_detect_outcome(&json, Some(2), "orset_v1", true, true, 2, false, &[]);
 }
 
 #[test]
-fn test_migrate_to_1_dry_run_is_implemented() {
+fn test_migrate_to_2_dry_run_is_implemented() {
     let repo = TestRepo::new();
     write_store_commit(
         repo.path(),
@@ -508,7 +509,7 @@ fn test_migrate_to_1_dry_run_is_implemented() {
 
     let output = repo
         .bd()
-        .args(["migrate", "to", "1", "--dry-run", "--json"])
+        .args(["migrate", "to", "2", "--dry-run", "--json"])
         .assert()
         .success()
         .get_output()
@@ -527,7 +528,7 @@ fn test_migrate_to_1_dry_run_is_implemented() {
 }
 
 #[test]
-fn test_migrate_to_1_noop_when_already_canonical() {
+fn test_migrate_to_2_noop_when_already_canonical() {
     let repo = TestRepo::new();
     write_strict_store_commit(repo.path());
     assert_eq!(
@@ -538,7 +539,7 @@ fn test_migrate_to_1_noop_when_already_canonical() {
 
     let output = repo
         .bd()
-        .args(["migrate", "to", "1", "--json"])
+        .args(["migrate", "to", "2", "--json"])
         .assert()
         .success()
         .get_output()
@@ -580,7 +581,7 @@ fn test_migrate_to_1_noop_when_already_canonical() {
 }
 
 #[test]
-fn test_migrate_to_1_rewrites_legacy_deps_and_store_invariants() {
+fn test_migrate_to_2_rewrites_legacy_deps_and_store_invariants() {
     let repo = TestRepo::new();
     let local_before = fixture("v0_1_26_minimal").install(repo.path());
     assert_eq!(
@@ -591,7 +592,7 @@ fn test_migrate_to_1_rewrites_legacy_deps_and_store_invariants() {
 
     let output = repo
         .bd()
-        .args(["migrate", "to", "1", "--no-push", "--json"])
+        .args(["migrate", "to", "2", "--no-push", "--json"])
         .assert()
         .success()
         .get_output()
@@ -657,7 +658,111 @@ fn test_migrate_to_1_rewrites_legacy_deps_and_store_invariants() {
 }
 
 #[test]
-fn test_migrate_to_1_reports_skipped_no_remote_without_origin() {
+fn test_migrate_to_2_rebuilds_older_local_daemon_store_on_next_load() {
+    let repo = TestRepo::new();
+    fixture("rich_workflow").install(repo.path());
+
+    let migrate = repo
+        .bd()
+        .args(["migrate", "to", "2", "--no-push", "--json"])
+        .output()
+        .expect("run migrate to 2");
+    assert!(
+        migrate.status.success(),
+        "migration should succeed: {}",
+        String::from_utf8_lossy(&migrate.stderr)
+    );
+    let migrate_json: serde_json::Value =
+        serde_json::from_slice(&migrate.stdout).expect("parse migrate json");
+    let warnings = migrate_json
+        .get("warnings")
+        .and_then(serde_json::Value::as_array)
+        .expect("migration warnings array");
+    assert!(
+        warnings.iter().any(|warning| warning
+            .as_str()
+            .is_some_and(|warning| warning.contains("local daemon-store caches"))),
+        "migration should surface the local daemon-store rebuild note: {migrate_json}"
+    );
+
+    let migrated_id = read_store_state(repo.path())
+        .iter_live()
+        .next()
+        .map(|(id, _)| id.clone())
+        .expect("migrated store should contain a live bead");
+
+    let first_show = repo
+        .bd()
+        .args(["show", migrated_id.as_str(), "--json"])
+        .output()
+        .expect("run bd show after migration");
+    assert!(
+        first_show.status.success(),
+        "bd show should autostart daemon after migration: {}",
+        String::from_utf8_lossy(&first_show.stderr)
+    );
+
+    let store_id = wait_for_store_id(repo.data_dir(), Duration::from_secs(2))
+        .expect("daemon should materialize local store");
+    shutdown_daemon(repo.runtime_dir(), repo.data_dir());
+
+    let store_dir = repo.data_dir().join("stores").join(store_id.to_string());
+    let meta_path = store_dir.join("meta.json");
+    let mut meta_json: serde_json::Value =
+        serde_json::from_slice(&fs::read(&meta_path).expect("read local meta"))
+            .expect("parse local meta");
+    meta_json["store_format_version"] =
+        serde_json::Value::from(StoreMetaVersions::STORE_FORMAT_VERSION.saturating_sub(1));
+    fs::write(
+        &meta_path,
+        serde_json::to_vec_pretty(&meta_json).expect("encode downgraded local meta"),
+    )
+    .expect("write downgraded local meta");
+
+    let wal_sentinel = store_dir
+        .join("wal")
+        .join(beads_core::NamespaceId::core().as_str())
+        .join("legacy-segment.wal");
+    fs::create_dir_all(wal_sentinel.parent().expect("wal sentinel parent"))
+        .expect("create wal sentinel dir");
+    fs::write(&wal_sentinel, b"legacy wal").expect("write wal sentinel");
+
+    let cache_sentinel = store_dir.join("checkpoint_cache").join("CURRENT");
+    fs::create_dir_all(cache_sentinel.parent().expect("cache sentinel parent"))
+        .expect("create cache sentinel dir");
+    fs::write(&cache_sentinel, b"legacy checkpoint").expect("write cache sentinel");
+
+    let second_show = repo
+        .bd()
+        .args(["show", migrated_id.as_str(), "--json"])
+        .output()
+        .expect("run bd show after local-store downgrade");
+    assert!(
+        second_show.status.success(),
+        "bd show should rebuild older local store cache on restart: {}",
+        String::from_utf8_lossy(&second_show.stderr)
+    );
+
+    let rebuilt_meta: serde_json::Value =
+        serde_json::from_slice(&fs::read(&meta_path).expect("read rebuilt local meta"))
+            .expect("parse rebuilt local meta");
+    assert_eq!(
+        rebuilt_meta["store_format_version"].as_u64(),
+        Some(StoreMetaVersions::STORE_FORMAT_VERSION as u64),
+        "local store should reopen on the current format version"
+    );
+    assert!(
+        !wal_sentinel.exists(),
+        "older local wal segments should be removed during rebuild"
+    );
+    assert!(
+        !cache_sentinel.exists(),
+        "older local checkpoint cache should be removed during rebuild"
+    );
+}
+
+#[test]
+fn test_migrate_to_2_reports_skipped_no_remote_without_origin() {
     let repo = TestRepo::new_local_only();
     write_store_commit(
         repo.path(),
@@ -669,7 +774,7 @@ fn test_migrate_to_1_reports_skipped_no_remote_without_origin() {
 
     let output = repo
         .bd()
-        .args(["migrate", "to", "1", "--json"])
+        .args(["migrate", "to", "2", "--json"])
         .assert()
         .success()
         .get_output()
@@ -690,12 +795,12 @@ fn test_migrate_to_1_reports_skipped_no_remote_without_origin() {
 }
 
 #[test]
-fn test_migrate_to_1_noop_without_origin_reports_skipped_no_remote() {
+fn test_migrate_to_2_noop_without_origin_reports_skipped_no_remote() {
     let repo = TestRepo::new_local_only();
     write_strict_store_commit(repo.path());
     let before_oid = store_ref_oid(repo.path(), "refs/heads/beads/store");
 
-    let json = run_bd_json(&repo, &["migrate", "to", "1", "--json"]);
+    let json = run_bd_json(&repo, &["migrate", "to", "2", "--json"]);
     assert_eq!(
         json.get("commit_oid"),
         Some(&serde_json::Value::Null),
@@ -714,7 +819,7 @@ fn test_migrate_to_1_noop_without_origin_reports_skipped_no_remote() {
 }
 
 #[test]
-fn test_migrate_to_1_nonempty_canonical_without_last_write_stamp_is_noop() {
+fn test_migrate_to_2_nonempty_canonical_without_last_write_stamp_is_noop() {
     let repo = TestRepo::new_local_only();
     write_nonempty_strict_store_commit(repo.path());
     let before_oid = store_ref_oid(repo.path(), "refs/heads/beads/store");
@@ -725,9 +830,9 @@ fn test_migrate_to_1_nonempty_canonical_without_last_write_stamp_is_noop() {
     );
 
     let detect_json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
-    assert_detect_outcome(&detect_json, Some(1), "orset_v1", true, true, 1, false, &[]);
+    assert_detect_outcome(&detect_json, Some(2), "orset_v1", true, true, 2, false, &[]);
 
-    let json = run_bd_json(&repo, &["migrate", "to", "1", "--json"]);
+    let json = run_bd_json(&repo, &["migrate", "to", "2", "--json"]);
     assert_eq!(
         json.get("commit_oid"),
         Some(&serde_json::Value::Null),
@@ -762,7 +867,7 @@ fn test_migrate_equal_local_and_remote_legacy_rewrites_once_and_creates_backup_r
     );
     let remote_before = store_ref_oid(repo.remote_dir.path(), "refs/heads/beads/store");
 
-    let json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    let json = run_bd_json(&repo, &["migrate", "to", "2", "--no-push", "--json"]);
     assert!(
         json.get("commit_oid")
             .and_then(|value| value.as_str())
@@ -821,7 +926,7 @@ fn test_migrate_local_rewrite_prunes_backup_refs_to_cap_and_keeps_current_target
     );
     let oldest_seed = seeded_backups[0];
 
-    let json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    let json = run_bd_json(&repo, &["migrate", "to", "2", "--no-push", "--json"]);
     assert!(
         json.get("commit_oid")
             .and_then(|value| value.as_str())
@@ -873,7 +978,7 @@ fn test_migrate_local_rewrite_prunes_when_the_protected_backup_ref_already_exist
     );
     let oldest_seed = seeded_backups[0];
 
-    let json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    let json = run_bd_json(&repo, &["migrate", "to", "2", "--no-push", "--json"]);
     assert!(
         json.get("commit_oid")
             .and_then(|value| value.as_str())
@@ -899,9 +1004,9 @@ fn test_migrate_local_rewrite_prunes_when_the_protected_backup_ref_already_exist
 }
 
 #[test]
-fn test_migrate_detect_flags_legacy_deps_even_with_meta_v1() {
+fn test_migrate_detect_flags_legacy_deps_even_with_current_meta() {
     let repo = TestRepo::new();
-    // Legacy line-per-edge deps content plus v1 meta/checksums.
+    // Legacy line-per-edge deps content plus current-format meta/checksums.
     write_store_commit(
         repo.path(),
         br#"{"from":"bd-abc1","to":"bd-abc2","kind":"blocks"}
@@ -913,7 +1018,7 @@ fn test_migrate_detect_flags_legacy_deps_even_with_meta_v1() {
     let json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
     assert_detect_outcome(
         &json,
-        Some(1),
+        Some(2),
         "legacy_edges",
         true,
         true,
@@ -1011,7 +1116,7 @@ fn test_migrate_detect_uses_live_remote_when_local_and_tracking_are_missing() {
     let json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
     assert_detect_outcome(
         &json,
-        Some(1),
+        Some(2),
         "legacy_edges",
         false,
         true,
@@ -1040,7 +1145,7 @@ fn test_migrate_detect_uses_live_remote_without_mutating_stale_tracking_ref() {
     let json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
     assert_detect_outcome(
         &json,
-        Some(1),
+        Some(2),
         "legacy_edges",
         false,
         true,
@@ -1071,7 +1176,7 @@ fn test_migrate_dry_run_uses_live_remote_without_mutating_stale_tracking_ref() {
         true,
     );
 
-    let json = run_bd_json(&repo, &["migrate", "to", "1", "--dry-run", "--json"]);
+    let json = run_bd_json(&repo, &["migrate", "to", "2", "--dry-run", "--json"]);
     assert_eq!(
         json.get("from_effective_version")
             .and_then(|value| value.as_u64()),
@@ -1134,7 +1239,7 @@ fn test_migrate_detect_uses_local_store_without_trusting_stale_tracking_when_ori
     fs::remove_dir_all(repo.remote_dir.path()).expect("remove remote dir");
 
     let json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
-    assert_detect_outcome(&json, Some(1), "orset_v1", true, true, 1, false, &[]);
+    assert_detect_outcome(&json, Some(2), "orset_v1", true, true, 2, false, &[]);
     assert_eq!(
         store_ref_oid(repo.path(), "refs/remotes/origin/beads/store"),
         Some(stale_tracking_oid),
@@ -1176,7 +1281,7 @@ fn test_migrate_dry_run_fails_without_trusting_stale_tracking_when_origin_is_bro
     fs::remove_dir_all(repo.remote_dir.path()).expect("remove remote dir");
 
     repo.bd()
-        .args(["migrate", "to", "1", "--dry-run", "--json"])
+        .args(["migrate", "to", "2", "--dry-run", "--json"])
         .assert()
         .failure();
     assert_eq!(
@@ -1197,7 +1302,7 @@ fn test_migrate_no_push_succeeds_without_fetch_when_origin_is_broken() {
     let local_before = fixture("rich_workflow").install(repo.path());
     fs::remove_dir_all(repo.remote_dir.path()).expect("remove remote dir");
 
-    let json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    let json = run_bd_json(&repo, &["migrate", "to", "2", "--no-push", "--json"]);
     assert_eq!(
         json.get("push").and_then(|value| value.as_str()),
         Some("skipped_no_push"),
@@ -1251,7 +1356,7 @@ fn test_migrate_fixture_rich_workflow_rewrites_and_preserves_state() {
         ],
     );
 
-    let dry_run_json = run_bd_json(&repo, &["migrate", "to", "1", "--dry-run", "--json"]);
+    let dry_run_json = run_bd_json(&repo, &["migrate", "to", "2", "--dry-run", "--json"]);
     assert_eq!(
         dry_run_json.get("commit_oid"),
         Some(&serde_json::Value::Null),
@@ -1263,7 +1368,7 @@ fn test_migrate_fixture_rich_workflow_rewrites_and_preserves_state() {
         "dry-run must not mutate the store ref"
     );
 
-    let migrate_json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    let migrate_json = run_bd_json(&repo, &["migrate", "to", "2", "--no-push", "--json"]);
     assert_eq!(
         migrate_json
             .get("converted_deps")
@@ -1294,11 +1399,11 @@ fn test_migrate_fixture_rich_workflow_rewrites_and_preserves_state() {
     let post_detect_json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
     assert_detect_outcome(
         &post_detect_json,
-        Some(1),
+        Some(2),
         "orset_v1",
         true,
         true,
-        1,
+        2,
         false,
         &[],
     );
@@ -1334,7 +1439,7 @@ fn test_migrate_fixture_rich_workflow_peer_runs_full_round_trip() {
         ],
     );
 
-    let dry_run_json = run_bd_json(&repo, &["migrate", "to", "1", "--dry-run", "--json"]);
+    let dry_run_json = run_bd_json(&repo, &["migrate", "to", "2", "--dry-run", "--json"]);
     assert_eq!(
         dry_run_json.get("commit_oid"),
         Some(&serde_json::Value::Null),
@@ -1346,7 +1451,7 @@ fn test_migrate_fixture_rich_workflow_peer_runs_full_round_trip() {
         "dry-run must not mutate the store ref"
     );
 
-    let migrate_json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    let migrate_json = run_bd_json(&repo, &["migrate", "to", "2", "--no-push", "--json"]);
     assert_eq!(
         migrate_json.get("push").and_then(|value| value.as_str()),
         Some("skipped_no_push"),
@@ -1356,11 +1461,11 @@ fn test_migrate_fixture_rich_workflow_peer_runs_full_round_trip() {
     let post_detect_json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
     assert_detect_outcome(
         &post_detect_json,
-        Some(1),
+        Some(2),
         "orset_v1",
         true,
         true,
-        1,
+        2,
         false,
         &[],
     );
@@ -1396,7 +1501,7 @@ fn test_migrate_fixture_tombstone_deleted_dep_preserves_semantics() {
         ],
     );
 
-    let dry_run_json = run_bd_json(&repo, &["migrate", "to", "1", "--dry-run", "--json"]);
+    let dry_run_json = run_bd_json(&repo, &["migrate", "to", "2", "--dry-run", "--json"]);
     assert_eq!(
         dry_run_json.get("commit_oid"),
         Some(&serde_json::Value::Null),
@@ -1408,7 +1513,7 @@ fn test_migrate_fixture_tombstone_deleted_dep_preserves_semantics() {
         "dry-run must not mutate the store ref"
     );
 
-    let migrate_json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    let migrate_json = run_bd_json(&repo, &["migrate", "to", "2", "--no-push", "--json"]);
     assert_eq!(
         migrate_json.get("push").and_then(|value| value.as_str()),
         Some("skipped_no_push"),
@@ -1418,11 +1523,11 @@ fn test_migrate_fixture_tombstone_deleted_dep_preserves_semantics() {
     let post_detect_json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
     assert_detect_outcome(
         &post_detect_json,
-        Some(1),
+        Some(2),
         "orset_v1",
         true,
         true,
-        1,
+        2,
         false,
         &[],
     );
@@ -1458,7 +1563,7 @@ fn test_migrate_fixture_remote_only_detect_dry_run_and_local_rewrite() {
         ],
     );
 
-    let dry_run_json = run_bd_json(&repo, &["migrate", "to", "1", "--dry-run", "--json"]);
+    let dry_run_json = run_bd_json(&repo, &["migrate", "to", "2", "--dry-run", "--json"]);
     assert_eq!(
         dry_run_json.get("commit_oid"),
         Some(&serde_json::Value::Null),
@@ -1470,7 +1575,7 @@ fn test_migrate_fixture_remote_only_detect_dry_run_and_local_rewrite() {
         "remote-only dry-run must not materialize a local store ref"
     );
 
-    let migrate_json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    let migrate_json = run_bd_json(&repo, &["migrate", "to", "2", "--no-push", "--json"]);
     assert_eq!(
         migrate_json.get("push").and_then(|value| value.as_str()),
         Some("skipped_no_push"),
@@ -1501,7 +1606,7 @@ fn test_migrate_fixture_remote_only_pushes_rewritten_store_ref() {
     let repo = TestRepo::new();
     let remote_before_oid = fixture("rich_workflow").install(repo.remote_dir.path());
 
-    let migrate_json = run_bd_json(&repo, &["migrate", "to", "1", "--json"]);
+    let migrate_json = run_bd_json(&repo, &["migrate", "to", "2", "--json"]);
     assert_eq!(
         migrate_json.get("push").and_then(|value| value.as_str()),
         Some("pushed"),
@@ -1524,11 +1629,11 @@ fn test_migrate_fixture_remote_only_pushes_rewritten_store_ref() {
     let post_detect_json = run_bd_json(&repo, &["migrate", "detect", "--json"]);
     assert_detect_outcome(
         &post_detect_json,
-        Some(1),
+        Some(2),
         "orset_v1",
         true,
         true,
-        1,
+        2,
         false,
         &[],
     );
@@ -1560,7 +1665,7 @@ fn test_migrate_remote_parent_preserves_existing_meta_root_slug_and_last_write_s
         .expect("serialize remote meta");
     rewrite_store_meta(repo.remote_dir.path(), Some(&meta_bytes));
 
-    run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    run_bd_json(&repo, &["migrate", "to", "2", "--no-push", "--json"]);
 
     let meta_json = read_store_meta_json(repo.path());
     assert_eq!(
@@ -1645,7 +1750,7 @@ fn test_migrate_hybrid_remote_canonical_local_legacy_no_push_parents_on_remote_a
         .expect("serialize local meta");
     rewrite_store_meta(repo.path(), Some(&local_meta_bytes));
 
-    let json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    let json = run_bd_json(&repo, &["migrate", "to", "2", "--no-push", "--json"]);
     assert_eq!(
         json.get("push").and_then(|value| value.as_str()),
         Some("skipped_no_push"),
@@ -1711,7 +1816,7 @@ fn test_migrate_fixture_related_divergence_merges_realistic_fixtures() {
     );
 
     repo.bd()
-        .args(["migrate", "to", "1", "--no-push", "--json"])
+        .args(["migrate", "to", "2", "--no-push", "--json"])
         .assert()
         .success();
     assert_eq!(
@@ -1769,7 +1874,7 @@ fn test_migrate_fixture_unrelated_divergence_requires_force() {
     );
 
     repo.bd()
-        .args(["migrate", "to", "1", "--dry-run", "--json"])
+        .args(["migrate", "to", "2", "--dry-run", "--json"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -1777,7 +1882,7 @@ fn test_migrate_fixture_unrelated_divergence_requires_force() {
         ));
 
     repo.bd()
-        .args(["migrate", "to", "1", "--force", "--dry-run", "--json"])
+        .args(["migrate", "to", "2", "--force", "--dry-run", "--json"])
         .assert()
         .success();
     assert_eq!(
@@ -1787,7 +1892,7 @@ fn test_migrate_fixture_unrelated_divergence_requires_force() {
     );
 
     repo.bd()
-        .args(["migrate", "to", "1", "--no-push", "--json"])
+        .args(["migrate", "to", "2", "--no-push", "--json"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -1795,7 +1900,7 @@ fn test_migrate_fixture_unrelated_divergence_requires_force() {
         ));
 
     repo.bd()
-        .args(["migrate", "to", "1", "--force", "--no-push", "--json"])
+        .args(["migrate", "to", "2", "--force", "--no-push", "--json"])
         .assert()
         .success();
     assert_eq!(
@@ -1842,7 +1947,7 @@ fn test_migrate_retryable_push_race_recomputes_and_preserves_backup_ref() {
     push_store_ref(repo.path());
 
     let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
-    beads_git::sync::migrate_store_ref_to_v1(
+    beads_git::sync::migrate_store_ref_to_v2(
         &remote_repo,
         repo.remote_dir.path(),
         false,
@@ -1868,7 +1973,7 @@ fn test_migrate_retryable_push_race_recomputes_and_preserves_backup_ref() {
     wait_for_fetched_remote_store_ref(repo.path(), base_oid, Duration::from_secs(1));
 
     let local_repo = Repository::open(repo.path()).expect("open local repo");
-    let outcome = migrate_store_ref_to_v1_with_before_push_for_testing(
+    let outcome = migrate_store_ref_to_v2_with_before_push_for_testing(
         &local_repo,
         repo.path(),
         false,
@@ -1923,7 +2028,7 @@ fn test_migrate_retryable_push_race_exhausts_retry_budget() {
     push_store_ref(repo.path());
 
     let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
-    beads_git::sync::migrate_store_ref_to_v1(
+    beads_git::sync::migrate_store_ref_to_v2(
         &remote_repo,
         repo.remote_dir.path(),
         false,
@@ -1949,7 +2054,7 @@ fn test_migrate_retryable_push_race_exhausts_retry_budget() {
     wait_for_fetched_remote_store_ref(repo.path(), base_oid, Duration::from_secs(1));
 
     let local_repo = Repository::open(repo.path()).expect("open local repo");
-    let err = migrate_store_ref_to_v1_with_before_push_for_testing(
+    let err = migrate_store_ref_to_v2_with_before_push_for_testing(
         &local_repo,
         repo.path(),
         false,
@@ -2003,7 +2108,7 @@ fn test_migrate_cli_retryable_push_race_recomputes_and_preserves_backup_ref() {
     push_store_ref(repo.path());
 
     let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
-    beads_git::sync::migrate_store_ref_to_v1(
+    beads_git::sync::migrate_store_ref_to_v2(
         &remote_repo,
         repo.remote_dir.path(),
         false,
@@ -2034,7 +2139,7 @@ fn test_migrate_cli_retryable_push_race_recomputes_and_preserves_backup_ref() {
             "BD_TEST_MIGRATE_BEFORE_PUSH_WINNER",
             format!("once:{winner_oid}"),
         )
-        .args(["migrate", "to", "1", "--json"])
+        .args(["migrate", "to", "2", "--json"])
         .assert()
         .success()
         .get_output()
@@ -2076,7 +2181,7 @@ fn test_migrate_cli_retryable_push_race_exhausts_retry_budget() {
     push_store_ref(repo.path());
 
     let remote_repo = Repository::open(repo.remote_dir.path()).expect("open remote repo");
-    beads_git::sync::migrate_store_ref_to_v1(
+    beads_git::sync::migrate_store_ref_to_v2(
         &remote_repo,
         repo.remote_dir.path(),
         false,
@@ -2107,7 +2212,7 @@ fn test_migrate_cli_retryable_push_race_exhausts_retry_budget() {
             format!("once:{winner_oid}"),
         )
         .env("BD_TEST_MIGRATE_MAX_RETRIES", "0")
-        .args(["migrate", "to", "1", "--json"])
+        .args(["migrate", "to", "2", "--json"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("too many sync retries (1)"));
@@ -2139,7 +2244,7 @@ fn test_migrate_infers_missing_root_slug_from_existing_ids() {
     rewrite_store_meta(repo_b.path(), Some(br#"{"format_version":1}"#));
 
     for repo in [&repo_a, &repo_b] {
-        run_bd_json(repo, &["migrate", "to", "1", "--no-push", "--json"]);
+        run_bd_json(repo, &["migrate", "to", "2", "--no-push", "--json"]);
 
         let meta_bytes = read_tree_blob(
             &Repository::open(repo.path()).expect("open repo"),
@@ -2175,7 +2280,7 @@ fn test_migrate_preserves_existing_meta_root_slug_and_last_write_stamp() {
         .expect("serialize meta");
     rewrite_store_meta(repo.path(), Some(&meta_bytes));
 
-    run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    run_bd_json(&repo, &["migrate", "to", "2", "--no-push", "--json"]);
 
     let meta_json = read_store_meta_json(repo.path());
     assert_eq!(
@@ -2217,7 +2322,7 @@ fn test_runtime_strict_load_legacy_deps_shows_migration_hint() {
         .args(["list", "--json"])
         .assert()
         .failure()
-        .stderr(predicate::str::contains("bd migrate to 1"))
+        .stderr(predicate::str::contains("bd migrate to 2"))
         .stderr(predicate::str::contains("legacy deps store detected"));
 }
 
@@ -2231,15 +2336,15 @@ fn test_runtime_strict_load_unrelated_parse_error_does_not_show_migration_hint()
         .assert()
         .failure()
         .stderr(predicate::str::contains("deps.jsonl"))
-        .stderr(predicate::str::contains("bd migrate to 1").not());
+        .stderr(predicate::str::contains("bd migrate to 2").not());
 }
 
 #[test]
-fn test_migrate_to_1_missing_store_ref_errors_with_actionable_message() {
+fn test_migrate_to_2_missing_store_ref_errors_with_actionable_message() {
     let repo = TestRepo::new_local_only();
 
     repo.bd()
-        .args(["migrate", "to", "1", "--json"])
+        .args(["migrate", "to", "2", "--json"])
         .assert()
         .failure()
         .stderr(predicate::str::contains(
@@ -2257,7 +2362,7 @@ fn test_migrate_to_rejects_unsupported_target_version() {
         .assert()
         .failure()
         .stderr(predicate::str::contains(
-            "unsupported migration target 999 (latest supported is 1)",
+            "unsupported migration target 999 (latest supported is 2)",
         ));
 }
 
@@ -2274,7 +2379,7 @@ fn test_migrate_to_without_force_fails_on_warningful_legacy_parse() {
     );
 
     repo.bd()
-        .args(["migrate", "to", "1", "--no-push", "--json"])
+        .args(["migrate", "to", "2", "--no-push", "--json"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("legacy deps parse produced"))
@@ -2298,7 +2403,7 @@ not-json
 
     let output = repo
         .bd()
-        .args(["migrate", "to", "1", "--force", "--no-push", "--json"])
+        .args(["migrate", "to", "2", "--force", "--no-push", "--json"])
         .assert()
         .success()
         .get_output()
@@ -2320,17 +2425,40 @@ not-json
         !warnings.is_empty(),
         "expected warning details when forcing through malformed legacy lines: {json}"
     );
-    assert_eq!(
-        warnings.len(),
-        4,
-        "expected one warning per malformed legacy line class: {json}"
-    );
-    assert!(
-        warnings.iter().all(|warning| {
+    let legacy_warning_count = warnings
+        .iter()
+        .filter(|warning| {
             warning
                 .as_str()
                 .is_some_and(|text| text.starts_with("LEGACY_DEPS_"))
-        }),
+        })
+        .count();
+    let rebuild_warning_count = warnings
+        .iter()
+        .filter(|warning| {
+            warning.as_str().is_some_and(|warning| {
+                warning.contains("local daemon-store caches")
+                    && warning.contains("reset and rebuild from repo truth on next load")
+            })
+        })
+        .count();
+    assert_eq!(
+        legacy_warning_count, 4,
+        "expected one malformed-legacy warning per bad input class: {json}"
+    );
+    assert_eq!(
+        warnings.len(),
+        legacy_warning_count + rebuild_warning_count,
+        "unexpected non-legacy migration warning surfaced: {json}"
+    );
+    assert!(
+        warnings
+            .iter()
+            .all(|warning| warning.as_str().is_some_and(|text| {
+                text.starts_with("LEGACY_DEPS_")
+                    || (text.contains("local daemon-store caches")
+                        && text.contains("reset and rebuild from repo truth on next load"))
+            })),
         "warning details should use stable LEGACY_DEPS_* prefixes: {json}"
     );
     let has_warning = |prefix: &str| {
@@ -2364,7 +2492,7 @@ not-json
 }
 
 #[test]
-fn test_migrate_to_1_ignores_blank_lines_and_collapses_duplicate_legacy_edges() {
+fn test_migrate_to_2_ignores_blank_lines_and_collapses_duplicate_legacy_edges() {
     let repo = TestRepo::new_local_only();
     write_store_commit(
         repo.path(),
@@ -2377,7 +2505,7 @@ fn test_migrate_to_1_ignores_blank_lines_and_collapses_duplicate_legacy_edges() 
         false,
     );
 
-    let json = run_bd_json(&repo, &["migrate", "to", "1", "--no-push", "--json"]);
+    let json = run_bd_json(&repo, &["migrate", "to", "2", "--no-push", "--json"]);
     assert!(
         json.get("commit_oid")
             .and_then(|value| value.as_str())
@@ -2389,9 +2517,18 @@ fn test_migrate_to_1_ignores_blank_lines_and_collapses_duplicate_legacy_edges() 
         .and_then(|value| value.as_array())
         .cloned()
         .unwrap_or_default();
+    let rebuild_warning_count = warnings
+        .iter()
+        .filter(|warning| {
+            warning.as_str().is_some_and(|warning| {
+                warning.contains("local daemon-store caches")
+                    && warning.contains("reset and rebuild from repo truth on next load")
+            })
+        })
+        .count();
     assert!(
-        warnings.is_empty(),
-        "blank lines and duplicate logical edge rows should not emit migration warnings: {json}"
+        warnings.len() == rebuild_warning_count,
+        "blank lines and duplicate logical edge rows should not emit dependency migration warnings: {json}"
     );
 
     let state = read_store_state(repo.path());
@@ -2471,7 +2608,7 @@ fn test_migrate_basic_import() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Something is broken"))
-        .stdout(predicate::str::contains("in_progress"));
+        .stdout(predicate::str::contains("In Progress"));
 }
 
 #[cfg(feature = "slow-tests")]
@@ -2763,7 +2900,7 @@ fn test_migrate_preserves_repo_slug_and_new_ids_use_it() {
         .assert()
         .success()
         .stdout(predicate::str::contains("Something is broken"))
-        .stdout(predicate::str::contains("in_progress"));
+        .stdout(predicate::str::contains("In Progress"));
 
     let output = repo
         .bd()

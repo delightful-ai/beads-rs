@@ -73,6 +73,18 @@ impl Daemon {
                 self.apply_add_note(&repo, meta, payload, git_tx)
             }
 
+            Request::TrackerTransition { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let meta = ctx.meta;
+                self.apply_tracker_transition(&repo, meta, payload, git_tx)
+            }
+
+            Request::TrackerComment { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let meta = ctx.meta;
+                self.apply_tracker_comment(&repo, meta, payload, git_tx)
+            }
+
             Request::Claim { ctx, payload } => {
                 let repo = ctx.repo.path;
                 let meta = ctx.meta;
@@ -119,6 +131,13 @@ impl Daemon {
                     .into()
             }
 
+            Request::TrackerList { ctx, payload } => {
+                let repo = ctx.repo.path;
+                let read = ctx.read;
+                self.query_tracker_list(&repo, &payload, read, git_tx)
+                    .into()
+            }
+
             Request::Ready { ctx, payload } => {
                 let repo = ctx.repo.path;
                 let read = ctx.read;
@@ -161,7 +180,7 @@ impl Daemon {
                 self.query_stale(
                     &repo,
                     payload.days,
-                    payload.status.as_deref(),
+                    payload.status,
                     payload.limit,
                     read,
                     git_tx,

@@ -348,16 +348,16 @@ This project uses [Beads (bd)](https://github.com/steveyegge/beads) for issue tr
 ```bash
 bd prime                              # Load complete workflow context
 bd ready                              # Show issues ready to work (no blockers)
-bd list --status=open                 # List all open issues
+bd list --status=todo                 # List Todo issues
 bd create --title="..." --type=task  # Create new issue
-bd update <id> --status=in_progress  # Claim work
+bd update <id> --status=in_progress  # Move work to In Progress
 bd close <id>                         # Mark complete
 bd dep add <issue> <depends-on>       # Add dependency
 ```
 
 ## Workflow
 1. Check for ready work: `bd ready`
-2. Claim an issue: `bd update <id> --status=in_progress`
+2. Move an issue into progress: `bd update <id> --status=in_progress`
 3. Do the work
 4. Mark complete: `bd close <id>`
 
@@ -472,16 +472,16 @@ This project uses **Beads (bd)** for issue tracking. Aider requires explicit com
 ## Quick Command Reference (suggest these to user)
 
 - `bd ready` - Show unblocked issues
-- `bd list --status=open` - List all open issues
+- `bd list --status=todo` - List Todo issues
 - `bd create --title="..." --type=task` - Create new issue
-- `bd update <id> --status=in_progress` - Claim work
+- `bd update <id> --status=in_progress` - Move work to In Progress
 - `bd close <id>` - Mark complete
 - `bd dep add <issue> <depends-on>` - Add dependency
 
 ## Workflow Pattern to Suggest
 
 1. **Check ready work**: "Let's run `/run bd ready` to see what's available"
-2. **Claim task**: "Run `/run bd update <id> --status=in_progress` to claim it"
+2. **Move task into progress**: "Run `/run bd update <id> --status=in_progress` to start it"
 3. **Do the work**
 4. **Complete**: "Run `/run bd close <id>` when done"
 
@@ -533,14 +533,14 @@ The AI will **suggest** bd commands, but you must confirm them.
    /run bd create "Issue title" --description="Details" -t bug|feature|task -p 1
    ```
 
-3. Claim work:
+3. Move work into progress:
    ```bash
    /run bd update bd-42 --status in_progress
    ```
 
 4. Complete work:
    ```bash
-   /run bd close bd-42 --reason "Done"
+   /run bd close bd-42 --reason done --note "implemented in current branch"
    ```
 
 ## Configuration
