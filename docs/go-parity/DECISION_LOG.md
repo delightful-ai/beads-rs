@@ -105,7 +105,7 @@ Work order constraint — higher floors depend on lower floors.
 ```
 Floor 0 (no prereqs, ship alongside anything):
   CLI Go-compat work
-  ├── bd init: tolerate no-remote + accept gascity's flag set
+  ├── bd init: accept gascity's flag set + decide local-only identity vs require origin
   ├── bd dep add: rename --kind → --type (keep --kind alias)
   ├── bd dep rm: alias to bd dep remove
   ├── bd ready: emit bare array (fix envelope for this cmd specifically)

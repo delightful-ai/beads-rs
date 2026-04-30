@@ -50,7 +50,7 @@ Not applicable: Go init doesn't emit JSON. Rust's `{"result":"initialized"}` is 
 
 1. **Accept and ignore the dolt-server flags** when Rust is running in drop-in mode. `--server`, `--server-host=<h>`, `--server-port=<p>`, `--skip-hooks`: parse them, silently ignore. Alternative: hard-error with a clear message pointing gascity at the compat shim.
 2. **Accept `-p <prefix>` as an alias for namespace/prefix override.** Even though Rust usually derives prefix from the repo URL, gascity passes `-p $namespace` and expects the resulting bead IDs to use that prefix. Either wire `-p` into the prefix derivation or hard-error with a documented migration note.
-3. **Gate the "no origin remote configured" error.** Gascity inits in a directory with a clean `git init` and no remote; Rust rejects this. Two options: (a) infer a synthetic remote URL from the repo path when no remote is set (risky — collides with the beads-daemon keying), or (b) document that gascity must `git remote add origin ...` before calling `bd init`. Tracked separately in `primitives/ids-and-prefixes.md`.
+3. **Resolve the no-origin identity decision, not just the error.** Gascity inits in a directory with a clean `git init` and no remote. Rust's git sync layer can create a local-only `refs/heads/beads/store`, but the daemon load path still keys store identity by normalized `origin` URL and returns `NoRemote` afterward. Floor 0 must pick one explicit contract: (a) require Gas City to add an `origin` before `bd init`, or (b) add a deliberate local-only identity mode such as a validated `local+path://...`/`BD_REMOTE_URL` projection. Do not silently infer an ad hoc path key without a store-identity design.
 4. **No envelope-unwrapping needed** since gascity discards init's stdout.
 
 ### Honor-no-metadata notes
@@ -58,5 +58,4 @@ Not applicable: Go init doesn't emit JSON. Rust's `{"result":"initialized"}` is 
 None — init takes no metadata.
 
 ---
-
 

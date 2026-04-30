@@ -37,7 +37,7 @@ This directory replaces the monolithic `GASCITY_SURFACE.md`. Each command gets i
 7. `bd close id1 id2 ...` batch + `bd ready` bare-array output
 8. Metadata-flag replacements (see `../../primitives/metadata-remapping.md`)
 9. `bd purge` (implement, stub, or decline)
-10. `bd init` flag tolerance + fix "no origin remote" fatal
+10. `bd init` flag tolerance + decide local-only identity vs require origin
 
 ## Related docs
 

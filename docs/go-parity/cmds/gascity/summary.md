@@ -18,7 +18,7 @@
 7. **`bd close id1 id2 ...` batch** and `bd ready` bare-array output. (Commands 9, 11.)
 8. **Metadata flag replacements** — the single largest semantic design pass. See `primitives/metadata-remapping.md` for the full flag catalog. Affects commands 4, 5, 7, 8, 14.
 9. **`bd purge`** — either implement, stub as no-op, or explicitly decline. (Command 3.)
-10. **`bd init` flag acceptance** — ignore `--server`, `--skip-hooks`, `--server-host`, `--server-port`, accept `-p <prefix>`, and fix the "no origin remote" fatal. (Command 1.)
+10. **`bd init` flag acceptance + identity decision** — ignore `--server`, `--skip-hooks`, `--server-host`, `--server-port`, accept `-p <prefix>`, and either require an `origin` or implement an explicit local-only store identity. (Command 1.)
 
 **Non-blockers (important but not gating drop-in use):**
 
@@ -26,4 +26,3 @@
 - Assignee compat mode actually honoring the passed value.
 - `--include-infra` / `--include-gates` / `--include-templates` on list (accept-and-ignore until types exist).
 - `dependencies_removed` / `references_updated` fields on delete.
-
