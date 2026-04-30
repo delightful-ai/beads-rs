@@ -417,7 +417,7 @@ fn handle_from_markdown_file(ctx: &CliRuntimeCtx, path: &std::path::Path) -> Com
     }
 
     if ctx.json {
-        print_json(&created)?;
+        print_json(&crate::render::issue_array_json_value(&created))?;
         return Ok(());
     }
 
@@ -620,6 +620,13 @@ fn parse_md_type(s: &str) -> BeadType {
         "feature" | "features" | "feat" => BeadType::Feature,
         "epic" | "epics" => BeadType::Epic,
         "chore" | "chores" | "maintenance" => BeadType::Chore,
+        "decision" | "dec" | "adr" => BeadType::Decision,
+        "message" | "msg" => BeadType::Message,
+        "molecule" | "mol" => BeadType::Molecule,
+        "spike" | "research" | "investigation" => BeadType::Spike,
+        "story" | "user-story" | "user_story" => BeadType::Story,
+        "milestone" => BeadType::Milestone,
+        "event" => BeadType::Event,
         _ => BeadType::Task,
     }
 }

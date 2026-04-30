@@ -1,11 +1,11 @@
 use clap::Args;
 
 use super::common::{fmt_issue_ref, fmt_labels, fmt_wall_ms};
-use super::{CommandError, CommandResult, print_ok};
+use super::{CommandError, CommandResult};
 use crate::render::{print_json, print_line};
 use crate::runtime::{CliRuntimeCtx, send};
 use crate::validation::{normalize_bead_id, validation_error};
-use beads_api::{Issue, IssueSummary, Note, QueryResult};
+use beads_api::{Issue, IssueSummary, Note, QueryResult, ShowDetails};
 use beads_core::{BeadId, BeadType, NamespaceId, WorkflowStatus};
 use beads_surface::ipc::{IdPayload, ListPayload, Request, ResponsePayload};
 use beads_surface::{Filters, SortField};
@@ -46,26 +46,19 @@ pub struct ShowArgs {
 
 pub fn handle(ctx: &CliRuntimeCtx, args: ShowArgs) -> CommandResult<()> {
     let ids = resolve_show_ids(ctx, args.id, args.id_flag, args.current)?;
+
+    if ctx.json {
+        let mut details = Vec::with_capacity(ids.len());
+        for id in &ids {
+            details.push(fetch_show_details(ctx, id)?);
+        }
+        print_json(&crate::render::show_details_array_json_value(&details))?;
+        return Ok(());
+    }
+
     let mut views = Vec::with_capacity(ids.len());
     for id in &ids {
         views.push(fetch_show_view(ctx, id)?);
-    }
-
-    if ctx.json {
-        let issues = views
-            .iter()
-            .map(|view| view.issue.clone())
-            .collect::<Vec<_>>();
-        if issues.len() == 1 {
-            return print_ok(
-                &ResponsePayload::Query(QueryResult::Issue(
-                    issues.into_iter().next().expect("single issue"),
-                )),
-                true,
-            );
-        }
-        print_json(&issues)?;
-        return Ok(());
     }
 
     let mut output = String::new();
@@ -90,6 +83,27 @@ pub fn handle(ctx: &CliRuntimeCtx, args: ShowArgs) -> CommandResult<()> {
 
     print_line(output.trim_end())?;
     Ok(())
+}
+
+fn fetch_show_details(ctx: &CliRuntimeCtx, id: &BeadId) -> CommandResult<ShowDetails> {
+    let req = Request::ShowDetails {
+        ctx: ctx.read_ctx(),
+        payload: IdPayload { id: id.clone() },
+    };
+    match send(&req)? {
+        ResponsePayload::Query(QueryResult::ShowDetails(details)) => Ok(details),
+        ResponsePayload::Query(QueryResult::Issue(issue)) => Ok(ShowDetails {
+            issue,
+            incoming: Vec::new(),
+            outgoing: Vec::new(),
+            summaries: Vec::new(),
+        }),
+        other => Err(CommandError::Ipc(
+            beads_surface::ipc::IpcError::DaemonUnavailable(format!(
+                "unexpected response for show details: {other:?}"
+            )),
+        )),
+    }
 }
 
 fn fetch_show_view(ctx: &CliRuntimeCtx, id: &BeadId) -> CommandResult<ShowView> {
@@ -157,13 +171,13 @@ fn build_show_view(
     let mut discovered_ids: BTreeSet<String> = BTreeSet::new();
     for e in &incoming_edges {
         match e.kind.as_str() {
-            "parent" => {
+            "parent" | "parent-child" => {
                 children_ids.insert(e.from.clone());
             }
             "related" => {
                 related_ids.insert(e.from.clone());
             }
-            "discovered_from" => {
+            "discovered_from" | "discovered-from" => {
                 discovered_ids.insert(e.from.clone());
             }
             _ => {

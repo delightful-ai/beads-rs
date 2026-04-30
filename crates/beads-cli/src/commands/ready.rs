@@ -16,7 +16,9 @@ pub struct ReadyArgs {
 pub fn handle(ctx: &CliRuntimeCtx, args: ReadyArgs) -> CommandResult<()> {
     let req = Request::Ready {
         ctx: ctx.read_ctx(),
-        payload: ReadyPayload { limit: args.limit },
+        payload: ReadyPayload {
+            limit: args.limit.filter(|limit| *limit > 0),
+        },
     };
     let ok = send(&req)?;
 

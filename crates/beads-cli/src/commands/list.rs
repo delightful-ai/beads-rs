@@ -40,6 +40,14 @@ pub struct ListArgs {
     #[arg(short = 'n', long)]
     pub limit: Option<usize>,
 
+    /// Include Go beads infra issue types (compat; Rust includes all typed issues unless filtered).
+    #[arg(long = "include-infra")]
+    pub include_infra: bool,
+
+    /// Include Go beads gate issue types (compat; Rust includes all typed issues unless filtered).
+    #[arg(long = "include-gates")]
+    pub include_gates: bool,
+
     /// Sort field (priority|created|updated|title) with optional :asc/:desc.
     #[arg(long)]
     pub sort: Option<String>,
@@ -82,7 +90,7 @@ pub fn handle_list(ctx: &CliRuntimeCtx, args: ListArgs) -> CommandResult<()> {
         filters.status = Some(String::from("open"));
     }
 
-    filters.limit = args.limit;
+    filters.limit = args.limit.filter(|limit| *limit > 0);
     filters.search = search;
     filters.parent = parent;
 

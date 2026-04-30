@@ -418,7 +418,14 @@ impl MutateForTest for BeadType {
             BeadType::Feature => BeadType::Task,
             BeadType::Task => BeadType::Epic,
             BeadType::Epic => BeadType::Chore,
-            BeadType::Chore => BeadType::Bug,
+            BeadType::Chore => BeadType::Decision,
+            BeadType::Decision => BeadType::Message,
+            BeadType::Message => BeadType::Molecule,
+            BeadType::Molecule => BeadType::Spike,
+            BeadType::Spike => BeadType::Story,
+            BeadType::Story => BeadType::Milestone,
+            BeadType::Milestone => BeadType::Event,
+            BeadType::Event => BeadType::Bug,
         };
     }
 }

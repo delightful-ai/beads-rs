@@ -1,7 +1,7 @@
 //! Layer 2: Domain enums
 //!
-//! BeadType: bug, feature, task, epic, chore
-//! DepKind: blocks, parent, related, discovered_from
+//! BeadType: built-in issue/work item classifications
+//! DepKind: typed workflow and graph relationship kinds
 //! Priority: 0-4 (0 = critical)
 
 use serde::{Deserialize, Serialize};
@@ -20,6 +20,13 @@ pub enum BeadType {
     Task,
     Epic,
     Chore,
+    Decision,
+    Message,
+    Molecule,
+    Spike,
+    Story,
+    Milestone,
+    Event,
 }
 
 crate::enum_str! {
@@ -32,6 +39,13 @@ crate::enum_str! {
             Task => ["task"],
             Epic => ["epic"],
             Chore => ["chore"],
+            Decision => ["decision"],
+            Message => ["message"],
+            Molecule => ["molecule"],
+            Spike => ["spike"],
+            Story => ["story"],
+            Milestone => ["milestone"],
+            Event => ["event"],
         }
     }
 }
@@ -54,8 +68,23 @@ impl ContentHashable for BeadType {
 pub enum DepKind {
     Blocks,
     Parent,
+    ConditionalBlocks,
+    WaitsFor,
     Related,
     DiscoveredFrom,
+    RepliesTo,
+    RelatesTo,
+    Duplicates,
+    Supersedes,
+    AuthoredBy,
+    AssignedTo,
+    ApprovedBy,
+    Attests,
+    Tracks,
+    Until,
+    CausedBy,
+    Validates,
+    DelegatedFrom,
 }
 
 crate::enum_str! {
@@ -64,16 +93,31 @@ crate::enum_str! {
         fn parse_str(raw: &str) -> Option<Self>;
         variants {
             Blocks => ["blocks", "block"],
-            Parent => ["parent", "parent_child", "parentchild"],
+            Parent => ["parent", "parent-child", "parent_child", "parentchild"],
+            ConditionalBlocks => ["conditional-blocks", "conditional_blocks", "conditionalblocks"],
+            WaitsFor => ["waits-for", "waits_for", "waitsfor"],
             Related => ["related", "relates"],
-            DiscoveredFrom => ["discovered_from", "discoveredfrom"],
+            DiscoveredFrom => ["discovered_from", "discovered-from", "discoveredfrom"],
+            RepliesTo => ["replies-to", "replies_to", "repliesto"],
+            RelatesTo => ["relates-to", "relates_to", "relatesto"],
+            Duplicates => ["duplicates", "duplicate"],
+            Supersedes => ["supersedes", "supersede"],
+            AuthoredBy => ["authored-by", "authored_by", "authoredby"],
+            AssignedTo => ["assigned-to", "assigned_to", "assignedto"],
+            ApprovedBy => ["approved-by", "approved_by", "approvedby"],
+            Attests => ["attests", "attest"],
+            Tracks => ["tracks", "track"],
+            Until => ["until"],
+            CausedBy => ["caused-by", "caused_by", "causedby"],
+            Validates => ["validates", "validate"],
+            DelegatedFrom => ["delegated-from", "delegated_from", "delegatedfrom"],
         }
     }
 }
 
 impl DepKind {
     pub fn parse(raw: &str) -> Result<Self, CoreError> {
-        let s = raw.trim().to_lowercase().replace('-', "_");
+        let s = raw.trim().to_lowercase();
         Self::parse_str(&s).ok_or_else(|| {
             InvalidDepKind {
                 raw: raw.to_string(),
@@ -84,10 +128,13 @@ impl DepKind {
 
     /// Returns true if this dependency kind requires DAG enforcement (no cycles).
     ///
-    /// - `Blocks` and `Parent` have ordering semantics and must be acyclic.
-    /// - `Related` and `DiscoveredFrom` are informational links and can be cyclic.
+    /// - Blocking/control-flow kinds have ordering semantics and must be acyclic.
+    /// - Informational graph kinds can be cyclic.
     pub fn requires_dag(&self) -> bool {
-        matches!(self, Self::Blocks | Self::Parent)
+        matches!(
+            self,
+            Self::Blocks | Self::Parent | Self::ConditionalBlocks | Self::WaitsFor
+        )
     }
 }
 

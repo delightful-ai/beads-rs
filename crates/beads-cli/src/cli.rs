@@ -540,6 +540,7 @@ fn dep_cmd_name(cmd: &commands::dep::DepCmd) -> &'static str {
     match cmd {
         commands::dep::DepCmd::Add(_) => "add",
         commands::dep::DepCmd::Rm(_) => "rm",
+        commands::dep::DepCmd::List(_) => "list",
         commands::dep::DepCmd::Tree { .. } => "tree",
         commands::dep::DepCmd::Cycles => "cycles",
     }

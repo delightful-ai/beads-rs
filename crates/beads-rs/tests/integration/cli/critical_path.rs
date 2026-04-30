@@ -27,6 +27,27 @@ fn parse_response_payload(bytes: &[u8]) -> beads_surface::ipc::ResponsePayload {
     serde_json::from_slice(bytes).expect("parse response payload")
 }
 
+fn cli_issue_id_from_output(bytes: &[u8]) -> String {
+    let value: serde_json::Value = serde_json::from_slice(bytes).expect("parse CLI JSON");
+    cli_single_issue_json(&value)["id"]
+        .as_str()
+        .expect("CLI JSON issue id")
+        .to_string()
+}
+
+fn cli_single_issue_json(value: &serde_json::Value) -> &serde_json::Value {
+    if let Some(data) = value.get("data") {
+        return data
+            .as_array()
+            .and_then(|items| items.first())
+            .unwrap_or(data);
+    }
+    value
+        .as_array()
+        .and_then(|items| items.first())
+        .unwrap_or(value)
+}
+
 #[cfg(feature = "slow-tests")]
 fn wal_segments(wal_dir: &Path) -> Vec<PathBuf> {
     let mut entries: Vec<PathBuf> = match fs::read_dir(wal_dir) {
@@ -157,19 +178,17 @@ fn test_create_show_close_workflow() {
         .stdout
         .clone();
 
-    let json: serde_json::Value =
-        serde_json::from_slice(&output).expect("failed to parse create output");
-    let id = json["data"]["id"].as_str().expect("no id in response");
+    let id = cli_issue_id_from_output(&output);
 
     repo.bd()
-        .args(["show", id, "--json"])
+        .args(["show", &id, "--json"])
         .assert()
         .success()
         .stdout(predicate::str::contains("Bug to fix"))
         .stdout(predicate::str::contains("critical bug"));
 
     repo.bd()
-        .args(["close", id, "--reason=Fixed it", "--json"])
+        .args(["close", &id, "--reason=Fixed it", "--json"])
         .assert()
         .success();
 
@@ -234,10 +253,7 @@ fn test_dependencies() {
         .get_output()
         .stdout
         .clone();
-    let id_a = serde_json::from_slice::<serde_json::Value>(&output1).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_a = cli_issue_id_from_output(&output1);
 
     let output2 = repo
         .bd()
@@ -247,10 +263,7 @@ fn test_dependencies() {
         .get_output()
         .stdout
         .clone();
-    let id_b = serde_json::from_slice::<serde_json::Value>(&output2).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_b = cli_issue_id_from_output(&output2);
 
     // B depends on A (B waits for A)
     repo.bd()
@@ -634,10 +647,7 @@ fn test_status_overview() {
         .get_output()
         .stdout
         .clone();
-    let _open_id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let _open_id = cli_issue_id_from_output(&output);
 
     let output = repo
         .bd()
@@ -647,10 +657,7 @@ fn test_status_overview() {
         .get_output()
         .stdout
         .clone();
-    let wip_id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let wip_id = cli_issue_id_from_output(&output);
 
     let output = repo
         .bd()
@@ -660,10 +667,7 @@ fn test_status_overview() {
         .get_output()
         .stdout
         .clone();
-    let done_id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let done_id = cli_issue_id_from_output(&output);
 
     repo.bd().args(["claim", &wip_id]).assert().success();
     repo.bd().args(["close", &done_id]).assert().success();
@@ -2699,11 +2703,158 @@ fn test_init_accepts_gascity_flags_and_prefix() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
+    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["id"]
         .as_str()
         .unwrap()
         .to_string();
     assert!(id.starts_with("gci-"), "expected gci prefix, got {id}");
+}
+
+#[cfg(feature = "slow-tests")]
+#[test]
+fn test_gascity_floor0_cli_json_and_dep_wire() {
+    let repo = BdRuntimeRepo::new_local_only();
+    repo.bd()
+        .args(["init", "--server", "-p", "gc", "--skip-hooks"])
+        .assert()
+        .success();
+
+    let blocker_out = repo
+        .bd()
+        .args([
+            "create",
+            "Floor 0 blocker",
+            "--type=task",
+            "--priority=1",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let blocker: serde_json::Value = serde_json::from_slice(&blocker_out).unwrap();
+    assert!(blocker.get("result").is_none());
+    assert!(blocker.get("data").is_none());
+    assert!(blocker.get("receipt").is_none());
+    assert_eq!(blocker["issue_type"].as_str(), Some("task"));
+    assert!(blocker.get("type").is_none());
+    assert!(
+        blocker["created_at"]
+            .as_str()
+            .is_some_and(|created_at| created_at.contains('T'))
+    );
+    let blocker_id = blocker["id"].as_str().unwrap().to_string();
+
+    let work_out = repo
+        .bd()
+        .args(["create", "Floor 0 work", "--type=molecule", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let work: serde_json::Value = serde_json::from_slice(&work_out).unwrap();
+    assert_eq!(work["issue_type"].as_str(), Some("molecule"));
+    let work_id = work["id"].as_str().unwrap().to_string();
+
+    let list_out = repo
+        .bd()
+        .args([
+            "list",
+            "--json",
+            "--all",
+            "--include-infra",
+            "--include-gates",
+            "--limit",
+            "0",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let list: serde_json::Value = serde_json::from_slice(&list_out).unwrap();
+    let list = list.as_array().expect("list json is an array");
+    assert!(list.iter().any(|issue| issue["id"] == blocker_id));
+    assert!(list.iter().any(|issue| issue["id"] == work_id));
+
+    let ready_out = repo
+        .bd()
+        .args(["ready", "--json", "--limit", "0"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let ready: serde_json::Value = serde_json::from_slice(&ready_out).unwrap();
+    let ready = ready.as_array().expect("ready json is an array");
+    assert!(ready.iter().any(|issue| issue["id"] == blocker_id));
+
+    repo.bd()
+        .args(["dep", "add", &work_id, &blocker_id, "--type", "tracks"])
+        .assert()
+        .success();
+
+    let single_deps_out = repo
+        .bd()
+        .args(["dep", "list", &work_id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let single_deps: serde_json::Value = serde_json::from_slice(&single_deps_out).unwrap();
+    let single_deps = single_deps
+        .as_array()
+        .expect("single dep list json is an array");
+    assert_eq!(single_deps.len(), 1);
+    assert_eq!(single_deps[0]["id"].as_str(), Some(blocker_id.as_str()));
+    assert_eq!(single_deps[0]["dependency_type"].as_str(), Some("tracks"));
+
+    let batch_deps_out = repo
+        .bd()
+        .args(["dep", "list", &work_id, &blocker_id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let batch_deps: serde_json::Value = serde_json::from_slice(&batch_deps_out).unwrap();
+    let batch_deps = batch_deps
+        .as_array()
+        .expect("batch dep list json is an array");
+    assert!(batch_deps.iter().any(|record| {
+        record["issue_id"].as_str() == Some(work_id.as_str())
+            && record["depends_on_id"].as_str() == Some(blocker_id.as_str())
+            && record["type"].as_str() == Some("tracks")
+    }));
+
+    let show_out = repo
+        .bd()
+        .args(["show", &work_id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let shown: serde_json::Value = serde_json::from_slice(&show_out).unwrap();
+    let shown = shown.as_array().expect("show json is an array");
+    assert_eq!(shown.len(), 1);
+    assert_eq!(
+        shown[0]["dependencies"][0]["dependency_type"].as_str(),
+        Some("tracks")
+    );
+
+    repo.bd()
+        .args(["dep", "remove", &work_id, &blocker_id])
+        .assert()
+        .success();
+    repo.bd()
+        .args(["dep", "list", &work_id, "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[]\n"));
 }
 
 #[cfg(feature = "slow-tests")]

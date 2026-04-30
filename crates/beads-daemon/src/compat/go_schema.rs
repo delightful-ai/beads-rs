@@ -288,10 +288,8 @@ fn derive_status(workflow: &Workflow, is_blocked: bool) -> GoIssueStatus {
 /// Map Rust DepKind to Go dependency type string.
 fn dep_kind_to_go_type(kind: DepKind) -> String {
     match kind {
-        DepKind::Blocks => "blocks".to_string(),
         DepKind::Parent => "parent-child".to_string(),
-        DepKind::Related => "related".to_string(),
-        DepKind::DiscoveredFrom => "discovered-from".to_string(),
+        other => other.as_str().replace('_', "-"),
     }
 }
 

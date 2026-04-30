@@ -238,7 +238,7 @@ fn render_ok_human(payload: &ResponsePayload) -> String {
 
 pub(crate) fn print_ok(payload: &ResponsePayload, json: bool) -> CommandResult<()> {
     if json {
-        crate::render::print_json(payload)?;
+        crate::render::print_cli_json(payload)?;
         return Ok(());
     }
     crate::render::print_line(&render_ok_human(payload))?;

@@ -111,6 +111,12 @@ impl StoreCaches {
             return Ok(RemoteUrl::new(&url));
         }
 
+        if let Some(cached) = self.path_to_remote.get(repo_path)
+            && !cached.is_local_only()
+        {
+            return Ok(cached.clone());
+        }
+
         let (repo, _) = bootstrap_repo::discover(repo_path)
             .map_err(|_| OpError::NotAGitRepo(repo_path.to_owned()))?;
 

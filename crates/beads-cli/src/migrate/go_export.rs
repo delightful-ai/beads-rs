@@ -417,6 +417,13 @@ fn parse_issue_type(raw: &str) -> Result<BeadType> {
         "task" => Ok(BeadType::Task),
         "epic" => Ok(BeadType::Epic),
         "chore" => Ok(BeadType::Chore),
+        "decision" | "dec" | "adr" => Ok(BeadType::Decision),
+        "message" | "msg" => Ok(BeadType::Message),
+        "molecule" | "mol" => Ok(BeadType::Molecule),
+        "spike" | "research" | "investigation" => Ok(BeadType::Spike),
+        "story" | "user-story" | "user_story" => Ok(BeadType::Story),
+        "milestone" => Ok(BeadType::Milestone),
+        "event" => Ok(BeadType::Event),
         other => Err(validation_error(
             "issue_type",
             format!("unknown issue_type `{}`", other),
@@ -425,17 +432,8 @@ fn parse_issue_type(raw: &str) -> Result<BeadType> {
 }
 
 fn parse_dep_kind(raw: &str) -> Result<DepKind> {
-    let normalized = raw.trim().to_lowercase().replace('_', "-");
-    match normalized.as_str() {
-        "blocks" | "block" => Ok(DepKind::Blocks),
-        "related" | "relates" => Ok(DepKind::Related),
-        "parent-child" | "parent" => Ok(DepKind::Parent),
-        "discovered-from" | "discovered_from" => Ok(DepKind::DiscoveredFrom),
-        other => Err(validation_error(
-            "dep_type",
-            format!("unknown dep type `{}`", other),
-        )),
-    }
+    DepKind::parse(raw)
+        .map_err(|_| validation_error("dep_type", format!("unknown dep type `{}`", raw)))
 }
 
 fn workflow_from_status(
