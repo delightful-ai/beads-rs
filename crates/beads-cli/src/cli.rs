@@ -10,7 +10,7 @@ use crate::commands::setup::{
     SetupCmd, handle_aider, handle_claude, handle_cursor, handle_file_recipe, handle_setup_list,
 };
 use crate::runtime::CliRuntimeCtx;
-use beads_surface::ipc::{EmptyPayload, IpcError, RepoCtx, Request, Response, send_request};
+use beads_surface::ipc::{InitPayload, IpcError, RepoCtx, Request, Response, send_request};
 
 const CREATE_AFTER_HELP: &str = "Examples:\n  bd create \"Write CLI docs\" -p1 -t task\n  printf 'Detailed context\\n' | bd create \"Fix parser\" --stdin\n  bd create \"Refactor parser\" --body-file notes.md --design-file plan.md\n  bd create --file backlog.md";
 const SHOW_AFTER_HELP: &str = "Examples:\n  bd show beads-rs-k8u3\n  bd show --id beads-rs-k8u3 --id beads-rs-k8u3.5\n  bd show --current\n  bd show beads-rs-k8u3 --refs\n  bd show beads-rs-k8u3 --children\n  bd show beads-rs-k8u3 --short\n  bd help --advanced show";
@@ -89,7 +89,7 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Initialize beads store in this repo.
-    Init,
+    Init(commands::init::InitArgs),
 
     /// Create a new bead.
     #[command(
@@ -285,7 +285,7 @@ where
 
 pub fn command_name(command: &Command) -> String {
     match command {
-        Command::Init => "init".to_string(),
+        Command::Init(_) => "init".to_string(),
         Command::Create(_) => "create".to_string(),
         Command::Show(_) => "show".to_string(),
         Command::List(_) => "list".to_string(),
@@ -391,7 +391,7 @@ where
     H::Error: From<CommandError> + From<crate::migrate::GoImportError>,
 {
     match command {
-        Command::Init => commands::init::handle(ctx).map_err(Into::into),
+        Command::Init(args) => commands::init::handle(ctx, args).map_err(Into::into),
         Command::Create(args) => commands::create::handle(ctx, args).map_err(Into::into),
         Command::Show(args) => commands::show::handle(ctx, args).map_err(Into::into),
         Command::List(args) => commands::list::handle_list(ctx, args).map_err(Into::into),
@@ -491,7 +491,7 @@ where
 
     let req = Request::Init {
         ctx: RepoCtx::new(path),
-        payload: EmptyPayload {},
+        payload: InitPayload::default(),
     };
     matches!(send_request(&req), Ok(Response::Ok { .. }))
 }

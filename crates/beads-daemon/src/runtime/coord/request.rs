@@ -318,13 +318,14 @@ impl Daemon {
                 unreachable!("SyncWait is handled by the daemon state loop")
             }
 
-            Request::Init { ctx, .. } => {
+            Request::Init { ctx, payload } => {
                 let repo = ctx.path;
                 let timeout = init_timeout();
                 let (respond_tx, respond_rx) = crossbeam::channel::bounded(1);
                 if git_tx
                     .send(GitOp::Init {
                         repo: repo.clone(),
+                        root_slug: payload.root_slug,
                         respond: respond_tx,
                     })
                     .is_err()

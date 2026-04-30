@@ -111,20 +111,20 @@ impl StoreCaches {
             return Ok(RemoteUrl::new(&url));
         }
 
-        if let Some(remote) = self.path_to_remote.get(repo_path) {
-            return Ok(remote.clone());
-        }
-
         let (repo, _) = bootstrap_repo::discover(repo_path)
             .map_err(|_| OpError::NotAGitRepo(repo_path.to_owned()))?;
-        let remote = repo
-            .find_remote("origin")
-            .map_err(|_| OpError::NoRemote(repo_path.to_owned()))?;
-        let url = remote
-            .url()
-            .ok_or_else(|| OpError::NoRemote(repo_path.to_owned()))?;
 
-        let remote = RemoteUrl::new(url);
+        let remote = match repo.find_remote("origin") {
+            Ok(remote) => {
+                let url = remote
+                    .url()
+                    .ok_or_else(|| OpError::NoRemote(repo_path.to_owned()))?;
+                RemoteUrl::new(url)
+            }
+            Err(err) if err.code() == GitErrorCode::NotFound => local_only_remote(&repo),
+            Err(_) => return Err(OpError::NoRemote(repo_path.to_owned())),
+        };
+
         self.path_to_remote
             .insert(repo_path.to_owned(), remote.clone());
         Ok(remote)
@@ -180,9 +180,15 @@ impl StoreCaches {
             return Ok(resolution);
         }
 
+        let source = if remote.is_local_only() {
+            StoreIdSource::LocalOnly
+        } else {
+            StoreIdSource::RemoteFallback
+        };
+
         Ok(StoreIdResolution::unverified(
             store_id_from_remote(remote),
-            StoreIdSource::RemoteFallback,
+            source,
         ))
     }
 }
@@ -194,6 +200,7 @@ pub enum StoreIdSource {
     GitMeta,
     GitRefs,
     RemoteFallback,
+    LocalOnly,
 }
 
 crate::enum_str! {
@@ -206,6 +213,7 @@ crate::enum_str! {
             GitMeta => ["git_meta"],
             GitRefs => ["git_refs"],
             RemoteFallback => ["remote_fallback"],
+            LocalOnly => ["local_only"],
         }
     }
 }
@@ -430,6 +438,12 @@ pub(crate) fn store_id_from_remote(remote: &RemoteUrl) -> StoreId {
     StoreId::new(store_uuid)
 }
 
+fn local_only_remote(repo: &Repository) -> RemoteUrl {
+    let identity_path =
+        fs::canonicalize(repo.commondir()).unwrap_or_else(|_| repo.commondir().to_owned());
+    RemoteUrl::local_only_path(&identity_path)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -527,6 +541,66 @@ mod tests {
             resolved.resolution.verified,
             StoreIdVerification::Unverified
         );
+        assert_eq!(
+            resolved.resolution.store_id,
+            store_id_from_remote(&resolved.remote)
+        );
+        assert!(!store_path_map_path().exists());
+    }
+
+    #[test]
+    fn local_only_identity_uses_git_common_dir_without_origin() {
+        assert!(std::env::var("BD_STORE_ID").is_err());
+        assert!(std::env::var("BD_REMOTE_URL").is_err());
+        let (dir, repo) = init_repo();
+        let expected_path = fs::canonicalize(repo.commondir()).unwrap();
+
+        let mut caches = StoreCaches::new();
+        let remote = caches.resolve_remote(dir.path()).unwrap();
+
+        assert!(remote.is_local_only());
+        assert_eq!(
+            remote.as_str(),
+            format!("local+path://{}", expected_path.display())
+        );
+    }
+
+    #[test]
+    fn origin_remote_supersedes_cached_local_only_identity() {
+        assert!(std::env::var("BD_STORE_ID").is_err());
+        assert!(std::env::var("BD_REMOTE_URL").is_err());
+        let (dir, repo) = init_repo();
+        let mut caches = StoreCaches::new();
+
+        let first = caches.resolve_remote(dir.path()).unwrap();
+        assert!(first.is_local_only());
+
+        repo.remote("origin", "https://example.com/repo.git")
+            .unwrap();
+        let second = caches.resolve_remote(dir.path()).unwrap();
+
+        assert_eq!(second.as_str(), "example.com/repo");
+        assert!(!second.is_local_only());
+    }
+
+    #[test]
+    fn local_only_store_id_is_unverified_and_not_persisted() {
+        assert!(std::env::var("BD_STORE_ID").is_err());
+        assert!(std::env::var("BD_REMOTE_URL").is_err());
+        let (dir, _repo) = init_repo();
+
+        let data_dir = TempDir::new().unwrap();
+        let _override = crate::paths::override_data_dir_for_tests(Some(data_dir.path().into()));
+
+        let mut caches = StoreCaches::new();
+        let resolved = caches.resolve_store(dir.path()).unwrap();
+
+        assert_eq!(resolved.resolution.source, StoreIdSource::LocalOnly);
+        assert_eq!(
+            resolved.resolution.verified,
+            StoreIdVerification::Unverified
+        );
+        assert!(resolved.remote.is_local_only());
         assert_eq!(
             resolved.resolution.store_id,
             store_id_from_remote(&resolved.remote)

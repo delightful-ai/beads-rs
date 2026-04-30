@@ -2446,7 +2446,11 @@ fn should_cleanup_backup_ref_lock(
 /// - If remote exists, point local to it
 /// - If not, create orphan commit and try push
 /// - On non-fast-forward, retry (lost the race)
-pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncError> {
+pub fn init_beads_ref(
+    repo: &Repository,
+    max_retries: usize,
+    root_slug_override: Option<&BeadSlug>,
+) -> Result<(), SyncError> {
     let mut retries = 0;
 
     loop {
@@ -2494,8 +2498,9 @@ pub fn init_beads_ref(repo: &Repository, max_retries: usize) -> Result<(), SyncE
             }
         }
 
-        // Derive root slug from repo name
-        let root_slug = derive_root_slug(repo);
+        let root_slug = root_slug_override
+            .cloned()
+            .unwrap_or_else(|| derive_root_slug(repo));
 
         // Create empty initial state
         let state = CanonicalState::new();
@@ -4817,7 +4822,7 @@ mod tests {
         let _remote_oid = write_store_commit(&remote_repo, None, "remote");
         let local_oid = write_store_commit(&local_repo, None, "local");
 
-        init_beads_ref(&local_repo, 1).unwrap();
+        init_beads_ref(&local_repo, 1, None).unwrap();
 
         let local_after = local_repo.refname_to_id("refs/heads/beads/store").unwrap();
         assert_eq!(local_after, local_oid);

@@ -459,7 +459,7 @@ pub enum Request {
         #[serde(flatten)]
         ctx: RepoCtx,
         #[serde(flatten)]
-        payload: EmptyPayload,
+        payload: InitPayload,
     },
 
     /// Get sync status.

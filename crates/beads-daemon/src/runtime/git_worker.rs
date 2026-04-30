@@ -127,6 +127,7 @@ pub(crate) enum GitOp {
     /// Initialize beads ref (blocking - bd init command).
     Init {
         repo: PathBuf,
+        root_slug: Option<BeadSlug>,
         respond: Sender<Result<(), SyncError>>,
     },
 
@@ -404,9 +405,9 @@ impl GitWorker {
     }
 
     /// Initialize beads ref.
-    pub fn init(&mut self, path: &Path) -> Result<(), SyncError> {
+    pub fn init(&mut self, path: &Path, root_slug: Option<BeadSlug>) -> Result<(), SyncError> {
         let repo = self.open(path)?;
-        init_beads_ref(repo, 5)
+        init_beads_ref(repo, 5, root_slug.as_ref())
     }
 
     /// Process a single GitOp.
@@ -500,8 +501,12 @@ impl GitWorker {
                         .send(GitResult::Checkpoint(session, checkpoint_group, result));
             }
 
-            GitOp::Init { repo, respond } => {
-                let result = self.init(&repo);
+            GitOp::Init {
+                repo,
+                root_slug,
+                respond,
+            } => {
+                let result = self.init(&repo, root_slug);
                 let _ = respond.send(result);
             }
 

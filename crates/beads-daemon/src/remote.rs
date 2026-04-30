@@ -4,6 +4,7 @@
 //! same repo on one machine share in-memory state instantly.
 
 use std::fmt;
+use std::path::Path;
 
 /// Normalized remote URL used as a stable key.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -14,8 +15,17 @@ impl RemoteUrl {
         Self(normalize_url(raw))
     }
 
+    pub fn local_only_path(path: &Path) -> Self {
+        let path = path.to_string_lossy();
+        Self(format!("local+path://{path}"))
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn is_local_only(&self) -> bool {
+        self.0.starts_with("local+path://")
     }
 }
 
@@ -260,5 +270,13 @@ mod tests {
     fn normalize_local_paths_trim_git_suffix() {
         assert_eq!(normalize_url("/tmp/repo.git/"), "/tmp/repo");
         assert_eq!(normalize_url("./repo.git"), "./repo");
+    }
+
+    #[test]
+    fn local_only_path_keeps_distinct_identity_namespace() {
+        let remote = RemoteUrl::local_only_path(Path::new("/tmp/example/.git"));
+
+        assert_eq!(remote.as_str(), "local+path:///tmp/example/.git");
+        assert!(remote.is_local_only());
     }
 }

@@ -1,13 +1,19 @@
 use serde::{Deserialize, Serialize};
 
 use beads_api::{AdminFingerprintMode, AdminFingerprintSample};
-use beads_core::{BeadId, BeadType, BranchName, DepKind, NamespaceId, Priority, StoreId};
+use beads_core::{BeadId, BeadSlug, BeadType, BranchName, DepKind, NamespaceId, Priority, StoreId};
 
 use crate::ops::BeadPatch;
 use crate::query::Filters;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct EmptyPayload {}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct InitPayload {
+    #[serde(default)]
+    pub root_slug: Option<BeadSlug>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IdPayload {

@@ -8,7 +8,7 @@ use std::time::Duration;
 use assert_cmd::Command;
 use beads_api::{AdminStoreUnlockOutput, QueryResult};
 use beads_core::{StoreId, StoreMeta};
-use beads_surface::ipc::{EmptyPayload, IpcClient, RepoCtx, Request, Response, ResponsePayload};
+use beads_surface::ipc::{InitPayload, IpcClient, RepoCtx, Request, Response, ResponsePayload};
 use tempfile::TempDir;
 
 use super::daemon_runtime::shutdown_daemon;
@@ -343,7 +343,7 @@ pub(crate) fn wait_for_daemon_ready(client: &IpcClient, timeout: Duration) -> bo
 pub(crate) fn initialize_repo_with_client(client: &IpcClient, repo_path: &Path) {
     let request = Request::Init {
         ctx: RepoCtx::new(repo_path.to_path_buf()),
-        payload: EmptyPayload {},
+        payload: InitPayload::default(),
     };
     let response = {
         let _phase = timing::scoped_phase("fixture.bd_runtime.init_request");

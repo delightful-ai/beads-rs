@@ -2653,10 +2653,57 @@ fn test_double_init() {
 
 #[cfg(feature = "slow-tests")]
 #[test]
-fn test_init_fails_without_origin_remote() {
+fn test_init_without_origin_remote_uses_explicit_local_only_identity() {
     let repo = BdRuntimeRepo::new_local_only();
 
-    repo.bd().arg("init").assert().failure();
+    repo.bd().arg("init").assert().success();
+
+    repo.bd()
+        .args(["create", "Local-only issue", "--type=task", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Local-only issue"));
+
+    repo.bd()
+        .args(["list", "--json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Local-only issue"));
+}
+
+#[cfg(feature = "slow-tests")]
+#[test]
+fn test_init_accepts_gascity_flags_and_prefix() {
+    let repo = BdRuntimeRepo::new_local_only();
+
+    repo.bd()
+        .args([
+            "init",
+            "--server",
+            "-p",
+            "gci",
+            "--skip-hooks",
+            "--server-host",
+            "127.0.0.1",
+            "--server-port",
+            "3307",
+        ])
+        .assert()
+        .success();
+
+    let output = repo
+        .bd()
+        .args(["create", "Gas City prefix issue", "--type=task", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(id.starts_with("gci-"), "expected gci prefix, got {id}");
 }
 
 #[cfg(feature = "slow-tests")]
