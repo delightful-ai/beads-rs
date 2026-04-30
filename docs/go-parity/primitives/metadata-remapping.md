@@ -1,6 +1,7 @@
 # Metadata remapping: gascity keys → beads-rs typed homes
 
 **Pin:** beads v1.0.2 (c446a2ef) · companion to `metadata-inventory.md`. Read the inventory first.
+**Latest audit note:** Gas City `d6011764` was re-read on 2026-04-30 for Floor 1 ordering. That pass corrected `gc.control_epoch`: it is durable fenced control state in the current source, not a derived value.
 
 This file is the **design decision log**. For every key (or coherent group of keys) from the inventory, it names a typed home in beads-rs. The decision vocabulary — one of seven options — is fixed:
 
@@ -19,7 +20,7 @@ Design principles applied (from `docs/philosophy/type_design.md` and `docs/philo
 - **One canonical home per fact.** If state is derivable (routing, say) it's `Derived`, not a copy. If it's per-namespace (ephemeral-ness, protected prefix) it's a namespace property, not smeared across every bead.
 - **Unrepresentable-wrong-state > validated-on-read.** A bead whose `kind` can only be `Gate` if the variant is `BeadType::Gate` cannot carry gate-only fields illegally.
 
-A note on bead-type proliferation: the inventory has at least eight "kinds" of bead masquerading as `type=task` in gascity today (convergence-root, molecule-step, gate-control, retry-control, ralph-control, fanout-control, session, transcript-entry, membership, binding, group, participant, delivery-context, wait, nudge). Beads-rs's current `BeadType` enum (`Bug, Feature, Task, Epic, Chore`) is too narrow. The remapping below assumes beads-rs grows a richer `BeadType` enum — either directly or through the custom-types mechanism (`docs/go-parity/primitives/custom-types.md`). Where a proposal references a new variant (e.g. `BeadType::ConvergenceRoot`), that's the forcing function for the custom-types port; it's not inventing something out of thin air.
+A note on bead-type proliferation: the inventory has at least eight "kinds" of bead masquerading as `type=task` in gascity today (convergence-root, molecule-step, gate-control, retry-control, ralph-control, fanout-control, session, transcript-entry, membership, binding, group, participant, delivery-context, wait, nudge). Beads-rs's current `BeadType` enum (`Bug, Feature, Task, Epic, Chore`) is too narrow. The remapping below assumes beads-rs grows a richer `BeadType` enum with actual variants. `types.custom` is only a Gas City doctor/config compatibility facade, not the canonical mechanism for making these variants valid. Where a proposal references a new variant (e.g. `BeadType::ConvergenceRoot`), that's the forcing function for direct typed model work; it's not inventing something out of thin air.
 
 ---
 
@@ -103,7 +104,7 @@ enum WaitingReason { Manual, HybridNoCondition, Timeout, SlingFailure }  // meta
 
 **Gascity impact.**
 - `store.SetMetadata(beadID, FieldState, StateActive)` → `store.apply(Patch::Convergence(ConvergencePatch::SetPhase(Active)))` (via a typed patch surface).
-- `parentBead.Metadata["gc.control_epoch"]` disappears — see §A.5 (`control_epoch` is derived from HLC, not from a metadata scalar).
+- `parentBead.Metadata["gc.control_epoch"]` moves to typed workflow/control state — see §A.5.
 - The big `SetMetadataBatch` after gate evaluation becomes one atomic `ConvergenceLoopState::last_gate.update(...)` call.
 
 **CRDT merge behavior.** Every `Lww<...>` carries a stamp from the writing actor; two concurrent updates deterministically merge by stamp order. `Max<u32>` for `iteration` preserves "larger wins". `Termination` is a one-shot state (once set, never cleared), so `Lww<Option<Termination>>` is safe — but structurally we can go further: encode "terminal is terminal" by making termination immutable once set (the `Workflow::Closed` pattern in `composite.rs`). Flagged as a next-step refinement; LWW is adequate correctness today.
@@ -285,6 +286,7 @@ Source keys: `gc.attempt`, `gc.max_attempts`, `gc.retry_state`, `gc.next_attempt
 
 ```rust
 struct ControlState {
+    control_epoch: Max<u64>,                // gc.control_epoch — fenced attach/update epoch
     spawn: Lww<SpawnPhase>,                 // gc.retry_state — enum { Initial, Spawning, Spawned }
     next_attempt: Max<u32>,                 // gc.next_attempt — monotonic
     session_recycled: Lww<bool>,            // gc.retry_session_recycled
@@ -306,9 +308,9 @@ enum FinalDisposition { Pass, HardFail, SoftFail, ControllerError }
 
 **`gc.retry_from`**: `DepEdgeState` — an inter-attempt dep edge with kind `replaces-attempt`, not metadata. See §D.1.
 
-**`gc.control_epoch`** (`molecule.go:247, 292`, `control_integration_test.go:103` etc.): **`Derived`** — this is an epoch counter used for dispatch idempotency. It is derivable from either (a) the HLC `WriteStamp` of the last "reset" event on the control bead, or (b) the cardinality of retry-run children. Storing it back on the bead is scatter.
+**`gc.control_epoch`** (`molecule.go`, `control_integration_test.go`, current `molecule.AttachOptions.ExpectedEpoch`): **`TypedField`** on control state. Latest Gas City passes the expected epoch into attach paths to fence concurrent processors from spawning duplicate attempts, then increments the epoch after the graph attach succeeds. That is not interchangeable with the bead's write stamp or child cardinality unless beads-rs introduces a first-class fenced-update primitive that exposes the same contract.
 
-**`gc.attempt_log` (JSON blob, read-modify-write)**: the strongest typing pressure in the entire inventory. See §C.1 — the correct home is a typed append-only log at the dep-traversal layer, not a JSON blob on a scalar field. Flagged both as `Derived` **and** as a spot where a real append-log primitive is warranted.
+**`gc.attempt_log` (JSON blob, read-modify-write)**: the strongest typing pressure in the entire inventory. See §C.1 — the correct home is a typed append-only log at the dep-traversal layer, not a JSON blob on a scalar field.
 
 **Rationale.** The entire retry/ralph control surface is a state machine with 4–6 fields that today masquerade as 13 independent scalars. The group is small enough to keep as one `ControlState` per control variant. `next_attempt` is monotonic (not LWW) — the Go code has an implicit assumption that concurrent writes never happen because one controller owns the bead; beads-rs can encode that assumption as `Max<u32>` and be correct even under controller fault-over.
 
@@ -730,12 +732,12 @@ Each decision category maps one key group. Some groups contain multiple keys (e.
 
 | Home | Group count | Notes |
 |---|---:|---|
-| **TypedField** | ~30 | A.1 (convergence, 1 row = 27 keys); A.2 (molecule/workflow topology, 1 = ~25 keys); A.3 (routing, 3); A.4 (attempt result, 1 = 7 keys); A.5 (control state, 1 = 10 keys); A.6 (fanout, 1 = 7 keys); A.7 (convoy, 1 = 5 keys); A.8 (session, split into 4 = ~45 keys); A.9 (review verdicts, 1 = 3 keys); A.10 (consumer pointers minus molecule/workflow_id, 3); A.11 (extmsg, 7 = ~60 keys). Dominant by far. |
+| **TypedField** | ~30 | A.1 (convergence, 1 row = 27 keys); A.2 (molecule/workflow topology, 1 = ~25 keys); A.3 (routing, 3); A.4 (attempt result, 1 = 7 keys); A.5 (control state, 1 = 11 keys including control_epoch); A.6 (fanout, 1 = 7 keys); A.7 (convoy, 1 = 5 keys); A.8 (session, split into 4 = ~45 keys); A.9 (review verdicts, 1 = 3 keys); A.10 (consumer pointers minus molecule/workflow_id, 3); A.11 (extmsg, 7 = ~60 keys). Dominant by far. |
 | **NamespaceProperty** | 3 | B.1 ephemeral/wisp; B.2 dynamic_fragment; B.3 schema_version. |
 | **Label** | 0 | No key in the inventory has pure present/absent semantics without a value payload. gascity uses beads-rs labels heavily (`gc:session`, `nudge:<id>`, etc.) but those are already labels, not metadata. |
 | **DepEdgeState** | 5 | D.1 retry_from; D.2 convoy.molecule (pending); D.3 wait pointers (2); D.4 molecule_id/workflow_id (1 row for both); D.5 source_bead_id (reuses DiscoveredFrom). |
 | **RuntimeState** | 3 | E.1 transport; E.2 auto-generated session names (overlaps Derived); E.3 instance_token. |
-| **Derived** | ~5 | gc.routed_to & gc.execution_routed_to (from run_target + bindings); gc.control_epoch (from HLC); from (from BeadCore.created.by); auto-generated session_name; BindingFields::last_touched_at (from BeadView.updated_stamp). |
+| **Derived** | ~4 | gc.routed_to & gc.execution_routed_to (from run_target + bindings); from (from BeadCore.created.by); auto-generated session_name; BindingFields::last_touched_at (from BeadView.updated_stamp). |
 | **Revisit** | 2 | F.1 gc.source_step_spec (real case for a versioned opaque blob); F.2 unclear-from-source bundle (not a primitive gap, just more reading needed). |
 
 **Quality signal: 2 Revisit items, 0 of which argue for a generic freeform-metadata primitive.** F.1 is one specific primitive need (a versioned opaque blob) that is narrowly scoped; F.2 is not a primitive gap, just deferred analysis.
@@ -746,7 +748,7 @@ Each decision category maps one key group. Some groups contain multiple keys (e.
 
 The remaps above lean on CRDT primitives beyond the current `Lww<T>` / `Labels`. Concrete additions the port requires:
 
-1. `Max<T: Ord>` — monotonic counter. Used for: `iteration`, `next_sequence`, `next_attempt`, `generation`, `continuation_epoch`, `spawned_count`, `closed_by_attempt`, `retry_count`, `failed_attempt`, `last_read_sequence`.
+1. `Max<T: Ord>` — monotonic counter. Used for: `iteration`, `control_epoch`, `next_sequence`, `next_attempt`, `generation`, `continuation_epoch`, `spawned_count`, `closed_by_attempt`, `retry_count`, `failed_attempt`, `last_read_sequence`.
 2. `OrSet<T: Hash + Eq>` — add-wins set. Used for: `alias_history`, `membership_owner_kinds`, `pending_session_cleanup`, and (possibly) a namespace name-registry.
 3. `AppendLog<T>` — add-only log with deterministic merge. Used for: `gc.attempt_log`.
 4. `Cas<T>` — compare-and-set scalar. Used for: `pending_create_claim`, `session_name`/`alias` reservation.

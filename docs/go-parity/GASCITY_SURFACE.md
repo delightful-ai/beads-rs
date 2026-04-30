@@ -5,6 +5,8 @@
 **Pin:** Go `bd` v1.0.2 (`c446a2ef`) vs. beads-rs at current HEAD (`bd 0.2.0-alpha`).
 **Scope:** the 14 commands gascity actually invokes from `internal/beads/bdstore.go`, `internal/beads/bdstore_graph_apply.go`, and `internal/doctor/checks_custom_types.go`, plus the JSON wire shape each side produces. Nothing else.
 
+**2026-04-30 audit correction:** this file is a CLI/wire backlog, not the Floor 1 domain plan. The latest Gas City checkout (`d6011764`) uses metadata as durable workflow/control, convergence, session, graph-apply, idempotency, and query state. Treat `metadata` in this file as the current external projection that must map to typed homes in beads-rs; do not read it as permission to add a canonical freeform metadata bag, and do not use `types.custom` as the canonical type model. See [`FLOOR1_REPLAN.md`](FLOOR1_REPLAN.md).
+
 Live captures: all JSON output below was copy-pasted from fresh `/tmp/gap-go` and `/tmp/gap-rs` playgrounds running the pinned binaries on 2026-04-20. Do not rely on paraphrased shapes anywhere in this doc.
 
 ---
@@ -158,18 +160,14 @@ Not implemented. Rust has **no** `config` subcommand; configuration is file-base
 
 ### Required work in beads-rs
 
-1. **Add a `bd config` subcommand family** covering at minimum `set <key> <value>`, `get [--json] <key>`, and `list [--json]`.
-2. **Decide the storage layer.** Three options:
-   - (a) Write into the bootstrap TOML (`~/.config/beads-rs/config.toml`). Clean; matches existing precedence rules in `beads-bootstrap`.
-   - (b) Write into a new per-repo config file under `.beads/config.toml`. Matches Go's per-project semantics but requires a second config schema.
-   - (c) Treat config keys as well-known events in the CRDT log. Correct for the project philosophy but over-engineered for gascity's current `types.custom`-only use.
-   Recommended: (b) for gascity compatibility — `.beads/config.toml`, with a documented list of keys (`types.custom`, plus whatever else shows up).
-3. **Implement `types.custom` specifically** as a list of validated custom type names. Parse the comma-joined input, store as a `Vec<ValidatedBeadTypeName>`, emit back as a single comma-joined string on `get --json` to match gascity's parser (`parseCustomTypesJSON` in `checks_custom_types.go`).
-4. **Must honor the "empty value" contract.** When `types.custom` is unset, `{"key":"types.custom","value":""}` is what gascity expects. Do not emit `null` or a missing field.
+1. **Add the narrow `bd config` subcommand surface Gas City calls**: `set <key> <value>` and `get --json <key>`. `list` can follow later if another caller proves it.
+2. **Treat `types.custom` as a compatibility facade, not canonical type state.** Known Gas City types should be accepted because they are actual Rust `BeadType` variants. `types.custom` exists so `gc doctor` can read/fix the Go-era contract.
+3. **Prefer a virtual or adapter-local value first.** `bd config get --json types.custom` may return the comma-joined known Gas City type set even when nothing is stored. `bd config set types.custom <csv>` should validate syntax and accept the doctor/fix flow, but it must not silently make arbitrary unknown domain types valid.
+4. **Must honor the JSON contract.** Return `{"key":"types.custom","value":"..."}` with a string value. Do not emit `null` or a missing field.
 
 ### Honor-no-metadata notes
 
-`config set`/`config get` are structured k/v, not metadata, and are acceptable. The gascity consumer in `checks_custom_types.go` only ever touches `types.custom`; we can implement a narrow, typed first version and grow the key surface as needed. A follow-up bead should enumerate the full Go key namespace (export.*, jira.*, linear.*, github.*, custom.*, status.*, doctor.suppress.*) and decide which land in Rust and which get declined.
+`config set`/`config get` are structured k/v, not metadata, but `types.custom` should not become the gate for known Gas City types. The gascity consumer in `checks_custom_types.go` only touches `types.custom`; implement that as a compatibility view and require a separate design before supporting arbitrary custom domain types.
 
 ---
 
@@ -291,7 +289,7 @@ Also emits a human warning prefix (`⚠ Creating issue 'Hello world' without des
 | Flag | Go v1.0.2 | Rust | Gap |
 |------|-----------|------|-----|
 | `<title>` positional | yes | yes | faithful |
-| `-t/--type` | yes (incl. custom types via `types.custom`) | yes (BUT only `bug|feature|task|epic|chore`, no custom types) | Rust rejects `molecule`, `convoy`, etc. — fatal for gascity. |
+| `-t/--type` | yes (built-ins plus Go custom-type mechanism) | yes (BUT only `bug|feature|task|epic|chore`) | Rust rejects `molecule`, `convoy`, etc. — fatal for gascity. Known Gas City types should become actual Rust variants, not depend on `types.custom`. |
 | `--priority` (accepts 0-4 or P0-P4) | yes | yes (0-4 or words like "high"; does it accept `P0`?) | Must verify; gascity passes `strconv.Itoa(*b.Priority)` so always 0-4 numeric. |
 | `--description` | yes | yes | faithful |
 | `--assignee` | yes | yes (compat: only current actor) | Rust's `--assignee` silently binds to the invoking actor regardless of value passed. Gascity passes an agent name like `agent-ralph`; this will mis-attribute. |
@@ -314,7 +312,7 @@ Also emits a human warning prefix (`⚠ Creating issue 'Hello world' without des
 | `issue_type` vs `type` | `"issue_type": "task"` | `"type": "task"` | **Rename**. Gascity reads `issue_type`. |
 | `created_at` | RFC3339 string | `{wall_ms, counter}` | **Shape**. Gascity's `time.Time` parser cannot read the HLC tuple. |
 | `updated_at` | RFC3339 string | `{wall_ms, counter}` | **Shape**, same as above. |
-| `owner` | string | — | Gascity reads `owner` but falls back to `metadata.from` (see `toBead` in bdstore.go:337-360). Rust has no `owner`. |
+| `assignee` / `from` | string | `assignee` exists, `from` absent | Current Gas City reads `assignee` and `from`; older `owner`-only notes are stale for the latest local checkout. |
 | `created_by` / `updated_by` | string | string | faithful (naming matches) |
 | `description` | present when passed | always present (empty string when absent) | extended; tolerated |
 | `labels` | absent when empty | `[]` when empty | extended; tolerated |
@@ -329,10 +327,7 @@ Also emits a human warning prefix (`⚠ Creating issue 'Hello world' without des
 1. **Rename JSON field `type` → `issue_type`** (or add both) on all wire-level issue shapes. Owner: `beads-api::wire_bead` or wherever the issue JSON projection lives. This is the single highest-leverage field change in the whole doc.
 2. **Emit RFC3339 timestamps for `created_at`/`updated_at`/`closed_at`** in the Go-compat wire mode. Preserve the HLC internally; project to a wall-clock string on output. Decision: probably a `to_go_compat_json()` projection on `WireBead` + a CLI format gate.
 3. **Drop the `{"result":"issue","data":...}` wrapper** when in compat mode; emit the bare object.
-4. **Accept custom bead types.** Block: Rust's `BeadType` enum (crates/beads-core/src/domain.rs:17-23) is closed. Need a path for user-registered types:
-   - Either (a) add an `Other(ValidatedCustomTypeName)` variant to `BeadType`,
-   - or (b) make `BeadType` a validated string wrapper with a `is_well_known()` predicate (matching Go's pattern in types.go:806-827).
-   Tracking in `primitives/custom-types.md`.
+4. **Add actual typed bead variants.** Block: Rust's `BeadType` enum (crates/beads-core/src/domain.rs:17-23) is closed over five baseline types. Known Go/Gas City strings (`molecule`, `convoy`, `gate`, `message`, `event`, `session`, `spec`, `convergence`, etc.) should parse into real variants. Arbitrary custom type support, if any, needs a separate explicit policy; do not smuggle it through `types.custom`.
 5. **Wire `--assignee <name>` to set the assignee, not implicitly to the current actor.** Rust's current "compat; only supports current actor" stance will mis-attribute every bead gascity creates. At minimum, warn when a different value is passed; ideally, actually honor it.
 6. **Suppress the "creating issue without description" stderr warning** when `--json` is set. It's write to stderr so gascity's `extractJSON` tolerates it, but other JSON-parsing callers (beads-mcp, agent.py) do not.
 7. **Emit `labels`, `description`, `metadata` fields** with the same omit-when-empty semantics Go uses (either rely on gascity's tolerant `extractJSON` and always emit, or add a compat flag that mimics `omitempty`).
@@ -509,7 +504,7 @@ Same issue_type/type, created_at shape, envelope issues as command 4.
 
 1. **Emit a bare array** `[{...}]` from `bd show --json <id>` in compat mode, matching Go's shape even for a single id.
 2. Apply the same wire-compat fixes as command 4 (field rename, timestamp shape, envelope drop).
-3. Preserve `owner`, `ref`, `needs`, `dependencies`, `metadata` fields where Go emits them. `owner` is specifically the email-like string gascity reads to populate `Bead.From` when `metadata.from` is absent.
+3. Preserve `assignee`, `from`, `ref`, `needs`, `dependencies`, and `metadata` fields where current Gas City reads them. `owner` may still appear in Go output, but it is not the load-bearing Gas City field in the latest local checkout.
 
 ### Honor-no-metadata notes
 
@@ -665,13 +660,13 @@ Rust's update command should expose a typed flag per real field. The shape of th
 | `dependent_count` | int | missing | tolerated. |
 | `comment_count` | int | `note_count` (different field name) | Rename. |
 | `dependencies` (expanded on some views) | `[]Dep` | missing | tolerated. |
-| `owner` | string | missing | See command 4. |
+| `assignee` / `from` | string | partial | See command 4. |
 | `metadata` | map | missing | See honor-no-metadata below. |
 
 ### Required work in beads-rs
 
 1. **Add `--include-infra` and `--include-gates` flags**, initially as accepted-and-ignored no-ops (Rust has no infra/gate types today). When molecule/gate types land (see `types/gate.md`, `types/molecule.md`), wire these to actual filters.
-2. **Replace `--metadata-field k=v` with typed field filters.** Gascity's current callers are (auditable via grep of `ListByMetadata`): molecule phase, convoy id, convergence gate id, patrol state, session ownership. Every one of these maps to a typed filter (`--mol-phase proto|mol|wisp`, `--convoy <id>`, `--gate <id>`, etc.). See `primitives/metadata-remapping.md`.
+2. **Project `--metadata-field k=v` through typed field filters.** Gascity's current callers are (auditable via grep of `ListByMetadata`): molecule phase, convoy id, convergence gate id, patrol state, session ownership. Every one of these maps to a typed filter (`--mol-phase proto|mol|wisp`, `--convoy <id>`, `--gate <id>`, etc.). The current Gas City bridge may still accept `--metadata-field`; canonical Rust query state should not become a freeform metadata index.
 3. **Emit `issue_type` in compat mode**, per command 4.
 4. **Emit RFC3339 timestamps** in compat mode, per command 4.
 5. **Drop envelope** in compat mode, per command 0.
@@ -1101,13 +1096,13 @@ Dep list's per-edge `metadata` field is a stringified JSON blob today. It carrie
 
 - **0 faithful** — no command is fully compatible today. Field renames, envelope wrappers, or timestamp shapes block every single one.
 - **6 require wire-compat only** — `show`, `list`, `ready`, `dep list` (once subcommand added), `close` (once batch added), `dep add` (once `--type` alias added). These need the compat shim listed above (bare envelope, `issue_type` field, RFC3339 timestamps, etc.), plus small flag renames/aliases.
-- **4 require wire-compat plus a missing flag or semantic** — `create` needs custom-type acceptance + `--metadata` or a typed replacement, `update` needs `--set-metadata` or typed replacement, `dep remove` needs an alias for `rm`, `delete` needs `--force` no-op.
+- **4 require wire-compat plus a missing flag or semantic** — `create` needs actual typed type acceptance plus metadata projection, `update` needs `--set-metadata` projection, `dep remove` needs an alias for `rm`, `delete` needs `--force` no-op.
 - **4 commands/subcommands are entirely absent** — `config set`, `config get`, `purge`, `create --graph`.
 
 **Critical blockers (in implementation order):**
 
-1. **`bd config set` / `bd config get --json types.custom`** — the doctor check runs on every `gc doctor` invocation. Without it, gascity cannot even declare Rust-bd as "usable." (Command 2.)
-2. **Custom bead types.** Without `types.custom`, `bd create -t molecule` / `-t convoy` / `-t gate` etc. fail immediately. This is a core-crate change (close enum `BeadType` to validated string). (Command 4 + `primitives/custom-types.md`.)
+1. **Actual typed bead variants.** `bd create -t molecule` / `-t convoy` / `-t gate` must succeed because those are known Rust domain types, not because `types.custom` listed strings. (Command 4 + `types/` + `FLOOR1_REPLAN.md`.)
+2. **`bd config get/set types.custom` compatibility facade.** The doctor check runs on every `gc doctor` invocation, so the command must exist, but it should be adapter state or a virtual view over known Gas City types. (Command 2.)
 3. **Wire-compat mode** covering the envelope drop, `issue_type` rename, RFC3339 timestamps, and `dependency_type` on dep-list rows. Ships a flag (`--compat-wire=go`) or env var gate. (Commands 4, 6, 7, 8, 11, 14.)
 4. **`bd dep list`** — subcommand is missing entirely. (Command 14.)
 5. **`bd dep add --type` alias** and `bd dep remove` as alias for `rm`. (Commands 12, 13.)

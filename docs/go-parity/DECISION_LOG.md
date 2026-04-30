@@ -3,6 +3,7 @@
 This file is the synthesis across the four research streams that run under `docs/go-parity/`. Read this before diving into the per-command, per-type, or per-primitive files. When this log conflicts with a detail file, fix the conflict — don't leave it implicit.
 
 **Pin:** Go `bd` v1.0.2 (`c446a2ef`, 2026-04-18) vs. beads-rs at current HEAD (`bd 0.2.0-alpha`).
+**Floor 1 replan:** [`FLOOR1_REPLAN.md`](FLOOR1_REPLAN.md) updates the Floor 1 execution direction against the later local vendor checkouts: Go `bd` v1.0.2 at `a3f834b3` and Gas City `main` at `d6011764`.
 **Research date:** 2026-04-20.
 
 ## Research outputs
@@ -21,7 +22,9 @@ This file is the synthesis across the four research streams that run under `docs
 
 The metadata inventory mapped ~250 distinct keys gascity uses. **Only 2 `Revisit` entries needed a "maybe freeform" fallback, neither arguing for a generic primitive.** Every other key has a typed home — typed field on a typed bead variant, namespace property, label, dep-edge state, runtime-state (not in store), or derivable from existing beads-rs primitives.
 
-Implication: `bd create --metadata`, `bd update --set-metadata`, `bd list --metadata-field` all get typed-flag replacements per bead variant (e.g., `--gate-mode`, `--mol-kind`). Gascity's Go consumer will need a shim to translate its `SetMetadata(...)` calls; that's acceptable cost for type safety.
+Implication: `bd create --metadata`, `bd update --set-metadata`, `bd list --metadata-field` all get typed homes per bead variant or edge type. The current Gas City checkout still calls those metadata-shaped CLI surfaces directly, so beads-rs needs an adapter projection that accepts and emits the map while preserving typed canonical state internally.
+
+Refinement from the later Gas City checkout: the current `BdStore` still writes and reads metadata directly, and the values are not arbitrary baggage. They include durable workflow/control, convergence, session, graph-apply, idempotency, and query state. Until Gas City consumes typed fields, beads-rs needs a CLI/wire projection that accepts and emits the current metadata map while mapping known keys into typed domain fields. That projection is an adapter contract, not a domain-level `HashMap<String, String>`.
 
 ### D2. Adopt Go's CLI surface wholesale
 
@@ -29,7 +32,7 @@ User decision: rather than preserving beads-rs's existing flag shapes, match Go'
 
 - Drop the `{"result":"issue","data":{...}}` wrapper for gascity-shaped commands; emit bare objects/arrays like Go.
 - Serde-rename `"type"` → `"issue_type"` on the wire.
-- Serde-rename `"assignee"` → `"owner"` on the wire.
+- Preserve current Gas City's `"assignee"` and `"from"` fields on the Gas City-shaped wire. Older notes that renamed this field to `"owner"` are stale for the latest local Gas City checkout.
 - Emit timestamps as RFC3339 strings on the wire (keep HLC `WriteStamp` as the internal ordering primitive).
 - Flatten `deps_incoming`/`deps_outgoing` into Go's `dependencies[]`/`dependents[]` hydrated-issue shape on the wire.
 - Rename `bd dep add --kind` → `--type`; `bd dep rm` → `bd dep remove` (keep `rm` as alias).
@@ -61,15 +64,16 @@ Agent 1 and Agent 2 disagreed about some groupings (Agent 1 has `ConvergenceRoot
 - Orchestration (Scope, Ralph, Retry, Fanout): **Agent 1's multi-variant decomposition wins.** Their spec structs are genuinely different.
 - Gate, Session: **Agent 2's single-variant-with-discriminator wins.** Common state outweighs per-kind specialization.
 
-### D7. Several metadata keys just vanish
+### D7. Several metadata keys just vanish, but control state does not
 
 Things that don't need a home — they're derivable:
 
 - `gc.routed_to` / `gc.execution_routed_to` → computed at dispatch time from `gc.run_target` + agent-binding table (Go literally does this, then writes the result back).
-- `gc.control_epoch` → `WriteStamp` already gives this; don't duplicate.
 - `from` metadata fallback → `BeadCore::created.by`.
 - Auto-generated `session_name` → deterministic from bead ID.
 - `BindingFields::last_touched_at` → `BeadView::updated_stamp`.
+
+`gc.control_epoch` is not in this bucket. Latest Gas City uses it as an explicit expected-epoch fence around molecule/control attachment; it belongs with typed workflow/control state until the store has an equivalent first-class fenced update primitive.
 
 ## Open questions
 
@@ -106,21 +110,26 @@ Floor 0 (no prereqs, ship alongside anything):
   ├── bd dep rm: alias to bd dep remove
   ├── bd ready: emit bare array (fix envelope for this cmd specifically)
   ├── Default mutation output: suppress receipt.durability_proof (add --receipt opt-in)
-  └── Wire envelope drop + field renames (issue_type, owner, RFC3339)
+  └── Wire envelope drop + field projection (issue_type, assignee/from, RFC3339)
 
-Floor 1 (foundations; each independent from others on this floor):
+Floor 1 (foundations; refined by FLOOR1_REPLAN.md):
 
-  BeadType open enum
-    prereq for: any new variant, --type=<custom> accept
-    work: change closed enum to validated-string or open enum; gate Go v1.0.0 aliases (enhancement→feature, dec/adr→decision)
+  Actual BeadType variants
+    prereq for: any new variant, --type=<known> accept
+    work: add real Rust variants for known Go/Gas City types; normalize Go aliases (enhancement→feature, dec/adr→decision, investigation/timebox→spike, user-story/user_story→story, ms→milestone)
+    note: types.custom is a Gas City doctor compatibility facade, not the canonical source of truth
 
-  DepKind extensions
+  DepKind vocabulary
     prereq for: Session (waits-for), MergeRequest (tracks), several others
-    work: add conditional-blocks, waits-for, tracks, relates-to to DepKind enum (Rust has 4, need 8 for gascity)
+    work: add the full Go well-known vocabulary; readiness-affecting kinds are blocks, parent-child, conditional-blocks, waits-for
 
-  New CRDT primitives
+  Metadata projection inventory
+    prereq for: typed variant fields and current Gas City drop-in use
+    work: map create/update/list/show metadata inputs and outputs to typed field homes; keep metadata only as CLI/wire projection
+
+  CRDT primitives driven by typed state machines
     prereq for: variants with concurrent state (Ralph, Retry, Scope, Session, ...)
-    work: Max<T>, AppendLog<T>, Cas<T>, Counter — add to beads-core/src/crdt.rs
+    work: implement Max<T>, AppendLog<T>, Cas<T>, Counter as the merge laws required by concrete fields such as convergence iteration, control_epoch, attempt logs, pending_create_claim, and resettable session counters
     note: OrSet<T> exists; verify it fits the new callers
 
   Cross-namespace DepKey fix (OQ1)
@@ -139,7 +148,7 @@ Floor 1 (foundations; each independent from others on this floor):
 Floor 2 (depends on Floor 1):
 
   Core-namespace workflow variants
-    prereq: BeadType open enum + new CRDT primitives
+    prereq: actual BeadType variants + typed-field-driven CRDT primitives
     variants: Workflow, Scope, ScopeCheck, ScopeCleanup, WorkflowFinalize,
               Ralph, RalphAttempt, Retry, RetryRun, RetryEval, FanoutControl,
               Convoy, Gate (w/ GateKind discriminator), Message, MergeRequest,
@@ -149,7 +158,7 @@ Floor 2 (depends on Floor 1):
     metadata remapping: see primitives/metadata-remapping.md for which Go keys become which typed fields
 
   Ephemerality on common BeadFields
-    prereq: BeadType open enum (so the field lands alongside type variants cleanly)
+    prereq: actual BeadType variants (so the field lands alongside type variants cleanly)
     work: add Lww<Ephemerality> to BeadFields; wire GC-eligibility hint
 
   bd create --graph batch
@@ -182,9 +191,9 @@ Floor 4 (depends on namespace policy enforcement fully landed):
 Floor 0 work (wire + small CLI fixes) unblocks gascity-Go **today** — no structural changes, days of work total. After Floor 0 lands, gascity can at least parse beads-rs JSON without a shim.
 
 Floor 1 foundations are where the real design pressure sits. Especially:
-- **BeadType open enum** — every downstream variant depends on this; it's a core-crate change with downstream propagation, probably a week of careful work.
+- **Actual BeadType variants** — every downstream variant depends on this; it's a core-crate change with downstream propagation, probably a week of careful work.
 - **Cross-namespace DepKey** — structural, under-specified, needs design before code.
-- **New CRDT primitives** — contained, each is a few hours once the traits are clear.
+- **CRDT primitives** — not a primitive-first project, but also not speculative. Latest Gas City already proves monotonic counters/epochs, append logs, claim/lease state, and resettable counters; implement them through the owning typed fields and their proof tests.
 
 Floor 2 is the bulk of the porting effort — one variant at a time, driven by the per-type spec files.
 
