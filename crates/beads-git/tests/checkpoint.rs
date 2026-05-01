@@ -134,6 +134,64 @@ fn checkpoint_multi_namespace_includes_all_namespaces() {
 }
 
 #[test]
+fn checkpoint_multi_namespace_round_trip_preserves_state() {
+    let fixture = fixture_multi_namespace();
+    let temp = TempDir::new().expect("temp checkpoint dir");
+    write_checkpoint_tree(temp.path(), &fixture.export).expect("write checkpoint");
+
+    let imported = import_checkpoint(temp.path(), &beads_core::Limits::default()).expect("import");
+    let core = NamespaceId::core();
+    let sys = NamespaceId::parse("sys").expect("sys namespace");
+    let core_id = BeadId::parse("bd-core").expect("core bead id");
+    let sys_id = BeadId::parse("bd-sys").expect("sys bead id");
+
+    assert!(
+        imported
+            .state
+            .get(&core)
+            .and_then(|state| state.get_live(&core_id))
+            .is_some(),
+        "core bead missing after checkpoint import"
+    );
+    assert!(
+        imported
+            .state
+            .get(&sys)
+            .and_then(|state| state.get_live(&sys_id))
+            .is_some(),
+        "sys bead missing after checkpoint import"
+    );
+
+    let imported_watermarks =
+        watermarks_from_included(&imported.included, imported.included_heads.as_ref());
+    let snapshot = build_snapshot_from_state(
+        SnapshotBuildArgs {
+            checkpoint_group: fixture.export.meta.checkpoint_group.clone(),
+            namespaces: fixture.export.meta.namespaces.clone().into_vec(),
+            store_id: fixture.export.meta.store_id,
+            store_epoch: fixture.export.meta.store_epoch,
+            created_at_ms: fixture.export.meta.created_at_ms,
+            created_by_replica_id: fixture.export.meta.created_by_replica_id,
+            policy_hash: fixture.export.meta.policy_hash,
+            roster_hash: fixture.export.meta.roster_hash,
+        },
+        &imported.state,
+        &imported_watermarks,
+    );
+    let export_again = export_checkpoint(CheckpointExportInput {
+        snapshot: &snapshot,
+        previous: None,
+    })
+    .expect("export again");
+
+    assert_eq!(
+        fixture.export.manifest.canon_bytes().expect("manifest"),
+        export_again.manifest.canon_bytes().expect("manifest again"),
+        "multi-namespace manifest drifted after import/export"
+    );
+}
+
+#[test]
 fn checkpoint_included_watermarks_match() {
     let core = NamespaceId::core();
     let (store_state, watermarks, export) = build_core_store_state();

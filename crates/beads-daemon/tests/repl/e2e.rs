@@ -26,9 +26,69 @@ fn wait_for_all_beads(
     });
 }
 
+fn wait_for_all_beads_in_namespace(
+    rig: &mut ReplicationRig,
+    namespace: &NamespaceId,
+    bead_ids: &[BeadId],
+    nodes: &[usize],
+    max_steps: usize,
+) {
+    rig.pump_until(max_steps, |rig| {
+        nodes.iter().all(|idx| {
+            bead_ids
+                .iter()
+                .all(|id| rig.node(*idx).has_bead_in_namespace(namespace, id))
+        })
+    });
+}
+
 fn assert_core_converged(rig: &mut ReplicationRig, max_steps: usize) {
     rig.pump_until_converged(max_steps, &[NamespaceId::core()]);
     rig.assert_converged(&[NamespaceId::core()]);
+}
+
+fn sys_namespace() -> NamespaceId {
+    NamespaceId::parse("sys").expect("sys namespace")
+}
+
+#[test]
+fn replication_rig_converges_allowed_non_core_namespace() {
+    let sys = sys_namespace();
+    let mut rig =
+        ReplicationRig::new_with_namespaces(2, START_MS, vec![NamespaceId::core(), sys.clone()]);
+    rig.write_replica_roster();
+    rig.assert_replication_ready(READY_STEPS);
+
+    let bead_id = parse_bead_id(
+        &rig.node(0)
+            .create_issue_in_namespace(sys.clone(), "sys-visible-through-repl"),
+    );
+
+    rig.pump_until_converged(CONVERGE_STEPS, std::slice::from_ref(&sys));
+    rig.assert_converged(std::slice::from_ref(&sys));
+    wait_for_all_beads_in_namespace(&mut rig, &sys, &[bead_id], &[0, 1], READY_STEPS);
+}
+
+#[test]
+fn replication_rig_does_not_leak_disallowed_non_core_namespace() {
+    let sys = sys_namespace();
+    let mut rig = ReplicationRig::new(2, START_MS);
+    rig.write_replica_roster();
+    rig.assert_replication_ready(READY_STEPS);
+
+    let bead_id = parse_bead_id(
+        &rig.node(0)
+            .create_issue_in_namespace(sys.clone(), "sys-hidden-from-core-only-repl"),
+    );
+    assert!(rig.node(0).has_bead_in_namespace(&sys, &bead_id));
+
+    let _ = rig.pump(CONVERGE_STEPS);
+
+    assert!(
+        !rig.node(1).has_bead_in_namespace(&sys, &bead_id),
+        "core-only replication session leaked a sys namespace bead"
+    );
+    assert_core_converged(&mut rig, READY_STEPS);
 }
 
 #[test]

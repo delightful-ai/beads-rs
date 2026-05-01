@@ -424,8 +424,18 @@ impl TestNode {
     }
 
     pub fn create_issue(&self, title: &str) -> String {
+        self.create_issue_in_namespace(NamespaceId::core(), title)
+    }
+
+    pub fn create_issue_in_namespace(&self, namespace: NamespaceId, title: &str) -> String {
         let request = Request::Create {
-            ctx: MutationCtx::new(self.repo_path(), MutationMeta::default()),
+            ctx: MutationCtx::new(
+                self.repo_path(),
+                MutationMeta {
+                    namespace: Some(namespace),
+                    ..MutationMeta::default()
+                },
+            ),
             payload: CreatePayload {
                 id: None,
                 parent: None,
@@ -466,6 +476,10 @@ impl TestNode {
     }
 
     pub fn has_bead(&self, bead_id: &BeadId) -> bool {
+        self.has_bead_in_namespace(&NamespaceId::core(), bead_id)
+    }
+
+    pub fn has_bead_in_namespace(&self, namespace: &NamespaceId, bead_id: &BeadId) -> bool {
         self.with_daemon(|daemon| {
             let store_id = self.store_id();
             let Some(runtime) = daemon.store_runtime_by_id(store_id) else {
@@ -473,7 +487,7 @@ impl TestNode {
             };
             runtime
                 .state
-                .get(&NamespaceId::core())
+                .get(namespace)
                 .and_then(|state| state.get_live(bead_id))
                 .is_some()
         })
@@ -673,6 +687,7 @@ pub struct ReplicationRig {
     clock: TestClock,
     nodes: Vec<TestNode>,
     links: Vec<RigLink>,
+    namespaces: Vec<NamespaceId>,
 }
 
 #[derive(Clone, Debug)]
@@ -686,7 +701,37 @@ impl ReplicationRig {
     }
 
     pub fn new_with_options(node_count: usize, start_ms: u64, options: NodeOptions) -> Self {
+        Self::new_with_options_and_namespaces(
+            node_count,
+            start_ms,
+            options,
+            vec![NamespaceId::core()],
+        )
+    }
+
+    pub fn new_with_namespaces(
+        node_count: usize,
+        start_ms: u64,
+        namespaces: Vec<NamespaceId>,
+    ) -> Self {
+        Self::new_with_options_and_namespaces(
+            node_count,
+            start_ms,
+            NodeOptions::default(),
+            namespaces,
+        )
+    }
+
+    pub fn new_with_options_and_namespaces(
+        node_count: usize,
+        start_ms: u64,
+        options: NodeOptions,
+        mut namespaces: Vec<NamespaceId>,
+    ) -> Self {
         assert!(node_count >= 2, "replication rig needs at least two nodes");
+        namespaces.sort();
+        namespaces.dedup();
+        assert!(!namespaces.is_empty(), "replication rig needs namespaces");
         let world = TestWorld::new(start_ms);
         let clock = world.clock();
         let store_id = StoreId::new(Uuid::new_v4());
@@ -701,6 +746,7 @@ impl ReplicationRig {
             clock,
             nodes,
             links: Vec::new(),
+            namespaces,
         };
         rig.connect_all();
         rig
@@ -723,7 +769,7 @@ impl ReplicationRig {
                 replica_id: node.replica_id(),
                 name: format!("node-{idx}"),
                 role: ReplicaDurabilityRole::peer(true),
-                allowed_namespaces: Some(vec![NamespaceId::core()]),
+                allowed_namespaces: Some(self.namespaces.clone()),
                 expire_after_ms: None,
             })
             .collect();
@@ -1026,10 +1072,12 @@ impl ReplicationRig {
                 let identity = from_node.store_identity();
                 let from_replica = from_node.replica_id();
                 let to_replica = to_node.replica_id();
+                let namespaces = self.namespaces.clone();
                 let outbound_store = from_node.session_store();
                 let inbound_store = to_node.session_store();
-                let outbound = new_outbound_session(identity, from_replica, &limits);
-                let inbound = new_inbound_session(identity, to_replica, &limits);
+                let outbound =
+                    new_outbound_session(identity.clone(), from_replica, &limits, &namespaces);
+                let inbound = new_inbound_session(identity, to_replica, &limits, &namespaces);
                 let (outbound, action) =
                     begin_outbound_handshake(outbound, &outbound_store, self.clock.now_ms());
                 let init = RigLinkInit {
@@ -1038,6 +1086,7 @@ impl ReplicationRig {
                     transport,
                     outbound,
                     inbound,
+                    namespaces,
                     outbound_store,
                     inbound_store,
                     from_node,
@@ -1057,10 +1106,11 @@ fn new_outbound_session(
     identity: StoreIdentity,
     replica: ReplicaId,
     limits: &Limits,
+    namespaces: &[NamespaceId],
 ) -> SessionState<Outbound> {
     let mut config = SessionConfig::new(identity, replica, limits);
-    config.requested_namespaces = NamespaceSet::from(vec![NamespaceId::core()]);
-    config.offered_namespaces = NamespaceSet::from(vec![NamespaceId::core()]);
+    config.requested_namespaces = NamespaceSet::from(namespaces.to_vec());
+    config.offered_namespaces = NamespaceSet::from(namespaces.to_vec());
     let admission = AdmissionController::new(limits);
     SessionState::Connecting(OutboundConnecting::new(config, limits.clone(), admission))
 }
@@ -1069,10 +1119,11 @@ fn new_inbound_session(
     identity: StoreIdentity,
     replica: ReplicaId,
     limits: &Limits,
+    namespaces: &[NamespaceId],
 ) -> SessionState<Inbound> {
     let mut config = SessionConfig::new(identity, replica, limits);
-    config.requested_namespaces = NamespaceSet::from(vec![NamespaceId::core()]);
-    config.offered_namespaces = NamespaceSet::from(vec![NamespaceId::core()]);
+    config.requested_namespaces = NamespaceSet::from(namespaces.to_vec());
+    config.offered_namespaces = NamespaceSet::from(namespaces.to_vec());
     let admission = AdmissionController::new(limits);
     SessionState::Connecting(InboundConnecting::new(config, limits.clone(), admission))
 }
@@ -1102,6 +1153,7 @@ struct RigLink {
     transport: ChannelTransport,
     outbound: Option<SessionState<Outbound>>,
     inbound: Option<SessionState<Inbound>>,
+    namespaces: Vec<NamespaceId>,
     outbound_store: TestSessionStore,
     inbound_store: TestSessionStore,
     from_node: TestNode,
@@ -1118,6 +1170,7 @@ struct RigLinkInit {
     transport: ChannelTransport,
     outbound: SessionState<Outbound>,
     inbound: SessionState<Inbound>,
+    namespaces: Vec<NamespaceId>,
     outbound_store: TestSessionStore,
     inbound_store: TestSessionStore,
     from_node: TestNode,
@@ -1132,6 +1185,7 @@ impl RigLink {
             transport,
             outbound,
             inbound,
+            namespaces,
             outbound_store,
             inbound_store,
             from_node,
@@ -1143,6 +1197,7 @@ impl RigLink {
             transport,
             outbound: Some(outbound),
             inbound: Some(inbound),
+            namespaces,
             outbound_store,
             inbound_store,
             from_node,
@@ -1159,8 +1214,9 @@ impl RigLink {
         let identity = self.from_node.store_identity();
         let from_replica = self.from_node.replica_id();
         let to_replica = self.to_node.replica_id();
-        let outbound = new_outbound_session(identity, from_replica, limits);
-        let inbound = new_inbound_session(identity, to_replica, limits);
+        let outbound =
+            new_outbound_session(identity.clone(), from_replica, limits, &self.namespaces);
+        let inbound = new_inbound_session(identity, to_replica, limits, &self.namespaces);
         self.outbound_store = self.from_node.session_store();
         self.inbound_store = self.to_node.session_store();
         self.last_want_sent = None;
@@ -1233,15 +1289,14 @@ impl RigLink {
             self.inbound.as_ref(),
             Some(SessionState::StreamingLive(_) | SessionState::StreamingSnapshot(_))
         ) {
-            let inbound_snapshot = self
-                .inbound_store
-                .watermark_snapshot(&[NamespaceId::core()]);
-            let outbound_snapshot = self
-                .outbound_store
-                .watermark_snapshot(&[NamespaceId::core()]);
+            let inbound_snapshot = self.inbound_store.watermark_snapshot(&self.namespaces);
+            let outbound_snapshot = self.outbound_store.watermark_snapshot(&self.namespaces);
             let mut want_map = WatermarkMap::new();
-            if let Some(outbound_ns) = outbound_snapshot.durable.get(&NamespaceId::core()) {
-                let inbound_ns = inbound_snapshot.durable.get(&NamespaceId::core());
+            for namespace in &self.namespaces {
+                let Some(outbound_ns) = outbound_snapshot.durable.get(namespace) else {
+                    continue;
+                };
+                let inbound_ns = inbound_snapshot.durable.get(namespace);
                 for (origin, outbound_seq) in outbound_ns {
                     let inbound_seq = inbound_ns
                         .and_then(|m| m.get(origin))
@@ -1249,7 +1304,7 @@ impl RigLink {
                         .unwrap_or_default();
                     if outbound_seq.seq() > inbound_seq.seq() {
                         want_map
-                            .entry(NamespaceId::core())
+                            .entry(namespace.clone())
                             .or_default()
                             .insert(*origin, inbound_seq.seq());
                     }
@@ -1375,15 +1430,12 @@ impl RigLink {
                     Endpoint::Outbound => (&self.from_node, &self.transport.a),
                     Endpoint::Inbound => (&self.to_node, &self.transport.b),
                 };
-                let namespace = NamespaceId::core();
-                let origin = source.replica_id();
-                let from_seq = want
-                    .want
-                    .get(&namespace)
-                    .and_then(|m| m.get(&origin))
-                    .copied()
-                    .unwrap_or(Seq0::ZERO);
-                let events = source.read_wal_range(&namespace, &origin, from_seq);
+                let mut events = Vec::new();
+                for (namespace, origins) in &want.want {
+                    for (origin, from_seq) in origins {
+                        events.extend(source.read_wal_range(namespace, origin, *from_seq));
+                    }
+                }
                 if !events.is_empty() {
                     let message = Events { events };
                     transport
