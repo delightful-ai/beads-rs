@@ -8,16 +8,20 @@ use thiserror::Error;
 use super::bead::{Bead, BeadCore, BeadFields};
 use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
+use super::dep::DepKey;
 use super::domain::{BeadType, Priority};
+use super::error::InvalidDependency;
 use super::event::{
     ValidatedBeadPatch, ValidatedDepAdd, ValidatedDepRemove, ValidatedEventBody,
     ValidatedEventKindV1, ValidatedParentAdd, ValidatedParentRemove, ValidatedTombstone,
     ValidatedTxnOpV1, ValidatedTxnV1,
 };
 use super::identity::{ActorId, BeadId, BranchName, NoteId};
+use super::namespace::NamespaceId;
 use super::state::{
     CanonicalState, bead_collision_cmp, legacy_fallback_lineage, note_collision_cmp,
 };
+use super::store_state::StoreState;
 use super::time::{Stamp, WriteStamp};
 use super::tombstone::Tombstone;
 use super::wire_bead::{WireLabelAddV1, WireLabelRemoveV1, WireNoteV1, WirePatch};
@@ -61,50 +65,98 @@ pub fn apply_event(
     state: &mut CanonicalState,
     body: &ValidatedEventBody,
 ) -> Result<ApplyOutcome, ApplyError> {
+    apply_event_inner(state, None, body)
+}
+
+/// Apply an event while enforcing store-wide dependency invariants.
+///
+/// Use this path whenever the caller has the whole namespaced store available.
+/// The legacy `apply_event` path remains namespace-local for low-level
+/// `CanonicalState` tests and single-namespace callers.
+pub fn apply_event_to_store_state(
+    store_state: &mut StoreState,
+    body: &ValidatedEventBody,
+) -> Result<ApplyOutcome, ApplyError> {
+    let namespace = body.namespace.clone();
+    let mut staged = store_state.get_or_default(&namespace);
+    let mut outcome = ApplyOutcome::default();
+
+    let ValidatedEventKindV1::TxnV1(txn) = body.kind();
+    let stamp = event_stamp(body, txn);
+    for op in txn.delta.iter() {
+        let mut proof_state = store_state.clone();
+        proof_state.set_namespace_state(namespace.clone(), staged.clone());
+        apply_txn_op(
+            &mut staged,
+            Some(&proof_state),
+            &body.namespace,
+            op,
+            &stamp,
+            &mut outcome,
+        )?;
+    }
+
+    store_state.set_namespace_state(namespace, staged);
+    Ok(outcome)
+}
+
+fn apply_event_inner(
+    state: &mut CanonicalState,
+    store_state: Option<&StoreState>,
+    body: &ValidatedEventBody,
+) -> Result<ApplyOutcome, ApplyError> {
     let ValidatedEventKindV1::TxnV1(txn) = body.kind();
 
     let stamp = event_stamp(body, txn);
     let mut outcome = ApplyOutcome::default();
 
     for op in txn.delta.iter() {
-        match op {
-            ValidatedTxnOpV1::BeadUpsert(patch) => {
-                apply_bead_upsert(state, patch, &stamp, &mut outcome)?;
-            }
-            ValidatedTxnOpV1::BeadDelete(delete) => {
-                apply_bead_delete(state, delete, &mut outcome)?;
-            }
-            ValidatedTxnOpV1::LabelAdd(op) => {
-                apply_label_add(state, op, &stamp, &mut outcome)?;
-            }
-            ValidatedTxnOpV1::LabelRemove(op) => {
-                apply_label_remove(state, op, &stamp, &mut outcome)?;
-            }
-            ValidatedTxnOpV1::DepAdd(dep) => {
-                apply_dep_add(state, dep, &stamp, &mut outcome)?;
-            }
-            ValidatedTxnOpV1::DepRemove(dep) => {
-                apply_dep_remove(state, dep, &stamp, &mut outcome)?;
-            }
-            ValidatedTxnOpV1::ParentAdd(op) => {
-                apply_parent_add(state, op, &stamp, &mut outcome)?;
-            }
-            ValidatedTxnOpV1::ParentRemove(op) => {
-                apply_parent_remove(state, op, &stamp, &mut outcome)?;
-            }
-            ValidatedTxnOpV1::NoteAppend(append) => {
-                apply_note_append(
-                    state,
-                    append.bead_id.clone(),
-                    &append.note,
-                    append.lineage_stamp(),
-                    &mut outcome,
-                )?;
-            }
-        }
+        apply_txn_op(
+            state,
+            store_state,
+            &body.namespace,
+            op,
+            &stamp,
+            &mut outcome,
+        )?;
     }
 
     Ok(outcome)
+}
+
+fn apply_txn_op(
+    state: &mut CanonicalState,
+    store_state: Option<&StoreState>,
+    event_namespace: &NamespaceId,
+    op: &ValidatedTxnOpV1,
+    stamp: &Stamp,
+    outcome: &mut ApplyOutcome,
+) -> Result<(), ApplyError> {
+    match op {
+        ValidatedTxnOpV1::BeadUpsert(patch) => apply_bead_upsert(state, patch, stamp, outcome),
+        ValidatedTxnOpV1::BeadDelete(delete) => apply_bead_delete(state, delete, outcome),
+        ValidatedTxnOpV1::LabelAdd(op) => apply_label_add(state, op, stamp, outcome),
+        ValidatedTxnOpV1::LabelRemove(op) => apply_label_remove(state, op, stamp, outcome),
+        ValidatedTxnOpV1::DepAdd(dep) => {
+            apply_dep_add(state, store_state, event_namespace, dep, stamp, outcome)
+        }
+        ValidatedTxnOpV1::DepRemove(dep) => {
+            apply_dep_remove(state, event_namespace, dep, stamp, outcome)
+        }
+        ValidatedTxnOpV1::ParentAdd(op) => {
+            apply_parent_add(state, store_state, event_namespace, op, stamp, outcome)
+        }
+        ValidatedTxnOpV1::ParentRemove(op) => {
+            apply_parent_remove(state, event_namespace, op, stamp, outcome)
+        }
+        ValidatedTxnOpV1::NoteAppend(append) => apply_note_append(
+            state,
+            append.bead_id.clone(),
+            &append.note,
+            append.lineage_stamp(),
+            outcome,
+        ),
+    }
 }
 
 fn event_stamp(body: &ValidatedEventBody, txn: &ValidatedTxnV1) -> Stamp {
@@ -295,11 +347,17 @@ fn apply_label_remove(
 
 fn apply_dep_add(
     state: &mut CanonicalState,
+    store_state: Option<&StoreState>,
+    event_namespace: &NamespaceId,
     dep: &ValidatedDepAdd,
     event_stamp: &Stamp,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
-    let key = state.check_dep_add_key(dep.key.clone())?;
+    require_dep_owner_namespace(event_namespace, &dep.key)?;
+    let key = match store_state {
+        Some(store_state) => store_state.check_dep_add_key(dep.key.clone())?,
+        None => state.check_dep_add_key(dep.key.clone())?,
+    };
     let dot = dep.dot.into();
     let change = state.apply_dep_add(key, dot, event_stamp.clone());
     for changed in change.added.iter().chain(change.removed.iter()) {
@@ -310,11 +368,13 @@ fn apply_dep_add(
 
 fn apply_dep_remove(
     state: &mut CanonicalState,
+    event_namespace: &NamespaceId,
     dep: &ValidatedDepRemove,
     event_stamp: &Stamp,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
     let key = dep.key.clone();
+    require_dep_owner_namespace(event_namespace, &key)?;
     let ctx = (&dep.ctx).into();
     let change = state.apply_dep_remove(&key, &ctx, event_stamp.clone());
     for changed in change.added.iter().chain(change.removed.iter()) {
@@ -325,11 +385,18 @@ fn apply_dep_remove(
 
 fn apply_parent_add(
     state: &mut CanonicalState,
+    store_state: Option<&StoreState>,
+    event_namespace: &NamespaceId,
     op: &ValidatedParentAdd,
     event_stamp: &Stamp,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
-    let key = state.check_dep_add_key(op.edge().to_dep_key())?;
+    let raw_key = op.edge().to_dep_key();
+    require_dep_owner_namespace(event_namespace, &raw_key)?;
+    let key = match store_state {
+        Some(store_state) => store_state.check_dep_add_key(raw_key)?,
+        None => state.check_dep_add_key(raw_key)?,
+    };
     let dot = op.dot.into();
     let change = state.apply_dep_add(key, dot, event_stamp.clone());
     for changed in change.added.iter().chain(change.removed.iter()) {
@@ -340,17 +407,37 @@ fn apply_parent_add(
 
 fn apply_parent_remove(
     state: &mut CanonicalState,
+    event_namespace: &NamespaceId,
     op: &ValidatedParentRemove,
     event_stamp: &Stamp,
     outcome: &mut ApplyOutcome,
 ) -> Result<(), ApplyError> {
     let key = op.edge().to_dep_key();
+    require_dep_owner_namespace(event_namespace, &key)?;
     let ctx = (&op.ctx).into();
     let change = state.apply_dep_remove(&key, &ctx, event_stamp.clone());
     for changed in change.added.iter().chain(change.removed.iter()) {
         outcome.changed_deps.insert(changed.clone());
     }
     Ok(())
+}
+
+fn require_dep_owner_namespace(
+    event_namespace: &NamespaceId,
+    key: &DepKey,
+) -> Result<(), ApplyError> {
+    let owner = key.from_ref().namespace();
+    if owner == event_namespace {
+        return Ok(());
+    }
+
+    Err(InvalidDependency::Other {
+        reason: format!(
+            "dependency source namespace {} must match event namespace {}",
+            owner, event_namespace
+        ),
+    }
+    .into())
 }
 
 fn fields_from_patch(
@@ -700,16 +787,17 @@ fn default_fields(stamp: Stamp) -> BeadFields {
 mod tests {
     use super::*;
     use crate::collections::Label;
-    use crate::dep::DepKey;
+    use crate::dep::{DepKey, ParentEdge};
     use crate::domain::DepKind;
     use crate::event::{EventKindV1, HlcMax, ValidatedEventBody};
     use crate::identity::{
-        ClientRequestId, ReplicaId, StoreEpoch, StoreId, StoreIdentity, TraceId, TxnId,
+        BeadRef, ClientRequestId, ReplicaId, StoreEpoch, StoreId, StoreIdentity, TraceId, TxnId,
     };
     use crate::namespace::NamespaceId;
     use crate::wire_bead::{
         WireBeadPatch, WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1,
-        WireLabelRemoveV1, WireLineageStamp, WireNoteV1, WireStamp, WireTombstoneV1,
+        WireLabelRemoveV1, WireLineageStamp, WireNoteV1, WireParentAddV1, WireStamp,
+        WireTombstoneV1,
     };
     use crate::{EventBody, Limits, Seq1, TxnDeltaV1, TxnOpV1, TxnV1};
     use std::collections::BTreeMap;
@@ -783,7 +871,16 @@ mod tests {
     }
 
     fn event_with_delta(delta: TxnDeltaV1, wall_ms: u64) -> ValidatedEventBody {
+        event_with_delta_in_namespace(delta, NamespaceId::core(), wall_ms)
+    }
+
+    fn event_with_delta_in_namespace(
+        delta: TxnDeltaV1,
+        namespace: NamespaceId,
+        wall_ms: u64,
+    ) -> ValidatedEventBody {
         let mut event = sample_event_raw("note");
+        event.namespace = namespace;
         let EventKindV1::TxnV1(txn) = &mut event.kind;
         txn.delta = delta;
         txn.hlc_max.physical_ms = wall_ms;
@@ -1167,6 +1264,147 @@ mod tests {
                 ..
             }) => {}
             other => panic!("expected InvalidDependency::CycleDetected, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn store_apply_rejects_cross_namespace_cycle() {
+        let sessions = NamespaceId::parse("sessions").unwrap();
+        let core_id = BeadId::parse("bd-core-cycle").unwrap();
+        let session_id = BeadId::parse("bd-session-cycle").unwrap();
+        let mut store = StoreState::new();
+        apply_event_to_store_state(
+            &mut store,
+            &bead_upsert_event(
+                core_id.clone(),
+                WireStamp(1, 0),
+                actor_id("alice"),
+                "core",
+                30,
+            ),
+        )
+        .unwrap();
+        apply_event_to_store_state(
+            &mut store,
+            &event_with_delta_in_namespace(
+                {
+                    let mut patch = WireBeadPatch::new(session_id.clone());
+                    patch.created_at = Some(WireStamp(2, 0));
+                    patch.created_by = Some(actor_id("bob"));
+                    patch.title = Some("session".to_string());
+                    let mut delta = TxnDeltaV1::new();
+                    delta.insert(TxnOpV1::BeadUpsert(Box::new(patch))).unwrap();
+                    delta
+                },
+                sessions.clone(),
+                31,
+            ),
+        )
+        .unwrap();
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
+                key: DepKey::new(
+                    BeadRef::new(sessions.clone(), session_id.clone()),
+                    BeadRef::new(NamespaceId::core(), core_id.clone()),
+                    DepKind::Blocks,
+                )
+                .unwrap(),
+                dot: WireDotV1 {
+                    replica: ReplicaId::new(Uuid::from_bytes([3u8; 16])),
+                    counter: 1,
+                },
+            }))
+            .unwrap();
+        apply_event_to_store_state(
+            &mut store,
+            &event_with_delta_in_namespace(delta, sessions.clone(), 32),
+        )
+        .unwrap();
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
+                key: DepKey::new(
+                    BeadRef::new(NamespaceId::core(), core_id),
+                    BeadRef::new(sessions, session_id),
+                    DepKind::Blocks,
+                )
+                .unwrap(),
+                dot: WireDotV1 {
+                    replica: ReplicaId::new(Uuid::from_bytes([4u8; 16])),
+                    counter: 1,
+                },
+            }))
+            .unwrap();
+        let err = apply_event_to_store_state(&mut store, &event_with_delta(delta, 33)).unwrap_err();
+        assert!(matches!(
+            err,
+            ApplyError::InvalidDependency(crate::error::InvalidDependency::CycleDetected { .. })
+        ));
+    }
+
+    #[test]
+    fn dep_add_rejects_source_namespace_mismatch() {
+        let mut state = CanonicalState::new();
+        let sessions = NamespaceId::parse("sessions").unwrap();
+        let key = DepKey::new(
+            BeadRef::new(sessions.clone(), BeadId::parse("bd-session").unwrap()),
+            BeadRef::new(NamespaceId::core(), BeadId::parse("bd-core").unwrap()),
+            DepKind::Blocks,
+        )
+        .unwrap();
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::DepAdd(WireDepAddV1 {
+                key,
+                dot: WireDotV1 {
+                    replica: ReplicaId::new(Uuid::from_bytes([5u8; 16])),
+                    counter: 1,
+                },
+            }))
+            .unwrap();
+
+        let err = apply_event(&mut state, &event_with_delta(delta, 24)).unwrap_err();
+        match err {
+            ApplyError::InvalidDependency(crate::error::InvalidDependency::Other { reason }) => {
+                assert!(reason.contains("dependency source namespace sessions"));
+                assert!(reason.contains("event namespace core"));
+            }
+            other => panic!("expected namespace mismatch, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parent_add_rejects_child_namespace_mismatch() {
+        let mut state = CanonicalState::new();
+        let sessions = NamespaceId::parse("sessions").unwrap();
+        let edge = ParentEdge::new(
+            BeadRef::new(sessions, BeadId::parse("bd-child").unwrap()),
+            BeadRef::new(NamespaceId::core(), BeadId::parse("bd-parent").unwrap()),
+        )
+        .unwrap();
+
+        let mut delta = TxnDeltaV1::new();
+        delta
+            .insert(TxnOpV1::ParentAdd(WireParentAddV1 {
+                edge,
+                dot: WireDotV1 {
+                    replica: ReplicaId::new(Uuid::from_bytes([6u8; 16])),
+                    counter: 1,
+                },
+            }))
+            .unwrap();
+
+        let err = apply_event(&mut state, &event_with_delta(delta, 25)).unwrap_err();
+        match err {
+            ApplyError::InvalidDependency(crate::error::InvalidDependency::Other { reason }) => {
+                assert!(reason.contains("dependency source namespace sessions"));
+                assert!(reason.contains("event namespace core"));
+            }
+            other => panic!("expected namespace mismatch, got {other:?}"),
         }
     }
 

@@ -26,6 +26,13 @@ use crate::core::{
 pub enum CheckpointSnapshotError {
     #[error("checkpoint snapshot unsupported namespace {namespace}")]
     NamespaceUnsupported { namespace: NamespaceId },
+    #[error(
+        "checkpoint snapshot dependency source namespace {source_namespace} does not match shard namespace {shard_namespace}"
+    )]
+    DepOwnerNamespaceMismatch {
+        shard_namespace: NamespaceId,
+        source_namespace: NamespaceId,
+    },
     #[error("checkpoint snapshot dirty shard not in snapshot: {path}")]
     DirtyShardUnknown { path: CheckpointShardPath },
     #[error(transparent)]
@@ -399,6 +406,13 @@ fn build_namespace_shards(
 
     let mut dep_entries_by_shard: BTreeMap<ShardName, Vec<WireDepEntryV1>> = BTreeMap::new();
     for entry in snapshot.deps.entries {
+        let source_namespace = entry.key.from_ref().namespace();
+        if source_namespace != namespace {
+            return Err(CheckpointSnapshotError::DepOwnerNamespaceMismatch {
+                shard_namespace: namespace.clone(),
+                source_namespace: source_namespace.clone(),
+            });
+        }
         let shard = shard_for_dep(entry.key.from_id(), entry.key.to_id(), entry.key.kind());
         dep_entries_by_shard.entry(shard).or_default().push(entry);
     }
@@ -473,7 +487,7 @@ mod tests {
     use crate::core::crdt::Lww;
     use crate::core::dep::DepKey;
     use crate::core::domain::{BeadType, DepKind, Priority};
-    use crate::core::identity::BeadId;
+    use crate::core::identity::{BeadId, BeadRef};
     use crate::core::namespace::NamespaceId;
     use crate::core::time::{Stamp, WriteStamp};
     use crate::core::{
@@ -728,6 +742,60 @@ mod tests {
         assert!(snapshot.dirty_shards.contains(&state_path));
         assert!(snapshot.dirty_shards.contains(&tomb_path));
         assert!(snapshot.dirty_shards.contains(&dep_path));
+    }
+
+    #[test]
+    fn snapshot_rejects_dep_stored_outside_source_namespace() {
+        let core = NamespaceId::core();
+        let sessions = NamespaceId::parse("sessions").unwrap();
+        let stamp = make_stamp(1, 0, "author");
+        let dep_key = DepKey::new(
+            BeadRef::new(sessions.clone(), BeadId::parse("beads-rs-session").unwrap()),
+            BeadRef::new(core.clone(), BeadId::parse("beads-rs-core").unwrap()),
+            DepKind::Related,
+        )
+        .unwrap();
+        let dep_key = CanonicalState::new().check_dep_add_key(dep_key).unwrap();
+        let mut core_state = CanonicalState::new();
+        core_state.apply_dep_add(
+            dep_key,
+            Dot {
+                replica: ReplicaId::from(Uuid::from_bytes([5u8; 16])),
+                counter: 1,
+            },
+            stamp,
+        );
+        let mut state = StoreState::new();
+        state.set_core_state(core_state);
+
+        let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
+        let mut watermarks = Watermarks::<Durable>::new();
+        watermarks
+            .observe_at_least(&core, &origin, Seq0::new(1), HeadStatus::Known([1u8; 32]))
+            .unwrap();
+
+        let err = build_snapshot(CheckpointSnapshotInput {
+            checkpoint_group: "core".to_string(),
+            namespaces: vec![core.clone()].into(),
+            store_id: StoreId::new(Uuid::from_bytes([4u8; 16])),
+            store_epoch: StoreEpoch::new(0),
+            created_at_ms: 1_700_000_000_000,
+            created_by_replica_id: origin,
+            policy_hash: ContentHash::from_bytes([9u8; 32]),
+            roster_hash: None,
+            dirty_shards: None,
+            state: &state,
+            watermarks_durable: &watermarks,
+        })
+        .expect_err("mismatched dep owner namespace should fail");
+
+        assert!(matches!(
+            err,
+            CheckpointSnapshotError::DepOwnerNamespaceMismatch {
+                shard_namespace,
+                source_namespace,
+            } if shard_namespace == core && source_namespace == sessions
+        ));
     }
 
     #[test]

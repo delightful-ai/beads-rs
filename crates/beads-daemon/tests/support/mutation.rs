@@ -116,7 +116,7 @@ pub fn remove_labels_request(id: impl AsRef<str>, labels: Vec<String>) -> Mutati
 pub fn set_parent_request(id: impl AsRef<str>, parent: Option<impl AsRef<str>>) -> MutationPayload {
     MutationPayload::SetParent(ParentPayload {
         id: parse_bead_id(id),
-        parent: parent.map(parse_bead_id),
+        parent: parent.map(|id| id.as_ref().to_string()),
     })
 }
 

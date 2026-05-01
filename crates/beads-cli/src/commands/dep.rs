@@ -7,12 +7,12 @@ use crate::render::{dep_record_json_value, dependency_summary_json_value_for_edg
 use crate::runtime::{CliRuntimeCtx, send};
 use crate::validation::{normalize_bead_ref_for, validation_error};
 use beads_api::{DepCycles, DepEdge};
-use beads_core::{BeadId, BeadRef, DepKind};
+use beads_core::{BeadId, BeadRef, DepKind, NamespaceId};
 use beads_surface::Filters;
 use beads_surface::ipc::{
     DepPayload, EmptyPayload, IdPayload, ListPayload, Request, ResponsePayload,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 #[derive(Subcommand, Debug)]
 pub enum DepCmd {
@@ -238,23 +238,18 @@ fn handle_dep_list(ctx: &CliRuntimeCtx, args: DepListArgs) -> CommandResult<()> 
     }
 
     if ctx.json {
-        let target_ids = all_edges
+        let target_refs = all_edges
             .iter()
-            .map(|edge| match args.direction {
-                DepDirection::Down => edge.to.clone(),
-                DepDirection::Up => edge.from.clone(),
-            })
-            .filter_map(|id| BeadId::parse(&id).ok())
-            .collect::<Vec<_>>();
-        let summaries = fetch_summary_map(ctx, target_ids)?;
+            .map(|edge| dep_edge_target_ref(edge, args.direction))
+            .collect::<CommandResult<Vec<_>>>()?;
+        let summaries = fetch_summary_map(ctx, target_refs)?;
         let mut out = Vec::new();
         for edge in all_edges {
-            let target = match args.direction {
-                DepDirection::Down => edge.to.as_str(),
-                DepDirection::Up => edge.from.as_str(),
-            };
-            if let Some(summary) = summaries.get(target) {
+            let target = dep_edge_target_ref(&edge, args.direction)?;
+            if let Some(summary) = summaries.get(&target) {
                 out.push(dependency_summary_json_value_for_edge(summary, &edge));
+            } else {
+                out.push(dep_record_json_value(&edge));
             }
         }
         print_json(&serde_json::Value::Array(out))?;
@@ -293,30 +288,59 @@ fn fetch_dep_edges(
 
 fn fetch_summary_map(
     ctx: &CliRuntimeCtx,
-    ids: Vec<BeadId>,
-) -> CommandResult<HashMap<String, beads_api::IssueSummary>> {
-    if ids.is_empty() {
+    refs: Vec<BeadRef>,
+) -> CommandResult<HashMap<BeadRef, beads_api::IssueSummary>> {
+    if refs.is_empty() {
         return Ok(HashMap::new());
     }
-    let req = Request::List {
-        ctx: ctx.read_ctx(),
-        payload: ListPayload {
-            filters: Filters {
-                ids: Some(ids),
-                ..Filters::default()
-            },
-        },
-    };
-    match send(&req)? {
-        ResponsePayload::Query(beads_api::QueryResult::Issues(issues)) => Ok(issues
-            .into_iter()
-            .map(|issue| (issue.id.clone(), issue))
-            .collect()),
-        other => Err(beads_surface::ipc::IpcError::DaemonUnavailable(format!(
-            "unexpected response for dependency summaries: {other:?}"
-        ))
-        .into()),
+
+    let mut by_namespace: BTreeMap<NamespaceId, BTreeSet<BeadId>> = BTreeMap::new();
+    for bead_ref in refs {
+        let (namespace, id) = bead_ref.into_parts();
+        by_namespace.entry(namespace).or_default().insert(id);
     }
+
+    let mut out = HashMap::new();
+    for (namespace, ids) in by_namespace {
+        let read_ctx = ctx.with_namespace(namespace.clone());
+        let req = Request::List {
+            ctx: read_ctx.read_ctx(),
+            payload: ListPayload {
+                filters: Filters {
+                    ids: Some(ids.into_iter().collect()),
+                    ..Filters::default()
+                },
+            },
+        };
+        match send(&req)? {
+            ResponsePayload::Query(beads_api::QueryResult::Issues(issues)) => {
+                for issue in issues {
+                    let id = BeadId::parse(&issue.id)
+                        .map_err(|err| validation_error("id", err.to_string()))?;
+                    out.insert(BeadRef::new(issue.namespace.clone(), id), issue);
+                }
+            }
+            other => {
+                return Err(beads_surface::ipc::IpcError::DaemonUnavailable(format!(
+                    "unexpected response for dependency summaries: {other:?}"
+                ))
+                .into());
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn dep_edge_target_ref(edge: &DepEdge, direction: DepDirection) -> CommandResult<BeadRef> {
+    let (namespace, id) = match direction {
+        DepDirection::Down => (&edge.to_namespace, &edge.to),
+        DepDirection::Up => (&edge.from_namespace, &edge.from),
+    };
+    Ok(BeadRef::new(
+        NamespaceId::parse(namespace)
+            .map_err(|err| validation_error("namespace", err.to_string()))?,
+        BeadId::parse(id).map_err(|err| validation_error("id", err.to_string()))?,
+    ))
 }
 
 fn kind_matches(filter: Option<&str>, kind: &str) -> bool {
@@ -331,12 +355,17 @@ fn parse_direction(raw: &str) -> Result<DepDirection, String> {
     }
 }
 
-pub fn render_dep_tree(root: &str, edges: &[DepEdge]) -> String {
+pub fn render_dep_tree(root: &BeadRef, edges: &[DepEdge]) -> String {
+    let force_namespace =
+        root.namespace() != &NamespaceId::core() || dep_edges_need_namespace(edges.iter());
+    let root = fmt_dep_endpoint(
+        root.namespace().as_str(),
+        root.id().as_str(),
+        force_namespace,
+    );
     if edges.is_empty() {
         return format!("\n{root} has no dependencies\n");
     }
-    let force_namespace = dep_edges_need_namespace(edges.iter());
-    let root = fmt_dep_tree_root(root, edges, force_namespace);
     let mut out = format!("\n🌲 Dependency tree for {root}:\n\n");
     for e in edges {
         let from = fmt_dep_endpoint(&e.from_namespace, &e.from, force_namespace);
@@ -369,23 +398,6 @@ pub fn render_deps(incoming: &[DepEdge], outgoing: &[DepEdge]) -> String {
     } else {
         out.trim_end().into()
     }
-}
-
-fn fmt_dep_tree_root(root: &str, edges: &[DepEdge], force_namespace: bool) -> String {
-    if !force_namespace {
-        return root.to_string();
-    }
-
-    for edge in edges {
-        if edge.from == root {
-            return fmt_dep_endpoint(&edge.from_namespace, &edge.from, true);
-        }
-        if edge.to == root {
-            return fmt_dep_endpoint(&edge.to_namespace, &edge.to, true);
-        }
-    }
-
-    fmt_dep_endpoint("core", root, true)
 }
 
 pub fn render_dep_cycles(out: &DepCycles) -> String {
@@ -459,12 +471,27 @@ mod tests {
     #[test]
     fn render_dep_tree_qualifies_root_and_edges_for_non_core_output() {
         let output = render_dep_tree(
-            "bd-session",
+            &BeadRef::new(
+                NamespaceId::parse("sessions").unwrap(),
+                BeadId::parse("bd-session").unwrap(),
+            ),
             &[edge("sessions", "bd-session", "core", "bd-core")],
         );
 
         assert!(output.contains("Dependency tree for sessions/bd-session"));
         assert!(output.contains("sessions/bd-session → core/bd-core (blocks)"));
+    }
+
+    #[test]
+    fn render_dep_tree_omits_core_namespace_for_core_root() {
+        let output = render_dep_tree(
+            &BeadRef::new(NamespaceId::core(), BeadId::parse("bd-core").unwrap()),
+            &[edge("core", "bd-core", "core", "bd-dep")],
+        );
+
+        assert!(output.contains("Dependency tree for bd-core"));
+        assert!(output.contains("bd-core → bd-dep (blocks)"));
+        assert!(!output.contains("core/bd-core"));
     }
 
     #[test]

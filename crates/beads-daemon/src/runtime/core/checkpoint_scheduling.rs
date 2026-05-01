@@ -192,6 +192,7 @@ impl Daemon {
         let runtime = crate::config::daemon_runtime_from_config(&config);
 
         let old_count = self.checkpoint_groups.len();
+        let old_groups = self.checkpoint_groups.clone();
         self.checkpoint_groups = runtime.checkpoint_groups;
         let new_count = self.checkpoint_groups.len();
 
@@ -205,7 +206,25 @@ impl Daemon {
         // Re-register checkpoint groups for all loaded stores
         let store_ids: Vec<StoreId> = self.store_sessions.keys().copied().collect();
         for store_id in store_ids {
-            self.register_default_checkpoint_groups(store_id)?;
+            self.checkpoint_scheduler.drop_store(store_id);
+            if let Err(err) = self.register_default_checkpoint_groups(store_id) {
+                self.checkpoint_groups = old_groups;
+                let rollback_store_ids: Vec<StoreId> =
+                    self.store_sessions.keys().copied().collect();
+                for rollback_store_id in rollback_store_ids {
+                    self.checkpoint_scheduler.drop_store(rollback_store_id);
+                    if let Err(rollback_err) =
+                        self.register_default_checkpoint_groups(rollback_store_id)
+                    {
+                        tracing::warn!(
+                            store_id = %rollback_store_id,
+                            error = ?rollback_err,
+                            "failed to restore previous checkpoint groups after reload failure"
+                        );
+                    }
+                }
+                return Err(err);
+            }
         }
 
         Ok(new_count)

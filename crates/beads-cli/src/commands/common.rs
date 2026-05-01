@@ -5,10 +5,6 @@ use beads_core::{BeadId, NamespaceId};
 use beads_surface::ipc::{IdPayload, IpcError, Request, ResponsePayload};
 use std::sync::LazyLock;
 
-pub(crate) fn fmt_issue_ref(namespace: &NamespaceId, id: &str) -> String {
-    fmt_issue_ref_scoped(namespace, id, false)
-}
-
 pub(crate) fn fmt_issue_ref_scoped(
     namespace: &NamespaceId,
     id: &str,

@@ -99,7 +99,7 @@ impl crate::render::HumanRenderer for CliCommandRenderer {
         list::render_issue_list_opts(issues, false)
     }
 
-    fn render_dep_tree(&self, root: &str, edges: &[DepEdge]) -> String {
+    fn render_dep_tree(&self, root: &beads_core::BeadRef, edges: &[DepEdge]) -> String {
         dep::render_dep_tree(root, edges)
     }
 
@@ -249,24 +249,30 @@ pub(crate) fn print_ok(payload: &ResponsePayload, json: bool) -> CommandResult<(
 mod tests {
     use super::*;
     use beads_api::QueryResult;
-    use beads_core::{BeadId, DurabilityReceipt, StoreEpoch, StoreId, StoreIdentity, TxnId};
+    use beads_core::{
+        BeadId, BeadRef, DurabilityReceipt, NamespaceId, StoreEpoch, StoreId, StoreIdentity, TxnId,
+    };
     use beads_surface::ipc::OpResponse;
     use beads_surface::ops::OpResult;
     use uuid::Uuid;
 
-    fn created_op_payload() -> ResponsePayload {
+    fn op_payload(result: OpResult) -> ResponsePayload {
         let receipt = DurabilityReceipt::local_fsync_defaults(
             StoreIdentity::new(StoreId::new(Uuid::from_bytes([1u8; 16])), StoreEpoch::ZERO),
             TxnId::new(Uuid::from_bytes([2u8; 16])),
             Vec::new(),
             0,
         );
-        ResponsePayload::Op(OpResponse::new(
-            OpResult::Created {
-                id: BeadId::parse("bd-123").expect("valid bead id"),
-            },
-            receipt,
-        ))
+        ResponsePayload::Op(OpResponse::new(result, receipt))
+    }
+
+    fn created_op_payload() -> ResponsePayload {
+        op_payload(OpResult::Created {
+            id: BeadRef::new(
+                NamespaceId::core(),
+                BeadId::parse("bd-123").expect("valid bead id"),
+            ),
+        })
     }
 
     #[test]
@@ -313,6 +319,25 @@ mod tests {
                 issue_summaries.clone()
             ))),
             list::render_issue_list_opts(&issue_summaries, false)
+        );
+    }
+
+    #[test]
+    fn render_ok_human_qualifies_core_ref_for_mixed_dep_op() {
+        let op_payload = op_payload(OpResult::DepAdded {
+            from: BeadRef::new(
+                NamespaceId::parse("sessions").expect("namespace"),
+                BeadId::parse("bd-session").expect("bead id"),
+            ),
+            to: BeadRef::new(
+                NamespaceId::core(),
+                BeadId::parse("bd-core").expect("bead id"),
+            ),
+        });
+
+        assert_eq!(
+            render_ok_human(&op_payload),
+            dep::render_dep_added("sessions/bd-session", "core/bd-core")
         );
     }
 }

@@ -343,7 +343,7 @@ pub fn replay_event_wal(
             ))
         })?;
 
-        let state_for_namespace = state.ensure_namespace(namespace.clone());
+        state.ensure_namespace(namespace.clone());
         let mut from_seq_excl = replay_floor
             .get(&(namespace.clone(), row.origin))
             .copied()
@@ -379,11 +379,37 @@ pub fn replay_event_wal(
                     )))
                 })?;
                 let event_body = load_event_body_at(segment_path, item.offset, limits)?;
-                let outcome = apply_event(state_for_namespace, &event_body).map_err(|err| {
+                if event_body.namespace != namespace {
+                    return Err(StoreRuntimeError::WalReplay(Box::new(
+                        WalReplayError::RecordDecode {
+                            path: segment_path.clone(),
+                            source: EventWalError::RecordHeaderInvalid {
+                                reason: format!(
+                                    "event namespace {} does not match WAL namespace {}",
+                                    event_body.namespace.as_str(),
+                                    namespace.as_str()
+                                ),
+                            },
+                        },
+                    )));
+                }
+                let outcome =
+                    apply_event_to_store_state(&mut state, &event_body).map_err(|err| {
+                        StoreRuntimeError::WalReplay(Box::new(WalReplayError::RecordDecode {
+                            path: segment_path.clone(),
+                            source: EventWalError::RecordHeaderInvalid {
+                                reason: format!("apply_event failed: {err}"),
+                            },
+                        }))
+                    })?;
+                let state_for_namespace = state.get(&namespace).ok_or_else(|| {
                     StoreRuntimeError::WalReplay(Box::new(WalReplayError::RecordDecode {
                         path: segment_path.clone(),
                         source: EventWalError::RecordHeaderInvalid {
-                            reason: format!("apply_event failed: {err}"),
+                            reason: format!(
+                                "namespace {} missing after apply_event",
+                                namespace.as_str()
+                            ),
                         },
                     }))
                 })?;

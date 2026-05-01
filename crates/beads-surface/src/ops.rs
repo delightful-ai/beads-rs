@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use beads_core::{BeadId, BeadType, Priority, WallClock, WorkflowStatus};
+use beads_core::{BeadId, BeadRef, BeadType, Priority, WallClock, WorkflowStatus};
 
 // =============================================================================
 // Patch<T> - Three-way field update
@@ -230,7 +230,7 @@ fn normalize_required_patch_field(
 #[serde(tag = "result", rename_all = "snake_case")]
 pub enum OpResult {
     /// Bead was created.
-    Created { id: BeadId },
+    Created { id: BeadRef },
 
     /// Bead was updated.
     Updated { id: BeadId },
@@ -245,10 +245,10 @@ pub enum OpResult {
     Deleted { id: BeadId },
 
     /// Dependency was added.
-    DepAdded { from: BeadId, to: BeadId },
+    DepAdded { from: BeadRef, to: BeadRef },
 
     /// Dependency was removed.
-    DepRemoved { from: BeadId, to: BeadId },
+    DepRemoved { from: BeadRef, to: BeadRef },
 
     /// Note was added.
     NoteAdded { bead_id: BeadId, note_id: String },

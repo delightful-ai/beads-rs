@@ -1016,6 +1016,17 @@ fn dep_store_from_wire(
 ) -> Result<DepStore, CheckpointImportError> {
     let mut entries: BTreeMap<DepKey, BTreeSet<Dot>> = BTreeMap::new();
     for entry in &wire.entries {
+        if entry.key.from_ref().namespace() != &line.namespace {
+            return Err(CheckpointImportError::InvalidDep {
+                path: path.to_path_buf(),
+                line: line.line_no,
+                reason: format!(
+                    "dependency source namespace {} does not match shard namespace {}",
+                    entry.key.from_ref().namespace(),
+                    line.namespace
+                ),
+            });
+        }
         let dots: BTreeSet<Dot> = entry.dots.iter().copied().collect();
         if entries.insert(entry.key.clone(), dots).is_some() {
             return Err(CheckpointImportError::InvalidDep {
@@ -1060,10 +1071,12 @@ mod tests {
     use uuid::Uuid;
 
     use crate::checkpoint::{CheckpointFileKind, CheckpointShardPath, ManifestFile, shard_name};
-    use crate::core::wire_bead::{WireClaimSnapshot, WireWorkflowSnapshot};
+    use crate::core::wire_bead::{
+        WireClaimSnapshot, WireDepEntryV1, WireDepStoreV1, WireWorkflowSnapshot,
+    };
     use crate::core::{
-        ActorId, BeadId, BeadType, CanonicalState, CheckpointContentSha256, Dvv, NamespaceId,
-        Priority, ReplicaId, StoreEpoch, StoreId,
+        ActorId, BeadId, BeadRef, BeadType, CanonicalState, CheckpointContentSha256, DepKey,
+        DepKind, Dot, Dvv, NamespaceId, Priority, ReplicaId, StoreEpoch, StoreId,
     };
     use crate::wire::{serialize_deps, serialize_state, serialize_tombstones};
 
@@ -1134,6 +1147,45 @@ mod tests {
         let tomb_bytes = serialize_tombstones(state).expect("serialize tombstones");
         let deps_bytes = serialize_deps(state).expect("serialize deps");
         (state_bytes, tomb_bytes, deps_bytes)
+    }
+
+    #[test]
+    fn import_rejects_dep_stored_outside_source_namespace() {
+        let path = PathBuf::from("core/deps/000.jsonl");
+        let sessions = NamespaceId::parse("sessions").unwrap();
+        let wire = WireDepStoreV1 {
+            cc: Dvv::default(),
+            entries: vec![WireDepEntryV1 {
+                key: DepKey::new(
+                    BeadRef::new(sessions, BeadId::parse("bd-session").unwrap()),
+                    BeadRef::new(NamespaceId::core(), BeadId::parse("bd-core").unwrap()),
+                    DepKind::Related,
+                )
+                .unwrap(),
+                dots: vec![Dot {
+                    replica: ReplicaId::new(Uuid::from_u128(3)),
+                    counter: 1,
+                }],
+            }],
+            stamp: None,
+        };
+
+        let err = dep_store_from_wire(
+            &wire,
+            &path,
+            JsonlLineContext {
+                line_no: 1,
+                namespace: NamespaceId::core(),
+            },
+        )
+        .expect_err("mismatched dep owner namespace should fail");
+
+        assert!(matches!(
+            err,
+            CheckpointImportError::InvalidDep { reason, .. }
+                if reason.contains("source namespace sessions")
+                    && reason.contains("shard namespace core")
+        ));
     }
 
     #[test]

@@ -471,7 +471,7 @@ impl Daemon {
             Ok(count) => Some(count),
             Err(err) => {
                 tracing::warn!(error = ?err, "failed to reload checkpoint groups");
-                None
+                return Response::err_from(err);
             }
         };
 

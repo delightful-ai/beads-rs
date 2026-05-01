@@ -149,7 +149,7 @@ pub(super) fn try_reuse_idempotent_response(
     let event_id = row.event_ids.first_event_id();
     let event_body = load_event_body(store_dir, wal_index, &event_id, limits)?;
     let EventKindV1::TxnV1(txn) = &event_body.kind;
-    let result = op_result_from_delta(request, &txn.delta)?;
+    let result = op_result_from_delta(&ctx.namespace, request, &txn.delta)?;
     let receipt = DurabilityReceipt::local_fsync(
         store,
         row.txn_id,
@@ -358,13 +358,16 @@ pub(super) fn load_event_body(
 }
 
 pub(super) fn op_result_from_delta(
+    namespace: &NamespaceId,
     request: &ParsedMutationRequest,
     delta: &TxnDeltaV1,
 ) -> Result<OpResult, OpError> {
     match request {
         ParsedMutationRequest::Create { .. } => {
             let id = find_created_id(delta)?;
-            Ok(OpResult::Created { id })
+            Ok(OpResult::Created {
+                id: BeadRef::new(namespace.clone(), id),
+            })
         }
         ParsedMutationRequest::Update { id, .. }
         | ParsedMutationRequest::AddLabels { id, .. }
@@ -373,14 +376,14 @@ pub(super) fn op_result_from_delta(
         ParsedMutationRequest::Close { id, .. } => Ok(OpResult::Closed { id: id.clone() }),
         ParsedMutationRequest::Reopen { id } => Ok(OpResult::Reopened { id: id.clone() }),
         ParsedMutationRequest::Delete { id, .. } => Ok(OpResult::Deleted { id: id.clone() }),
-        ParsedMutationRequest::AddDep { from, to, .. } => Ok(OpResult::DepAdded {
-            from: from.clone(),
-            to: to.clone(),
-        }),
-        ParsedMutationRequest::RemoveDep { from, to, .. } => Ok(OpResult::DepRemoved {
-            from: from.clone(),
-            to: to.clone(),
-        }),
+        ParsedMutationRequest::AddDep { .. } => {
+            let (from, to) = dep_refs_from_delta(delta, true)?;
+            Ok(OpResult::DepAdded { from, to })
+        }
+        ParsedMutationRequest::RemoveDep { .. } => {
+            let (from, to) = dep_refs_from_delta(delta, false)?;
+            Ok(OpResult::DepRemoved { from, to })
+        }
         ParsedMutationRequest::AddNote { id, .. } => {
             let bead_id = id.clone();
             let note_id = find_note_id(delta, &bead_id)?;
@@ -409,6 +412,23 @@ pub(super) fn op_result_from_delta(
     }
 }
 
+fn dep_refs_from_delta(delta: &TxnDeltaV1, add: bool) -> Result<(BeadRef, BeadRef), OpError> {
+    for op in delta.iter() {
+        match (add, op) {
+            (true, TxnOpV1::DepAdd(dep)) => {
+                return Ok((dep.key.from_ref().clone(), dep.key.to_ref().clone()));
+            }
+            (false, TxnOpV1::DepRemove(dep)) => {
+                return Ok((dep.key.from_ref().clone(), dep.key.to_ref().clone()));
+            }
+            _ => {}
+        }
+    }
+    Err(OpError::Internal(
+        "dependency mutation result missing dep op",
+    ))
+}
+
 pub(super) fn attach_issue_if_created(
     namespace: &NamespaceId,
     state: &CanonicalState,
@@ -420,7 +440,7 @@ pub(super) fn attach_issue_if_created(
     let OpResult::Created { id } = &response.result else {
         return;
     };
-    if let Some(view) = state.bead_view(id) {
+    if let Some(view) = state.bead_view(id.id()) {
         response.issue = Some(crate::api::Issue::from_view(namespace, &view));
     }
 }

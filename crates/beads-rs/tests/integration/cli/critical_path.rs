@@ -2918,12 +2918,63 @@ fn test_gascity_sessions_extmsg_namespace_smoke() {
     let session_ref = format!("sessions/{session_id}");
     let extmsg_ref = format!("extmsg/{extmsg_id}");
 
-    repo.bd()
-        .args(["dep", "add", &session_ref, &core_id, "--type", "related"])
+    let session_dep_add_out = repo
+        .bd()
+        .args([
+            "dep",
+            "add",
+            &session_ref,
+            &core_id,
+            "--type",
+            "related",
+            "--json",
+        ])
         .assert()
-        .success();
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let session_dep_add: serde_json::Value =
+        serde_json::from_slice(&session_dep_add_out).expect("parse dep add json");
+    assert_eq!(
+        session_dep_add["issue_id"].as_str(),
+        Some(session_id.as_str())
+    );
+    assert_eq!(
+        session_dep_add["depends_on_id"].as_str(),
+        Some(core_id.as_str())
+    );
+    assert_eq!(session_dep_add["from_namespace"].as_str(), Some("sessions"));
+    assert_eq!(session_dep_add["to_namespace"].as_str(), Some("core"));
+
     repo.bd()
         .args(["dep", "add", &extmsg_ref, &session_ref, "--type", "related"])
+        .assert()
+        .success();
+
+    repo.bd()
+        .args([
+            "--namespace",
+            "extmsg",
+            "update",
+            &extmsg_id,
+            "--parent",
+            &format!("core/{core_id}"),
+        ])
+        .assert()
+        .success();
+
+    let (session_update_id, _) =
+        create_gascity_issue(&repo, Some("sessions"), "Gas City session update path");
+    repo.bd()
+        .args([
+            "--namespace",
+            "sessions",
+            "update",
+            &session_update_id,
+            "--deps",
+            &format!("related:core/{core_id}"),
+        ])
         .assert()
         .success();
 
@@ -3031,6 +3082,35 @@ fn test_gascity_sessions_extmsg_namespace_smoke() {
     assert_eq!(session_dep["to_namespace"].as_str(), Some("core"));
     assert_eq!(session_dep["to"].as_str(), Some(core_id.as_str()));
 
+    let session_dep_list_out = repo
+        .bd()
+        .args([
+            "--namespace",
+            "sessions",
+            "dep",
+            "list",
+            &session_id,
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let session_dep_list = json_array_from_cli(&session_dep_list_out);
+    assert_eq!(session_dep_list.len(), 1);
+    assert_eq!(session_dep_list[0]["id"].as_str(), Some(core_id.as_str()));
+    assert_eq!(session_dep_list[0]["namespace"].as_str(), Some("core"));
+    assert_eq!(
+        session_dep_list[0]["title"].as_str(),
+        Some("Gas City core workflow")
+    );
+    assert_eq!(
+        session_dep_list[0]["from_namespace"].as_str(),
+        Some("sessions")
+    );
+    assert_eq!(session_dep_list[0]["to_namespace"].as_str(), Some("core"));
+
     let core_show_out = repo
         .bd()
         .args(["show", &core_id, "--json"])
@@ -3040,12 +3120,16 @@ fn test_gascity_sessions_extmsg_namespace_smoke() {
         .stdout
         .clone();
     let core_show = json_array_from_cli(&core_show_out);
-    let core_dependent = &core_show[0]["dependents"][0];
-    assert_eq!(core_dependent["dependency_type"].as_str(), Some("related"));
-    assert_eq!(core_dependent["from_namespace"].as_str(), Some("sessions"));
-    assert_eq!(core_dependent["from"].as_str(), Some(session_id.as_str()));
-    assert_eq!(core_dependent["to_namespace"].as_str(), Some("core"));
-    assert_eq!(core_dependent["to"].as_str(), Some(core_id.as_str()));
+    let core_dependents = core_show[0]["dependents"]
+        .as_array()
+        .expect("core dependents");
+    assert!(core_dependents.iter().any(|dep| {
+        dep["dependency_type"].as_str() == Some("related")
+            && dep["from_namespace"].as_str() == Some("sessions")
+            && dep["from"].as_str() == Some(session_id.as_str())
+            && dep["to_namespace"].as_str() == Some("core")
+            && dep["to"].as_str() == Some(core_id.as_str())
+    }));
 
     let extmsg_show_out = repo
         .bd()
@@ -3056,12 +3140,46 @@ fn test_gascity_sessions_extmsg_namespace_smoke() {
         .stdout
         .clone();
     let extmsg_show = json_array_from_cli(&extmsg_show_out);
-    let extmsg_dep = &extmsg_show[0]["dependencies"][0];
-    assert_eq!(extmsg_dep["dependency_type"].as_str(), Some("related"));
-    assert_eq!(extmsg_dep["from_namespace"].as_str(), Some("extmsg"));
-    assert_eq!(extmsg_dep["from"].as_str(), Some(extmsg_id.as_str()));
-    assert_eq!(extmsg_dep["to_namespace"].as_str(), Some("sessions"));
-    assert_eq!(extmsg_dep["to"].as_str(), Some(session_id.as_str()));
+    assert_eq!(extmsg_show[0]["parent"].as_str(), Some(core_id.as_str()));
+    assert_eq!(extmsg_show[0]["parent_namespace"].as_str(), Some("core"));
+    let core_ref = format!("core/{core_id}");
+    assert_eq!(
+        extmsg_show[0]["parent_ref"].as_str(),
+        Some(core_ref.as_str())
+    );
+    assert!(
+        extmsg_show[0]["dependencies"]
+            .as_array()
+            .expect("extmsg deps")
+            .iter()
+            .any(|dep| {
+                dep["dependency_type"].as_str() == Some("related")
+                    && dep["from_namespace"].as_str() == Some("extmsg")
+                    && dep["from"].as_str() == Some(extmsg_id.as_str())
+                    && dep["to_namespace"].as_str() == Some("sessions")
+                    && dep["to"].as_str() == Some(session_id.as_str())
+            })
+    );
+
+    let session_update_show_out = repo
+        .bd()
+        .args(["show", &format!("sessions/{session_update_id}"), "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let session_update_show = json_array_from_cli(&session_update_show_out);
+    let session_update_deps = session_update_show[0]["dependencies"]
+        .as_array()
+        .expect("session update deps");
+    assert!(session_update_deps.iter().any(|dep| {
+        dep["dependency_type"].as_str() == Some("related")
+            && dep["from_namespace"].as_str() == Some("sessions")
+            && dep["from"].as_str() == Some(session_update_id.as_str())
+            && dep["to_namespace"].as_str() == Some("core")
+            && dep["to"].as_str() == Some(core_id.as_str())
+    }));
 
     let tree_out = repo
         .bd()
@@ -3074,12 +3192,18 @@ fn test_gascity_sessions_extmsg_namespace_smoke() {
     let tree: serde_json::Value = serde_json::from_slice(&tree_out).expect("parse dep tree json");
     assert_eq!(tree["result"].as_str(), Some("dep_tree"));
     let tree_edges = tree["data"]["edges"].as_array().expect("dep tree edges");
-    assert_eq!(tree_edges.len(), 2);
+    assert_eq!(tree_edges.len(), 3);
     assert!(tree_edges.iter().any(|edge| {
         edge["from_namespace"] == "extmsg"
             && edge["from"] == extmsg_id
             && edge["to_namespace"] == "sessions"
             && edge["to"] == session_id
+    }));
+    assert!(tree_edges.iter().any(|edge| {
+        edge["from_namespace"] == "extmsg"
+            && edge["from"] == extmsg_id
+            && edge["to_namespace"] == "core"
+            && edge["to"] == core_id
     }));
     assert!(tree_edges.iter().any(|edge| {
         edge["from_namespace"] == "sessions"

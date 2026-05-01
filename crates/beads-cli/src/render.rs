@@ -7,7 +7,7 @@ use beads_api::{
     DepEdge, EpicStatus, Issue, IssueSummary, Note, QueryResult, ReadyResult, ShowDetails,
     StatusOutput, Tombstone,
 };
-use beads_core::{WallClock, WriteStamp};
+use beads_core::{BeadRef, NamespaceId, WallClock, WriteStamp};
 use beads_surface::OpResult;
 use beads_surface::ipc::ResponsePayload;
 use serde::Serialize;
@@ -29,7 +29,7 @@ pub trait HumanRenderer {
     fn render_claim_extended(&self, id: &str, expires: u64) -> String;
     fn render_issue(&self, issue: &Issue) -> String;
     fn render_issues(&self, issues: &[IssueSummary]) -> String;
-    fn render_dep_tree(&self, root: &str, edges: &[DepEdge]) -> String;
+    fn render_dep_tree(&self, root: &BeadRef, edges: &[DepEdge]) -> String;
     fn render_deps(&self, incoming: &[DepEdge], outgoing: &[DepEdge]) -> String;
     fn render_dep_cycles(&self, out: &DepCycles) -> String;
     fn render_notes(&self, notes: &[Note]) -> String;
@@ -78,14 +78,24 @@ pub fn render_human<R: HumanRenderer>(payload: &ResponsePayload, renderer: &R) -
 
 pub fn render_op<R: HumanRenderer>(op: &OpResult, renderer: &R) -> String {
     match op {
-        OpResult::Created { id } => renderer.render_created(id.as_str()),
+        OpResult::Created { id } => renderer.render_created(&format_created_ref(id)),
         OpResult::Updated { id } => renderer.render_updated(id.as_str()),
         OpResult::Closed { id } => renderer.render_closed(id.as_str()),
         OpResult::Reopened { id } => renderer.render_reopened(id.as_str()),
         OpResult::Deleted { id } => renderer.render_deleted_op(id.as_str()),
-        OpResult::DepAdded { from, to } => renderer.render_dep_added(from.as_str(), to.as_str()),
+        OpResult::DepAdded { from, to } => {
+            let qualify_core = op_refs_need_qualified_core(from, to);
+            renderer.render_dep_added(
+                &format_op_ref(from, qualify_core),
+                &format_op_ref(to, qualify_core),
+            )
+        }
         OpResult::DepRemoved { from, to } => {
-            renderer.render_dep_removed(from.as_str(), to.as_str())
+            let qualify_core = op_refs_need_qualified_core(from, to);
+            renderer.render_dep_removed(
+                &format_op_ref(from, qualify_core),
+                &format_op_ref(to, qualify_core),
+            )
         }
         OpResult::NoteAdded { bead_id, .. } => renderer.render_note_added(bead_id.as_str()),
         OpResult::Claimed { id, expires } => renderer.render_claimed(id.as_str(), expires.0),
@@ -101,7 +111,7 @@ pub fn render_query<R: HumanRenderer>(q: &QueryResult, renderer: &R) -> String {
         QueryResult::Issue(issue) => renderer.render_issue(issue),
         QueryResult::ShowDetails(details) => renderer.render_issue(&details.issue),
         QueryResult::Issues(views) => renderer.render_issues(views),
-        QueryResult::DepTree { root, edges } => renderer.render_dep_tree(root.as_str(), edges),
+        QueryResult::DepTree { root, edges } => renderer.render_dep_tree(root, edges),
         QueryResult::Deps { incoming, outgoing } => renderer.render_deps(incoming, outgoing),
         QueryResult::DepCycles(out) => renderer.render_dep_cycles(out),
         QueryResult::Notes(notes) => renderer.render_notes(notes),
@@ -137,6 +147,14 @@ pub fn render_query<R: HumanRenderer>(q: &QueryResult, renderer: &R) -> String {
                 warnings.join("\n")
             }
         }
+    }
+}
+
+fn format_created_ref(bead_ref: &beads_core::BeadRef) -> String {
+    if bead_ref.namespace() == &NamespaceId::core() {
+        bead_ref.id().as_str().to_string()
+    } else {
+        bead_ref.to_string()
     }
 }
 
@@ -235,12 +253,14 @@ pub fn show_details_json_value(details: &ShowDetails) -> Value {
     let dependencies = details
         .outgoing
         .iter()
-        .filter_map(|edge| dependency_issue_json(&summaries, edge, &edge.to))
+        .filter_map(|edge| dependency_issue_json(&summaries, edge, &edge.to_namespace, &edge.to))
         .collect::<Vec<_>>();
     let dependents = details
         .incoming
         .iter()
-        .filter_map(|edge| dependency_issue_json(&summaries, edge, &edge.from))
+        .filter_map(|edge| {
+            dependency_issue_json(&summaries, edge, &edge.from_namespace, &edge.from)
+        })
         .collect::<Vec<_>>();
     if !dependencies.is_empty() {
         map.insert("dependencies".into(), Value::Array(dependencies));
@@ -248,13 +268,17 @@ pub fn show_details_json_value(details: &ShowDetails) -> Value {
     if !dependents.is_empty() {
         map.insert("dependents".into(), Value::Array(dependents));
     }
-    if let Some(parent) = details
+    if let Some(parent_edge) = details
         .outgoing
         .iter()
         .find(|edge| dep_kind_to_go_wire(&edge.kind) == "parent-child")
-        .map(|edge| edge.to.clone())
     {
-        map.insert("parent".into(), json!(parent));
+        map.insert("parent".into(), json!(parent_edge.to));
+        map.insert("parent_namespace".into(), json!(parent_edge.to_namespace));
+        map.insert(
+            "parent_ref".into(),
+            json!(format!("{}/{}", parent_edge.to_namespace, parent_edge.to)),
+        );
     }
     value
 }
@@ -428,8 +452,11 @@ fn note_json_value(note: &Note) -> Value {
 
 fn op_result_json_value(result: &OpResult) -> Value {
     match result {
-        OpResult::Created { id }
-        | OpResult::Updated { id }
+        OpResult::Created { id } => json!({
+            "id": id.id().as_str(),
+            "namespace": id.namespace().as_str(),
+        }),
+        OpResult::Updated { id }
         | OpResult::Closed { id }
         | OpResult::Reopened { id }
         | OpResult::Deleted { id }
@@ -437,10 +464,24 @@ fn op_result_json_value(result: &OpResult) -> Value {
         | OpResult::Unclaimed { id }
         | OpResult::ClaimExtended { id, .. } => json!({ "id": id.as_str() }),
         OpResult::DepAdded { from, to } => {
-            json!({ "issue_id": from.as_str(), "depends_on_id": to.as_str() })
+            json!({
+                "issue_id": from.id().as_str(),
+                "depends_on_id": to.id().as_str(),
+                "from_namespace": from.namespace().as_str(),
+                "from": from.id().as_str(),
+                "to_namespace": to.namespace().as_str(),
+                "to": to.id().as_str(),
+            })
         }
         OpResult::DepRemoved { from, to } => {
-            json!({ "issue_id": from.as_str(), "depends_on_id": to.as_str() })
+            json!({
+                "issue_id": from.id().as_str(),
+                "depends_on_id": to.id().as_str(),
+                "from_namespace": from.namespace().as_str(),
+                "from": from.id().as_str(),
+                "to_namespace": to.namespace().as_str(),
+                "to": to.id().as_str(),
+            })
         }
         OpResult::NoteAdded { bead_id, note_id } => {
             json!({ "issue_id": bead_id.as_str(), "note_id": note_id })
@@ -448,21 +489,44 @@ fn op_result_json_value(result: &OpResult) -> Value {
     }
 }
 
-fn summary_map(summaries: &[IssueSummary]) -> std::collections::HashMap<&str, &IssueSummary> {
+fn summary_map(summaries: &[IssueSummary]) -> std::collections::HashMap<String, &IssueSummary> {
     summaries
         .iter()
-        .map(|summary| (summary.id.as_str(), summary))
+        .map(|summary| {
+            (
+                summary_key(summary.namespace.as_str(), &summary.id),
+                summary,
+            )
+        })
         .collect()
 }
 
 fn dependency_issue_json(
-    summaries: &std::collections::HashMap<&str, &IssueSummary>,
+    summaries: &std::collections::HashMap<String, &IssueSummary>,
     edge: &DepEdge,
+    namespace: &str,
     id: &str,
 ) -> Option<Value> {
     summaries
-        .get(id)
+        .get(&summary_key(namespace, id))
         .map(|summary| dependency_summary_json_value_for_edge(summary, edge))
+}
+
+fn summary_key(namespace: &str, id: &str) -> String {
+    format!("{namespace}/{id}")
+}
+
+fn op_refs_need_qualified_core(from: &beads_core::BeadRef, to: &beads_core::BeadRef) -> bool {
+    *from.namespace() != beads_core::NamespaceId::core()
+        || *to.namespace() != beads_core::NamespaceId::core()
+}
+
+fn format_op_ref(bead_ref: &beads_core::BeadRef, qualify_core: bool) -> String {
+    if !qualify_core && *bead_ref.namespace() == beads_core::NamespaceId::core() {
+        bead_ref.id().as_str().to_string()
+    } else {
+        bead_ref.to_string()
+    }
 }
 
 fn insert_dep_edge_fields(map: &mut Map<String, Value>, edge: &DepEdge) {

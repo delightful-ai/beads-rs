@@ -1430,6 +1430,9 @@ impl RigLink {
                 };
                 let mut events = Vec::new();
                 for (namespace, origins) in &want.want {
+                    if !self.namespaces.contains(namespace) {
+                        continue;
+                    }
                     for (origin, from_seq) in origins {
                         events.extend(source.read_wal_range(namespace, origin, *from_seq));
                     }

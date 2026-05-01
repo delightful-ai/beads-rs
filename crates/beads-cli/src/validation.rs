@@ -1,6 +1,6 @@
 use beads_core::{
-    BeadId, BeadRef, BeadSlug, ClientRequestId, DepSpec, NamespaceId, ValidatedBeadId,
-    ValidatedNamespaceId,
+    BeadId, BeadRef, BeadSlug, ClientRequestId, DepKind, NamespaceId, ValidatedBeadId,
+    ValidatedDepKind, ValidatedNamespaceId,
 };
 
 pub type Result<T> = std::result::Result<T, ValidationError>;
@@ -89,10 +89,54 @@ pub fn normalize_optional_client_request_id(raw: Option<&str>) -> Result<Option<
 }
 
 pub fn normalize_dep_specs(specs: Vec<String>) -> Result<Vec<String>> {
-    let parsed =
-        DepSpec::parse_list(&specs).map_err(|err| validation_error("deps", err.to_string()))?;
+    normalize_dep_specs_for(specs, &NamespaceId::core())
+}
 
-    Ok(parsed.iter().map(|spec| spec.to_spec_string()).collect())
+pub fn normalize_dep_specs_for(
+    specs: Vec<String>,
+    default_namespace: &NamespaceId,
+) -> Result<Vec<String>> {
+    let mut parsed = Vec::new();
+    for spec in specs {
+        for part in spec.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            parsed.push(normalize_dep_spec_for(part, default_namespace)?);
+        }
+    }
+    parsed.sort();
+    parsed.dedup();
+    Ok(parsed)
+}
+
+fn normalize_dep_spec_for(raw: &str, default_namespace: &NamespaceId) -> Result<String> {
+    let (kind, ref_raw) = if let Some((kind_raw, id_raw)) = raw.split_once(':') {
+        let kind = ValidatedDepKind::parse(kind_raw.trim())
+            .map_err(|err| validation_error("deps.kind", err.to_string()))?
+            .into_inner();
+        (kind, id_raw.trim())
+    } else {
+        (DepKind::Blocks, raw.trim())
+    };
+    if kind == DepKind::Parent {
+        return Err(validation_error(
+            "deps",
+            "parent edges must use --parent or bd parent",
+        ));
+    }
+    let bead_ref = normalize_bead_ref_for("deps", ref_raw, default_namespace)?;
+    let formatted_ref = if bead_ref.namespace() == default_namespace {
+        bead_ref.id().as_str().to_string()
+    } else {
+        bead_ref.to_string()
+    };
+    if kind == DepKind::Blocks {
+        Ok(formatted_ref)
+    } else {
+        Ok(format!("{}:{formatted_ref}", kind.as_str()))
+    }
 }
 
 #[cfg(test)]
@@ -277,7 +321,7 @@ mod tests {
         let err = normalize_dep_specs(specs).unwrap_err();
         match err {
             ValidationError::Field { field, .. } => {
-                assert_eq!(field, "deps");
+                assert_eq!(field, "deps.kind");
             }
         }
     }

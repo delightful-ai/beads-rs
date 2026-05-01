@@ -14,7 +14,7 @@ use crate::issues::{
     BlockedIssue, CountResult, DeletedLookup, EpicStatus, Issue, IssueSummary, Note, ReadyResult,
     StatusOutput, Tombstone,
 };
-use beads_core::BeadId;
+use beads_core::BeadRef;
 
 /// Aggregated payload for rich `show` views.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,7 +40,7 @@ pub enum QueryResult {
     Issues(Vec<IssueSummary>),
 
     /// Dependency tree.
-    DepTree { root: BeadId, edges: Vec<DepEdge> },
+    DepTree { root: BeadRef, edges: Vec<DepEdge> },
 
     /// Dependencies for a bead.
     Deps {

@@ -47,7 +47,7 @@ pub mod validated;
 pub mod watermark;
 pub mod wire_bead;
 
-pub use apply::{ApplyError, ApplyOutcome, NoteKey, apply_event};
+pub use apply::{ApplyError, ApplyOutcome, NoteKey, apply_event, apply_event_to_store_state};
 pub use bead::{Bead, BeadCore, BeadFields, BeadProjection, BeadView};
 pub use collections::{Label, Labels};
 pub use composite::{Claim, Closure, Note, Workflow};

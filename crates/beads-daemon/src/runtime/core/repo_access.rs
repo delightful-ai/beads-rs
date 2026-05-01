@@ -53,6 +53,7 @@ impl Daemon {
             .unwrap_or_else(|| EMPTY_STATE.get_or_init(CanonicalState::new))
     }
 
+    #[allow(dead_code)]
     pub(crate) fn namespace_state_mut<'a>(
         loaded: &'a mut LoadedStore<'_>,
         namespace: NamespaceId,

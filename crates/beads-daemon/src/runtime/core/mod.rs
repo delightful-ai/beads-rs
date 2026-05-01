@@ -96,7 +96,8 @@ use crate::core::{
     DurabilityClass, EventId, EventKindV1, HeadStatus, Limits, NamespaceId, NamespacePolicy,
     ProtocolErrorCode, ReplicaId, SegmentId, Seq0, Seq1, Sha256, StoreId, StoreIdentity,
     StoreState, TraceId, ValidatedEventBody, WallClock, Watermark, WatermarkError, Watermarks,
-    WriteStamp, apply_event, decode_event_body, encode_event_body_canonical, hash_event_body,
+    WriteStamp, apply_event_to_store_state, decode_event_body, encode_event_body_canonical,
+    hash_event_body,
 };
 use crate::git::SyncError;
 use crate::git::checkpoint::{
@@ -460,8 +461,8 @@ mod tests {
         NamespacePolicy, NoteAppendV1, NoteId, PrevVerified, Priority, ReplicaDurabilityRole,
         ReplicaEntry, ReplicaId, ReplicaRoster, ReplicateMode, SegmentId, Seq0, Seq1, Sha256,
         Stamp, StoreEpoch, StoreId, StoreIdentity, StoreMeta, StoreMetaVersions, StoreState,
-        TxnDeltaV1, TxnId, TxnOpV1, TxnV1, VerifiedEvent, WallClock, Watermarks, WireBeadPatch,
-        WireDepAddV1, WireDotV1, WireNoteV1, WireStamp, Workflow, WriteStamp,
+        TxnDeltaV1, TxnId, TxnOpV1, TxnV1, VerifiedEvent, WallClock, WatermarkPair, Watermarks,
+        WireBeadPatch, WireDepAddV1, WireDotV1, WireNoteV1, WireStamp, Workflow, WriteStamp,
         encode_event_body_canonical, hash_event_body, sha256_bytes,
     };
     use crate::git::checkpoint::{
@@ -479,7 +480,9 @@ mod tests {
     use crate::runtime::store::lock::{StoreLockMeta, read_lock_meta};
     use crate::runtime::store::runtime::StoreRuntime;
     use crate::runtime::wal::frame::encode_frame;
-    use crate::runtime::wal::{HlcRow, RecordHeader, RequestProof, SegmentHeader, VerifiedRecord};
+    use crate::runtime::wal::{
+        HlcRow, RecordHeader, RequestProof, SegmentHeader, VerifiedRecord, WalCursorOffset,
+    };
     use beads_surface::ops::OpResult;
     use tempfile::TempDir;
 
@@ -3343,14 +3346,14 @@ mod tests {
             .get_mut(&store_id)
             .expect("store runtime")
             .runtime_mut();
-        assert!(store.state.core().get_live(&bead_id).is_some());
+        assert!(store.state.core().get_live(bead_id.id()).is_some());
         let snapshot = store
             .checkpoint_snapshot("core", std::slice::from_ref(&namespace), 1_700_000_000_001)
             .expect("checkpoint snapshot");
         let expected_state_path = CheckpointShardPath::new(
             namespace,
             CheckpointFileKind::State,
-            shard_for_bead(&bead_id),
+            shard_for_bead(bead_id.id()),
         );
         assert!(snapshot.dirty_shards.contains(&expected_state_path));
     }
@@ -3420,12 +3423,12 @@ mod tests {
             namespace: Some(tmp_ns.clone()),
             ..ReadConsistency::default()
         };
-        let response = daemon.query_show(&repo_path, &created_id, read, &git_tx);
+        let response = daemon.query_show(&repo_path, created_id.id(), read, &git_tx);
         match response {
             Response::Ok {
                 ok: ResponsePayload::Query(QueryResult::Issue(issue)),
             } => {
-                assert_eq!(issue.id, created_id.as_str());
+                assert_eq!(issue.id, created_id.id().as_str());
             }
             other => panic!("unexpected query response: {other:?}"),
         }
@@ -4086,6 +4089,102 @@ mod tests {
         assert!(
             state.note_id_exists(&BeadId::parse("bd-missing").unwrap(), &note_id),
             "orphan note stored"
+        );
+    }
+
+    #[test]
+    fn replay_rejects_wal_row_event_namespace_mismatch() {
+        let tmp = TempStoreDir::new();
+        let row_namespace = NamespaceId::core();
+        let event_namespace = NamespaceId::parse("sessions").expect("sessions namespace");
+        let origin = ReplicaId::new(Uuid::from_bytes([61u8; 16]));
+        let store_id = StoreId::new(Uuid::from_bytes([62u8; 16]));
+        let store = StoreIdentity::new(store_id, StoreEpoch::ZERO);
+        let now_ms = 1_700_000_000_000u64;
+
+        let event =
+            verified_event_with_delta(store, &event_namespace, origin, 1, None, TxnDeltaV1::new());
+        let record = record_for_event(&event);
+
+        let mut daemon = Daemon::new_with_limits(test_actor(), Limits::default());
+        let remote = test_remote();
+        let repo_path = tmp.data_dir().join("repo");
+        std::fs::create_dir_all(&repo_path).expect("create repo path");
+        insert_store_for_tests(&mut daemon, store_id, remote, &repo_path).expect("insert store");
+
+        let store_dir = paths::store_dir(store_id);
+        let wal_index = {
+            let store_runtime = daemon
+                .store_sessions
+                .get_mut(&store_id)
+                .expect("store runtime")
+                .runtime_mut();
+            let append = store_runtime
+                .event_wal
+                .wal_append(&row_namespace, &record, now_ms)
+                .expect("append mismatched record")
+                .acknowledge_durability()
+                .append;
+            let segment_snapshot = store_runtime
+                .event_wal
+                .segment_snapshot(&row_namespace)
+                .expect("segment snapshot");
+            let segment_row = SegmentRow::open(
+                row_namespace.clone(),
+                append.segment_id,
+                segment_rel_path(&store_dir, &segment_snapshot.path),
+                segment_snapshot.created_at_ms,
+                WalCursorOffset::new(append.offset + append.len as u64),
+            );
+            let event_id = event_id_for(origin, row_namespace.clone(), event.body.origin_seq);
+            let mut txn = store_runtime
+                .wal_index
+                .writer()
+                .begin_txn()
+                .expect("begin wal index txn");
+            txn.upsert_segment(&segment_row).expect("upsert segment");
+            txn.record_event(
+                &row_namespace,
+                &event_id,
+                event.sha256.0,
+                None,
+                append.segment_id,
+                append.offset,
+                append.len,
+                event.body.event_time_ms,
+                event.body.txn_id,
+                None,
+            )
+            .expect("record event");
+            let applied =
+                Watermark::<Applied>::new(Seq0::new(1), HeadStatus::Known(event.sha256.0))
+                    .expect("applied watermark");
+            let durable =
+                Watermark::<Durable>::new(Seq0::new(1), HeadStatus::Known(event.sha256.0))
+                    .expect("durable watermark");
+            let watermarks = WatermarkPair::new(applied, durable).expect("watermark pair");
+            txn.update_watermark(&row_namespace, &origin, watermarks)
+                .expect("update watermark");
+            txn.commit().expect("commit wal index txn");
+            store_runtime.wal_index.clone()
+        };
+
+        let err = replay_event_wal(
+            &store_dir,
+            wal_index.as_ref(),
+            StoreState::default(),
+            &BTreeMap::new(),
+            &Limits::default(),
+        )
+        .expect_err("replay must reject event namespace mismatch");
+
+        let StoreRuntimeError::WalReplay(err) = err else {
+            panic!("expected wal replay error");
+        };
+        assert!(
+            err.to_string().contains("event namespace sessions")
+                && err.to_string().contains("WAL namespace core"),
+            "unexpected replay error: {err}"
         );
     }
 

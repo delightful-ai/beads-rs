@@ -30,7 +30,7 @@ pub struct CreatePayload {
     #[serde(default)]
     pub id: Option<BeadId>,
     #[serde(default)]
-    pub parent: Option<BeadId>,
+    pub parent: Option<String>,
     pub title: String,
     #[serde(rename = "type")]
     pub bead_type: BeadType,
@@ -71,7 +71,7 @@ pub struct LabelsPayload {
 pub struct ParentPayload {
     pub id: BeadId,
     #[serde(default)]
-    pub parent: Option<BeadId>,
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

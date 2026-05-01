@@ -62,6 +62,7 @@ pub(super) fn compute_blocked_by_store(
     blocked
 }
 
+#[cfg(test)]
 pub(super) fn dep_cycles_from_state(state: &CanonicalState) -> DepCycles {
     let cycles = state
         .dependency_cycles()
@@ -76,19 +77,39 @@ pub(super) fn dep_cycles_from_state(state: &CanonicalState) -> DepCycles {
     DepCycles { cycles }
 }
 
+pub(super) fn dep_cycles_from_store_state(store_state: &StoreState) -> DepCycles {
+    let cycles = store_state
+        .dependency_cycles()
+        .into_iter()
+        .map(|cycle| {
+            cycle
+                .into_iter()
+                .map(|bead_ref| bead_ref.to_string())
+                .collect()
+        })
+        .collect();
+    DepCycles { cycles }
+}
+
 pub(super) fn compute_epic_statuses(
     namespace: &crate::core::NamespaceId,
     state: &CanonicalState,
+    store_state: &StoreState,
     eligible_only: bool,
 ) -> Vec<EpicStatus> {
     // Build epic -> children mapping from parent edges.
-    let mut children: std::collections::BTreeMap<BeadId, Vec<BeadId>> =
+    let mut children: std::collections::BTreeMap<BeadId, Vec<BeadRef>> =
         std::collections::BTreeMap::new();
-    for edge in state.parent_edges() {
-        children
-            .entry(edge.parent().clone())
-            .or_default()
-            .push(edge.child().clone());
+    for (_, namespace_state) in store_state.namespaces() {
+        for edge in namespace_state.parent_edges() {
+            if edge.parent_ref().namespace() != namespace {
+                continue;
+            }
+            children
+                .entry(edge.parent().clone())
+                .or_default()
+                .push(edge.child_ref().clone());
+        }
     }
 
     let mut out = Vec::new();
@@ -109,8 +130,8 @@ pub(super) fn compute_epic_statuses(
         let closed_children = child_ids
             .iter()
             .filter(|cid| {
-                state
-                    .get_live(cid)
+                store_state
+                    .resolve_ref(cid)
                     .map(|b| b.fields.workflow.value.is_closed())
                     .unwrap_or(false)
             })

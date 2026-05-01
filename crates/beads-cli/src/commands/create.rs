@@ -1,7 +1,9 @@
 use std::io::{BufRead, Write};
 
 use crate::parsers::{parse_bead_type, parse_priority};
-use crate::validation::{normalize_bead_id_for, normalize_dep_specs, validation_error};
+use crate::validation::{
+    normalize_bead_id_for, normalize_bead_ref_for, normalize_dep_specs_for, validation_error,
+};
 use clap::Args;
 
 use super::common::fetch_issue;
@@ -10,7 +12,7 @@ use super::{CommandResult, print_ok};
 use crate::render::{print_json, print_line};
 use crate::runtime::{CliRuntimeCtx, send, send_raw};
 use beads_api::{Issue, QueryResult};
-use beads_core::{BeadType, Priority};
+use beads_core::{BeadType, NamespaceId, Priority};
 use beads_surface::OpResult;
 use beads_surface::ipc::{CreatePayload, Request, Response, ResponsePayload};
 
@@ -212,12 +214,20 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: CreateArgs) -> CommandResult<()> {
         .take()
         .map(|raw| normalize_bead_id_for("id", &raw))
         .transpose()?;
+    let active_namespace = ctx.active_namespace();
     let parent = args
         .parent
         .take()
-        .map(|raw| normalize_bead_id_for("parent", &raw))
-        .transpose()?;
-    let dependencies = normalize_dep_specs(args.deps)?;
+        .map(|raw| normalize_bead_ref_for("parent", &raw, &active_namespace))
+        .transpose()?
+        .map(|bead_ref| {
+            if bead_ref.namespace() == &active_namespace {
+                bead_ref.id().as_str().to_string()
+            } else {
+                bead_ref.to_string()
+            }
+        });
+    let dependencies = normalize_dep_specs_for(args.deps, &active_namespace)?;
 
     let req = Request::Create {
         ctx: ctx.mutation_ctx(),
@@ -243,7 +253,7 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: CreateArgs) -> CommandResult<()> {
         ResponsePayload::Op(op) => match &op.result {
             OpResult::Created { id } => match &op.issue {
                 Some(issue) => issue.clone(),
-                None => fetch_issue(ctx, id)?,
+                None => fetch_issue(ctx, id.id())?,
             },
             _ => {
                 print_ok(&created_payload, ctx.json)?;
@@ -292,7 +302,12 @@ pub fn render_created(id: &str) -> String {
 
 fn render_create(issue: &Issue) -> String {
     let mut out = String::new();
-    out.push_str(&format!("✓ Created issue: {}\n", issue.id));
+    let id = if issue.namespace == NamespaceId::core() {
+        issue.id.clone()
+    } else {
+        format!("{}/{}", issue.namespace, issue.id)
+    };
+    out.push_str(&format!("✓ Created issue: {id}\n"));
     out.push_str(&format!("  Title: {}\n", issue.title));
     out.push_str(&format!("  Priority: P{}\n", issue.priority));
     out.push_str(&format!("  Status: {}", issue.status.as_str()));
@@ -352,14 +367,15 @@ fn handle_from_markdown_file(ctx: &CliRuntimeCtx, path: &std::path::Path) -> Com
     let mut failed = Vec::new();
 
     for t in templates {
-        let dependencies = match normalize_dep_specs(t.dependencies.clone()) {
-            Ok(v) => v,
-            Err(e) => {
-                failed.push(t.title.clone());
-                tracing::error!("error creating issue {:?}: {e}", t.title);
-                continue;
-            }
-        };
+        let dependencies =
+            match normalize_dep_specs_for(t.dependencies.clone(), &ctx.active_namespace()) {
+                Ok(v) => v,
+                Err(e) => {
+                    failed.push(t.title.clone());
+                    tracing::error!("error creating issue {:?}: {e}", t.title);
+                    continue;
+                }
+            };
 
         let req = Request::Create {
             ctx: ctx.mutation_ctx(),
@@ -419,11 +435,11 @@ fn handle_from_markdown_file(ctx: &CliRuntimeCtx, path: &std::path::Path) -> Com
         };
 
         if ctx.json {
-            let issue = fetch_issue(ctx, &created_id)?;
+            let issue = fetch_issue(ctx, created_id.id())?;
             created.push(issue);
         } else {
             created_summaries.push(CreatedSummary {
-                id: created_id.as_str().to_string(),
+                id: created_id.to_string(),
                 title: t.title.clone(),
                 priority: t.priority,
                 bead_type: t.bead_type,

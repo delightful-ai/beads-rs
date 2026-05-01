@@ -986,7 +986,7 @@ impl Node {
                         OpResult::Created { id } => id,
                         other => panic!("unexpected create result: {other:?}"),
                     };
-                    let id_str = id.as_str().to_string();
+                    let id_str = id.id().as_str().to_string();
                     self.record_min_seen(&id_str, op.receipt.min_seen());
                     id_str
                 }

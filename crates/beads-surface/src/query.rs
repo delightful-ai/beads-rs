@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use beads_core::{ActorId, BeadId, BeadType, BeadView, Claim, Priority};
+use beads_core::{ActorId, BeadId, BeadRef, BeadType, BeadView, Claim, Priority};
 
 // =============================================================================
 // Filters - Filtering criteria
@@ -109,7 +109,7 @@ pub struct Filters {
 
     /// Filter by parent epic ID (only show children).
     #[serde(default)]
-    pub parent: Option<BeadId>,
+    pub parent: Option<BeadRef>,
 }
 
 /// Fields to sort by.

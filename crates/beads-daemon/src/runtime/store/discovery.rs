@@ -163,7 +163,7 @@ impl StoreCaches {
                 return Ok(resolution);
             }
             if let Ok((repo, _)) = bootstrap_repo::discover(repo_path)
-                && let Some(resolution) = resolve_verified_store_id(&repo)?
+                && let Some(resolution) = resolve_verified_store_id(&repo, remote)?
             {
                 return Ok(resolution);
             }
@@ -172,7 +172,7 @@ impl StoreCaches {
 
         if let Some(resolution) = mapped {
             if let Ok((repo, _)) = bootstrap_repo::discover(repo_path)
-                && let Some(resolution) = resolve_verified_store_id(&repo)?
+                && let Some(resolution) = resolve_verified_store_id(&repo, remote)?
             {
                 return Ok(resolution);
             }
@@ -182,7 +182,7 @@ impl StoreCaches {
         let (repo, _) = bootstrap_repo::discover(repo_path)
             .map_err(|_| OpError::NotAGitRepo(repo_path.to_owned()))?;
 
-        if let Some(resolution) = resolve_verified_store_id(&repo)? {
+        if let Some(resolution) = resolve_verified_store_id(&repo, remote)? {
             return Ok(resolution);
         }
 
@@ -341,8 +341,11 @@ fn write_store_path_map(path: &Path, map: &StorePathMap) -> io::Result<()> {
     Ok(())
 }
 
-fn read_store_id_from_git_meta(repo: &Repository) -> Result<Option<StoreId>, StoreDiscoveryError> {
-    let reference = match repo.find_reference("refs/beads/meta") {
+fn read_store_id_from_git_meta_ref(
+    repo: &Repository,
+    refname: &str,
+) -> Result<Option<StoreId>, StoreDiscoveryError> {
+    let reference = match repo.find_reference(refname) {
         Ok(reference) => reference,
         Err(err) if err.code() == GitErrorCode::NotFound => return Ok(None),
         Err(err) => return Err(StoreDiscoveryError::MetaRef { source: err }),
@@ -365,10 +368,14 @@ fn read_store_id_from_git_meta(repo: &Repository) -> Result<Option<StoreId>, Sto
     Ok(Some(meta.store_id))
 }
 
-fn discover_store_id_from_refs(repo: &Repository) -> Result<Option<StoreId>, StoreDiscoveryError> {
+fn discover_store_id_from_refs_with(
+    repo: &Repository,
+    glob: &str,
+    prefix: &str,
+) -> Result<Option<StoreId>, StoreDiscoveryError> {
     let mut ids = BTreeSet::new();
     let refs = repo
-        .references_glob("refs/beads/*-*-*-*-*/*")
+        .references_glob(glob)
         .map_err(|source| StoreDiscoveryError::RefList { source })?;
 
     for reference in refs {
@@ -376,7 +383,7 @@ fn discover_store_id_from_refs(repo: &Repository) -> Result<Option<StoreId>, Sto
         let Some(name) = reference.name() else {
             continue;
         };
-        let Some(rest) = name.strip_prefix("refs/beads/") else {
+        let Some(rest) = name.strip_prefix(prefix) else {
             continue;
         };
         let store_id_raw = rest.split('/').next().unwrap_or_default();
@@ -399,15 +406,31 @@ fn discover_store_id_from_refs(repo: &Repository) -> Result<Option<StoreId>, Sto
     Ok(ids.into_iter().next())
 }
 
-fn resolve_verified_store_id(repo: &Repository) -> Result<Option<StoreIdResolution>, OpError> {
-    let meta = read_store_id_from_git_meta(repo).map_err(|err| OpError::InvalidRequest {
-        field: Some("store_id".into()),
-        reason: err.to_string(),
-    })?;
-    let refs = discover_store_id_from_refs(repo).map_err(|err| OpError::InvalidRequest {
-        field: Some("store_id".into()),
-        reason: err.to_string(),
-    })?;
+fn discover_store_id_from_refs(repo: &Repository) -> Result<Option<StoreId>, StoreDiscoveryError> {
+    discover_store_id_from_refs_with(repo, "refs/beads/*-*-*-*-*/*", "refs/beads/")
+}
+
+fn discover_remote_tracking_store_id_from_refs(
+    repo: &Repository,
+) -> Result<Option<StoreId>, StoreDiscoveryError> {
+    discover_store_id_from_refs_with(
+        repo,
+        "refs/remotes/origin/beads/*-*-*-*-*/*",
+        "refs/remotes/origin/beads/",
+    )
+}
+
+fn resolve_verified_store_id_from(
+    repo: &Repository,
+    meta_ref: &str,
+    source: StoreIdSource,
+    refs: Option<StoreId>,
+) -> Result<Option<StoreIdResolution>, OpError> {
+    let meta =
+        read_store_id_from_git_meta_ref(repo, meta_ref).map_err(|err| OpError::InvalidRequest {
+            field: Some("store_id".into()),
+            reason: err.to_string(),
+        })?;
 
     if let (Some(meta_id), Some(refs_id)) = (meta, refs) {
         if meta_id != refs_id {
@@ -416,17 +439,11 @@ fn resolve_verified_store_id(repo: &Repository) -> Result<Option<StoreIdResoluti
                 refs: refs_id,
             });
         }
-        return Ok(Some(StoreIdResolution::verified(
-            meta_id,
-            StoreIdSource::GitMeta,
-        )));
+        return Ok(Some(StoreIdResolution::verified(meta_id, source)));
     }
 
     if let Some(meta_id) = meta {
-        return Ok(Some(StoreIdResolution::verified(
-            meta_id,
-            StoreIdSource::GitMeta,
-        )));
+        return Ok(Some(StoreIdResolution::verified(meta_id, source)));
     }
 
     if let Some(refs_id) = refs {
@@ -437,6 +454,72 @@ fn resolve_verified_store_id(repo: &Repository) -> Result<Option<StoreIdResoluti
     }
 
     Ok(None)
+}
+
+fn resolve_verified_store_id(
+    repo: &Repository,
+    remote: &RemoteUrl,
+) -> Result<Option<StoreIdResolution>, OpError> {
+    let local_refs = discover_store_id_from_refs(repo).map_err(|err| OpError::InvalidRequest {
+        field: Some("store_id".into()),
+        reason: err.to_string(),
+    })?;
+    if let Some(resolution) =
+        resolve_verified_store_id_from(repo, "refs/beads/meta", StoreIdSource::GitMeta, local_refs)?
+    {
+        return Ok(Some(resolution));
+    }
+
+    if !remote.is_local_only() {
+        fetch_remote_identity_refs(repo);
+        let remote_refs = discover_remote_tracking_store_id_from_refs(repo).map_err(|err| {
+            OpError::InvalidRequest {
+                field: Some("store_id".into()),
+                reason: err.to_string(),
+            }
+        })?;
+        if let Some(resolution) = resolve_verified_store_id_from(
+            repo,
+            "refs/remotes/origin/beads/meta",
+            StoreIdSource::GitMeta,
+            remote_refs,
+        )? {
+            return Ok(Some(resolution));
+        }
+    }
+
+    Ok(None)
+}
+
+fn fetch_remote_identity_refs(repo: &Repository) {
+    let Ok(mut remote) = repo.find_remote("origin") else {
+        return;
+    };
+    let cfg = repo.config().ok();
+    let mut callbacks = git2::RemoteCallbacks::new();
+    callbacks.credentials(move |url, username_from_url, allowed| {
+        if allowed.is_ssh_key()
+            && let Some(user) = username_from_url
+        {
+            return git2::Cred::ssh_key_from_agent(user);
+        }
+        if allowed.is_user_pass_plaintext()
+            && let Some(ref cfg) = cfg
+            && let Ok(cred) = git2::Cred::credential_helper(cfg, url, username_from_url)
+        {
+            return Ok(cred);
+        }
+        git2::Cred::default()
+    });
+    let mut fo = git2::FetchOptions::new();
+    fo.remote_callbacks(callbacks);
+    if let Err(err) = remote.fetch(
+        &["+refs/beads/*:refs/remotes/origin/beads/*"],
+        Some(&mut fo),
+        None,
+    ) {
+        tracing::debug!(error = ?err, "remote store identity refs fetch failed");
+    }
 }
 
 pub(crate) fn store_id_from_remote(remote: &RemoteUrl) -> StoreId {
@@ -465,7 +548,7 @@ mod tests {
         (dir, repo)
     }
 
-    fn write_store_meta(repo: &Repository, store_id: StoreId) {
+    fn write_store_meta_ref(repo: &Repository, store_id: StoreId, refname: &str) {
         let meta = StoreMetaRef {
             store_id,
             store_epoch: StoreEpoch::ZERO,
@@ -482,14 +565,21 @@ mod tests {
         let commit_id = repo
             .commit(Some("HEAD"), &sig, &sig, "meta", &tree, &[])
             .unwrap();
-        repo.reference("refs/beads/meta", commit_id, true, "meta")
-            .unwrap();
+        repo.reference(refname, commit_id, true, "meta").unwrap();
+    }
+
+    fn write_store_meta(repo: &Repository, store_id: StoreId) {
+        write_store_meta_ref(repo, store_id, "refs/beads/meta");
+    }
+
+    fn write_store_ref_named(repo: &Repository, store_id: StoreId, prefix: &str) {
+        let head = repo.head().unwrap().target().unwrap();
+        let name = format!("{prefix}{store_id}/head");
+        repo.reference(&name, head, true, "store ref").unwrap();
     }
 
     fn write_store_ref(repo: &Repository, store_id: StoreId) {
-        let head = repo.head().unwrap().target().unwrap();
-        let name = format!("refs/beads/{store_id}/head");
-        repo.reference(&name, head, true, "store ref").unwrap();
+        write_store_ref_named(repo, store_id, "refs/beads/");
     }
 
     #[test]
@@ -526,6 +616,24 @@ mod tests {
             OpError::StoreIdMismatch { meta, refs }
                 if meta == meta_id && refs == refs_id
         ));
+    }
+
+    #[test]
+    fn resolve_store_id_uses_remote_tracking_checkpoint_identity() {
+        assert!(std::env::var("BD_STORE_ID").is_err());
+        assert!(std::env::var("BD_REMOTE_URL").is_err());
+        let (dir, repo) = init_repo();
+
+        let store_id = StoreId::new(Uuid::from_bytes([4u8; 16]));
+        write_store_meta_ref(&repo, store_id, "refs/remotes/origin/beads/meta");
+        write_store_ref_named(&repo, store_id, "refs/remotes/origin/beads/");
+
+        let remote = RemoteUrl::new("https://example.com/repo.git");
+        let mut caches = StoreCaches::new();
+        let resolved = caches.resolve_store_id(dir.path(), &remote).unwrap();
+
+        assert_eq!(resolved.store_id, store_id);
+        assert!(resolved.is_verified());
     }
 
     #[test]

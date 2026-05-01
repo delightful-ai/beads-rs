@@ -39,11 +39,11 @@ use super::wal_atomic_commit::{AtomicWalCommitPath, AtomicWalDurabilityTxn, tip_
 use crate::broadcast::BroadcastEvent;
 use crate::core::error::details::OverloadedSubsystem;
 use crate::core::{
-    ActorId, Applied, BeadId, CanonicalState, Dot, DurabilityClass, DurabilityReceipt, Durable,
-    EventBytes, EventId, EventKindV1, HeadStatus, Limits, NamespaceId, NoteId, ReplicaId, Seq1,
-    Sha256, Stamp, StoreIdentity, TxnDeltaV1, TxnOpV1, ValidatedEventBody, WallClock, Watermark,
-    WatermarkError, Watermarks, WirePatch, WriteStamp, apply_event, decode_event_body,
-    hash_event_body,
+    ActorId, Applied, BeadId, BeadRef, CanonicalState, Dot, DurabilityClass, DurabilityReceipt,
+    Durable, EventBytes, EventId, EventKindV1, HeadStatus, Limits, NamespaceId, NoteId, ReplicaId,
+    Seq1, Sha256, Stamp, StoreIdentity, TxnDeltaV1, TxnOpV1, ValidatedEventBody, WallClock,
+    Watermark, WatermarkError, Watermarks, WirePatch, WriteStamp, apply_event_to_store_state,
+    decode_event_body, hash_event_body,
 };
 use crate::runtime::metrics;
 use crate::runtime::wal::frame::FRAME_HEADER_LEN;
@@ -440,8 +440,10 @@ impl Daemon {
         let (durable_watermarks, applied_watermarks) = {
             let apply_start = Instant::now();
             let outcome = {
-                let state = Self::namespace_state_mut(&mut proof, namespace.clone());
-                match apply_event(state, &sequenced.event_body) {
+                match apply_event_to_store_state(
+                    &mut proof.runtime_mut().state,
+                    &sequenced.event_body,
+                ) {
                     Ok(outcome) => {
                         metrics::apply_ok(apply_start.elapsed());
                         outcome
@@ -494,7 +496,7 @@ impl Daemon {
             )
         };
 
-        let result = op_result_from_delta(&parsed_request, &txn_body.delta)?;
+        let result = op_result_from_delta(&namespace, &parsed_request, &txn_body.delta)?;
         let receipt = DurabilityReceipt::local_fsync(
             store,
             sequenced.event_body.txn_id,
@@ -1529,8 +1531,10 @@ mod tests {
             dependencies: Vec::new().into(),
         };
 
-        let result = op_result_from_delta(&request, &delta).unwrap();
-        assert!(matches!(result, OpResult::Created { id: got } if got == id));
+        let result = op_result_from_delta(&NamespaceId::core(), &request, &delta).unwrap();
+        assert!(
+            matches!(result, OpResult::Created { id: got } if got == BeadRef::new(NamespaceId::core(), id))
+        );
     }
 
     #[test]
@@ -1546,7 +1550,7 @@ mod tests {
         );
         let mut response = OpResponse::new(
             OpResult::Created {
-                id: bead_id("bd-123"),
+                id: BeadRef::new(NamespaceId::core(), bead_id("bd-123")),
             },
             receipt,
         );
@@ -1579,7 +1583,7 @@ mod tests {
             content: "hi".to_string(),
         };
 
-        let result = op_result_from_delta(&request, &delta).unwrap();
+        let result = op_result_from_delta(&NamespaceId::core(), &request, &delta).unwrap();
         assert!(
             matches!(result, OpResult::NoteAdded { bead_id, note_id: got }
             if bead_id == expected_bead_id && got == note_id.as_str())
@@ -1598,7 +1602,7 @@ mod tests {
             lease_secs: 60,
         };
 
-        let err = op_result_from_delta(&request, &delta).unwrap_err();
+        let err = op_result_from_delta(&NamespaceId::core(), &request, &delta).unwrap_err();
         assert!(matches!(err, OpError::Internal(_)));
     }
 
@@ -1616,7 +1620,7 @@ mod tests {
             lease_secs: 60,
         };
 
-        let result = op_result_from_delta(&request, &delta).unwrap();
+        let result = op_result_from_delta(&NamespaceId::core(), &request, &delta).unwrap();
         assert!(matches!(result, OpResult::Claimed { id, expires: got }
             if id == bead_id && got == expires));
     }

@@ -192,14 +192,14 @@ impl Daemon {
             tip_watermark_pair(tip_seq, tip_sha).map_err(|err| wal_index_error_payload(&err))?;
         let (remote, max_stamp, durable, applied) = {
             let mut max_stamp = git_lane.last_seen_stamp.clone();
-            let mut staged_namespace_state = store.state.get_or_default(&namespace);
+            let mut staged_store_state = store.state.clone();
             let mut apply_outcomes = Vec::with_capacity(batch.len());
             let mut broadcasts = Vec::with_capacity(batch.len());
             let mut watermark_advances = Vec::with_capacity(batch.len());
             for (event, canonical_sha) in batch.events().iter().zip(canonical_shas.iter().copied())
             {
                 let apply_start = Instant::now();
-                let apply_result = apply_event(&mut staged_namespace_state, &event.body);
+                let apply_result = apply_event_to_store_state(&mut staged_store_state, &event.body);
                 let outcome = match apply_result {
                     Ok(outcome) => {
                         metrics::apply_ok(apply_start.elapsed());
@@ -233,9 +233,7 @@ impl Daemon {
                 .commit_with_watermarks(commit_watermarks)
                 .map_err(|err| wal_index_error_payload(&err))?;
 
-            store
-                .state
-                .set_namespace_state(namespace.clone(), staged_namespace_state);
+            store.state = staged_store_state;
             for outcome in &apply_outcomes {
                 store.record_checkpoint_dirty_shards(&namespace, outcome);
             }

@@ -374,8 +374,11 @@ impl SyncProcess<Idle> {
             });
             let mut fo = git2::FetchOptions::new();
             fo.remote_callbacks(callbacks);
-            let refspec = "refs/heads/beads/store:refs/remotes/origin/beads/store";
-            if let Err(e) = remote.fetch(&[refspec], Some(&mut fo), None) {
+            let refspecs = [
+                "refs/heads/beads/store:refs/remotes/origin/beads/store",
+                "+refs/beads/*:refs/remotes/origin/beads/*",
+            ];
+            if let Err(e) = remote.fetch(&refspecs, Some(&mut fo), None) {
                 match policy {
                     FetchPolicy::Strict => return Err(SyncError::Fetch(e)),
                     FetchPolicy::BestEffort => {
@@ -4127,6 +4130,37 @@ mod tests {
         let _fetched = SyncProcess::new(local_dir).fetch(&local_repo).unwrap();
         let tracking_oid = local_repo
             .refname_to_id("refs/remotes/origin/beads/store")
+            .unwrap();
+        assert_eq!(tracking_oid, remote_oid);
+    }
+
+    #[test]
+    fn fetch_updates_remote_checkpoint_tracking_refs() {
+        let tmp = TempDir::new().unwrap();
+        let remote_dir = tmp.path().join("remote");
+        let local_dir = tmp.path().join("local");
+
+        let remote_repo = Repository::init_bare(&remote_dir).unwrap();
+        let local_repo = Repository::init(&local_dir).unwrap();
+        local_repo
+            .remote("origin", remote_dir.to_str().unwrap())
+            .unwrap();
+
+        let remote_oid = write_store_commit(&remote_repo, None, "checkpoint");
+        remote_repo
+            .reference(
+                "refs/beads/00000000-0000-0000-0000-000000000001/sessions",
+                remote_oid,
+                true,
+                "checkpoint ref",
+            )
+            .unwrap();
+
+        let _fetched = SyncProcess::new(local_dir).fetch(&local_repo).unwrap();
+        let tracking_oid = local_repo
+            .refname_to_id(
+                "refs/remotes/origin/beads/00000000-0000-0000-0000-000000000001/sessions",
+            )
             .unwrap();
         assert_eq!(tracking_oid, remote_oid);
     }

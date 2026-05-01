@@ -11,7 +11,7 @@ use super::{CommandResult, print_ok};
 use crate::filters::{CommonFilterArgs, apply_common_filters};
 use crate::parsers::{parse_sort, parse_status};
 use crate::runtime::{CliRuntimeCtx, send};
-use crate::validation::{normalize_bead_id_for, validation_error};
+use crate::validation::{normalize_bead_ref_for, validation_error};
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
@@ -72,7 +72,7 @@ pub fn handle_list(ctx: &CliRuntimeCtx, args: ListArgs) -> CommandResult<()> {
     let parent = args
         .parent
         .as_deref()
-        .map(|raw| normalize_bead_id_for("parent", raw))
+        .map(|raw| normalize_bead_ref_for("parent", raw, &ctx.active_namespace()))
         .transpose()?;
 
     let mut filters = Filters::default();
@@ -109,7 +109,7 @@ pub fn handle_list(ctx: &CliRuntimeCtx, args: ListArgs) -> CommandResult<()> {
             return Err(validation_error("tree", "--tree requires --parent").into());
         };
         let tree = fetch_child_tree(ctx, &filters, parent)?;
-        let output = render_issue_tree(parent.as_str(), &tree, args.show_labels);
+        let output = render_issue_tree(&parent.to_string(), &tree, args.show_labels);
         crate::render::print_line(&output)?;
         return Ok(());
     }
@@ -223,7 +223,7 @@ struct TreeNode {
 fn fetch_child_tree(
     ctx: &CliRuntimeCtx,
     base_filters: &Filters,
-    parent: &BeadId,
+    parent: &beads_core::BeadRef,
 ) -> CommandResult<Vec<TreeNode>> {
     let mut filters = base_filters.clone();
     filters.parent = Some(parent.clone());
@@ -231,8 +231,9 @@ fn fetch_child_tree(
 
     let mut nodes = Vec::with_capacity(children.len());
     for child in children {
-        let child_id = BeadId::parse(&child.id)?;
-        let descendants = fetch_child_tree(ctx, base_filters, &child_id)?;
+        let child_ref =
+            beads_core::BeadRef::new(child.namespace.clone(), BeadId::parse(&child.id)?);
+        let descendants = fetch_child_tree(ctx, base_filters, &child_ref)?;
         nodes.push(TreeNode {
             issue: child,
             children: descendants,

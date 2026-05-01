@@ -178,6 +178,53 @@ fn namespace_ready_eligible(
         .unwrap_or(false)
 }
 
+fn validation_warnings_for_namespace(
+    read_namespace: &NamespaceId,
+    state: &CanonicalState,
+    store_state: &StoreState,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    for key in state.dep_store().values() {
+        if key.from_ref().namespace() != read_namespace {
+            errors.push(format!(
+                "invalid dep owner: edge {} -> {} is stored in namespace {}",
+                key.from_ref(),
+                key.to_ref(),
+                read_namespace
+            ));
+        }
+        if store_state.resolve_ref(key.from_ref()).is_none() {
+            errors.push(format!(
+                "orphan dep: {} depends on {} but {} doesn't exist",
+                key.from_ref(),
+                key.to_ref(),
+                key.from_ref()
+            ));
+        }
+        if store_state.resolve_ref(key.to_ref()).is_none() {
+            errors.push(format!(
+                "orphan dep: {} depends on {} but {} doesn't exist",
+                key.from_ref(),
+                key.to_ref(),
+                key.to_ref()
+            ));
+        }
+    }
+
+    for cycle in store_state.dependency_cycles() {
+        if cycle
+            .iter()
+            .any(|bead_ref| bead_ref.namespace() == read_namespace)
+            && let Some(first) = cycle.first()
+        {
+            errors.push(format!("dependency cycle involving {first}"));
+        }
+    }
+
+    errors
+}
+
 fn ready_for_namespace(
     namespace: &NamespaceId,
     state: &CanonicalState,
@@ -429,15 +476,18 @@ impl Daemon {
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
             let state = ctx.state;
+            let namespace = ctx.read.namespace();
 
             // Build children set if parent filter is specified.
             // Parent deps: from=child, to=parent, kind=Parent.
             let children_of_parent: Option<std::collections::HashSet<BeadId>> =
-                filters.parent.as_ref().map(|parent_id| {
-                    state
-                        .parent_edges_to(parent_id)
+                filters.parent.as_ref().map(|parent_ref| {
+                    ctx.store_state
+                        .deps_to(parent_ref)
                         .into_iter()
-                        .map(|edge| edge.child().clone())
+                        .filter(|key| key.kind() == crate::core::DepKind::Parent)
+                        .filter(|key| key.from_ref().namespace() == namespace)
+                        .map(|key| key.from_ref().id().clone())
                         .collect()
                 });
 
@@ -549,7 +599,7 @@ impl Daemon {
             let edges = dep_tree_for_store(ctx.read.namespace(), id, ctx.store_state)?;
 
             Ok(ResponsePayload::query(QueryResult::DepTree {
-                root: id.clone(),
+                root: BeadRef::new(ctx.read.namespace().clone(), id.clone()),
                 edges,
             }))
         })
@@ -642,7 +692,7 @@ impl Daemon {
             }
 
             let epics_eligible_for_closure =
-                compute_epic_statuses(read.namespace(), state, true).len();
+                compute_epic_statuses(read.namespace(), state, store_state, true).len();
 
             let summary = StatusSummary {
                 total_issues: state.live_count(),
@@ -1020,7 +1070,12 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
-            let statuses = compute_epic_statuses(ctx.read.namespace(), ctx.state, eligible_only);
+            let statuses = compute_epic_statuses(
+                ctx.read.namespace(),
+                ctx.state,
+                ctx.store_state,
+                eligible_only,
+            );
             Ok(ResponsePayload::query(QueryResult::EpicStatus(statuses)))
         })
     }
@@ -1033,51 +1088,8 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
-            let state = ctx.state;
-
-            // Run validation checks
-            let mut errors = Vec::new();
-
-            // Check for orphan dependencies
-            for key in state.dep_store().values() {
-                if state.get_live(key.from()).is_none() {
-                    errors.push(format!(
-                        "orphan dep: {} depends on {} but {} doesn't exist",
-                        key.from().as_str(),
-                        key.to().as_str(),
-                        key.from().as_str()
-                    ));
-                }
-                if state.get_live(key.to()).is_none() {
-                    errors.push(format!(
-                        "orphan dep: {} depends on {} but {} doesn't exist",
-                        key.from().as_str(),
-                        key.to().as_str(),
-                        key.to().as_str()
-                    ));
-                }
-            }
-
-            // Check for dependency cycles
-            // (simplified - just report if found, don't enumerate all)
-            for (id, _) in state.iter_live() {
-                let mut visited = std::collections::HashSet::new();
-                let mut queue = std::collections::VecDeque::new();
-                queue.push_back(id.clone());
-
-                while let Some(current) = queue.pop_front() {
-                    if current == *id && !visited.is_empty() {
-                        errors.push(format!("dependency cycle involving {}", id.as_str()));
-                        break;
-                    }
-                    if !visited.insert(current.clone()) {
-                        continue;
-                    }
-                    for key in state.deps_from(&current) {
-                        queue.push_back(key.to().clone());
-                    }
-                }
-            }
+            let errors =
+                validation_warnings_for_namespace(ctx.read.namespace(), ctx.state, ctx.store_state);
 
             Ok(ResponsePayload::query(QueryResult::Validation {
                 warnings: errors,
@@ -1095,7 +1107,7 @@ impl Daemon {
         // `dep_cycles` is diagnostic/structural and should remain queryable even
         // when min-seen watermarks are not yet satisfied.
         self.with_read_ctx_response_without_gate(repo, read, git_tx, false, |ctx| {
-            let cycles = dep_cycles_from_state(ctx.state);
+            let cycles = dep_cycles_from_store_state(ctx.store_state);
             Ok(ResponsePayload::query(QueryResult::DepCycles(cycles)))
         })
     }
@@ -1105,15 +1117,16 @@ impl Daemon {
 mod tests {
     use super::{
         Issue, IssueSummary, blocked_for_namespace, dep_tree_for_store, deps_for_store,
-        ready_for_namespace, show_details_for_store,
+        ready_for_namespace, show_details_for_store, validation_warnings_for_namespace,
     };
     use super::{
-        compute_blocked_by, compute_blocked_by_store, dep_cycles_from_state, sort_ready_issues,
+        compute_blocked_by, compute_blocked_by_store, dep_cycles_from_state,
+        dep_cycles_from_store_state, sort_ready_issues,
     };
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadRef, BeadType, CanonicalState, Claim,
-        Closure, DepKey, DepKind, Dot, Lww, NamespaceId, NamespacePolicy, Priority, ReplicaId,
-        Stamp, StoreState, Tombstone, Workflow, WorkflowStatus, WriteStamp,
+        Closure, DepKey, DepKind, DepStore, Dot, Lww, NamespaceId, NamespacePolicy, OrSet,
+        Priority, ReplicaId, Stamp, StoreState, Tombstone, Workflow, WorkflowStatus, WriteStamp,
     };
     use crate::runtime::ops::OpError;
     use std::collections::BTreeMap;
@@ -1281,6 +1294,33 @@ mod tests {
             .get_mut(owner_namespace)
             .expect("owner namespace")
             .apply_dep_add(dep_key, dot, stamp);
+    }
+
+    fn add_store_dep_unchecked(
+        store: &mut StoreState,
+        owner_namespace: &NamespaceId,
+        from_namespace: &NamespaceId,
+        from: &str,
+        to_namespace: &NamespaceId,
+        to: &str,
+        counter: u64,
+    ) {
+        let key = DepKey::new(
+            ref_in(from_namespace, from),
+            ref_in(to_namespace, to),
+            DepKind::Blocks,
+        )
+        .expect("dep key");
+        let dot = Dot {
+            replica: ReplicaId::new(Uuid::from_u128(counter as u128 + 1)),
+            counter,
+        };
+        let actor = ActorId::new("tester").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(20_000 + counter, 0), actor);
+        let state = store.get_mut(owner_namespace).expect("owner namespace");
+        let mut set = OrSet::new();
+        set.apply_add(dot, key);
+        state.set_dep_store(DepStore::from_parts(set, Some(stamp)));
     }
 
     fn cross_namespace_store() -> (StoreState, NamespaceId, NamespaceId, NamespaceId) {
@@ -1572,6 +1612,16 @@ mod tests {
     }
 
     #[test]
+    fn validation_accepts_cross_namespace_dep_with_live_target() {
+        let (store, sessions, _, _) = cross_namespace_store();
+        let session_state = store.get(&sessions).expect("sessions state");
+
+        let warnings = validation_warnings_for_namespace(&sessions, session_state, &store);
+
+        assert!(warnings.is_empty(), "{warnings:?}");
+    }
+
+    #[test]
     fn show_details_for_store_preserves_deleted_lookup_error() {
         let actor = ActorId::new("tester").unwrap();
         let stamp = Stamp::new(WriteStamp::new(4_500, 0), actor);
@@ -1602,6 +1652,37 @@ mod tests {
         assert_eq!(edges[0].to_namespace, "core");
         assert_eq!(edges[1].from_namespace, "core");
         assert_eq!(edges[1].to_namespace, "extmsg");
+    }
+
+    #[test]
+    fn epic_status_counts_cross_namespace_parent_children() {
+        let (mut store, sessions, core, _) = cross_namespace_store();
+        let actor = ActorId::new("tester").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(5_000, 0), actor);
+        store
+            .core_mut()
+            .get_mut(&BeadId::parse("bd-core").unwrap())
+            .expect("core bead")
+            .fields
+            .bead_type = Lww::new(BeadType::Epic, stamp.clone());
+        close_bead(&mut store, &sessions, "bd-session", stamp);
+        add_store_dep_kind(
+            &mut store,
+            &sessions,
+            &sessions,
+            "bd-session",
+            &core,
+            "bd-core",
+            DepKind::Parent,
+            9,
+        );
+
+        let statuses = super::helpers::compute_epic_statuses(&core, store.core(), &store, false);
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].total_children, 1);
+        assert_eq!(statuses[0].closed_children, 1);
+        assert!(statuses[0].eligible_for_close);
     }
 
     #[test]
@@ -1647,5 +1728,27 @@ mod tests {
             cycles.cycles,
             vec![vec![a.to_string(), b.to_string(), a.to_string()]]
         );
+    }
+
+    #[test]
+    fn dep_cycles_from_store_state_reports_cross_namespace_cycle() {
+        let (mut store, sessions, core, _) = cross_namespace_store();
+        add_store_dep_unchecked(
+            &mut store,
+            &core,
+            &core,
+            "bd-core",
+            &sessions,
+            "bd-session",
+            10,
+        );
+
+        let cycles = dep_cycles_from_store_state(&store);
+
+        assert_eq!(cycles.cycles.len(), 1);
+        let cycle = &cycles.cycles[0];
+        assert_eq!(cycle.first(), cycle.last());
+        assert!(cycle.iter().any(|entry| entry == "core/bd-core"));
+        assert!(cycle.iter().any(|entry| entry == "sessions/bd-session"));
     }
 }

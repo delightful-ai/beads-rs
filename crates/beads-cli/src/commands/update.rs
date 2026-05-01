@@ -7,7 +7,7 @@ use crate::parsers::{parse_bead_type, parse_priority};
 use crate::render::print_line;
 use crate::runtime::{CliRuntimeCtx, send};
 use crate::validation::{
-    normalize_bead_id, normalize_bead_id_for, normalize_dep_specs, validation_error,
+    normalize_bead_id, normalize_bead_ref_for, normalize_dep_specs_for, validation_error,
 };
 use beads_api::QueryResult;
 use beads_core::{BeadType, DepKind, Priority, WorkflowStatus};
@@ -141,7 +141,13 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
         {
             Some(None)
         } else {
-            Some(Some(normalize_bead_id_for("parent", v)?))
+            let parent_ref = normalize_bead_ref_for("parent", v, &ctx.active_namespace())?;
+            let parent = if parent_ref.namespace() == &ctx.active_namespace() {
+                parent_ref.id().as_str().to_string()
+            } else {
+                parent_ref.to_string()
+            };
+            Some(Some(parent))
         }
     } else {
         None
@@ -298,21 +304,26 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
 
     // Add dependencies
     if !args.deps.is_empty() {
-        let dep_specs = normalize_dep_specs(args.deps)?;
+        let dep_specs = normalize_dep_specs_for(args.deps, &ctx.active_namespace())?;
         for spec in dep_specs {
             let (kind, to_raw) = if let Some((k, i)) = spec.split_once(':') {
                 (DepKind::parse(k).unwrap_or(DepKind::Blocks), i)
             } else {
                 (DepKind::Blocks, spec.as_str())
             };
-            let to = normalize_bead_id_for("deps", to_raw)?;
+            let to = normalize_bead_ref_for("deps", to_raw, &ctx.active_namespace())?;
+            let to_namespace = if to.namespace() == &ctx.active_namespace() {
+                None
+            } else {
+                Some(to.namespace().clone())
+            };
             let _ = send(&Request::AddDep {
                 ctx: ctx.mutation_ctx(),
                 payload: DepPayload {
                     from_namespace: None,
                     from: id.clone(),
-                    to_namespace: None,
-                    to,
+                    to_namespace,
+                    to: to.id().clone(),
                     kind,
                 },
             })?;

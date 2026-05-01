@@ -643,7 +643,7 @@ fn create_issue_with_durability(
                 ok: ResponsePayload::Op(op),
             } => {
                 let issue_id = match op.result {
-                    OpResult::Created { id } => id,
+                    OpResult::Created { id } => id.id().clone(),
                     other => panic!("unexpected op result: {other:?}"),
                 };
                 Ok((issue_id, op.receipt))
