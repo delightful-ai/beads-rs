@@ -1,5 +1,6 @@
 use beads_core::{
-    BeadId, BeadSlug, ClientRequestId, DepSpec, NamespaceId, ValidatedBeadId, ValidatedNamespaceId,
+    BeadId, BeadRef, BeadSlug, ClientRequestId, DepSpec, NamespaceId, ValidatedBeadId,
+    ValidatedNamespaceId,
 };
 
 pub type Result<T> = std::result::Result<T, ValidationError>;
@@ -29,6 +30,32 @@ pub fn normalize_bead_id_for(field: &str, id: &str) -> Result<BeadId> {
 
 pub fn normalize_bead_ids(ids: Vec<String>) -> Result<Vec<BeadId>> {
     ids.into_iter().map(|id| normalize_bead_id(&id)).collect()
+}
+
+pub fn normalize_bead_ref_for(
+    field: &str,
+    raw: &str,
+    default_namespace: &NamespaceId,
+) -> Result<BeadRef> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Err(validation_error(field, "bead ref cannot be empty"));
+    }
+    let (namespace, id) = match raw.split_once('/') {
+        Some((namespace_raw, id_raw)) => {
+            let namespace = ValidatedNamespaceId::parse(namespace_raw.trim())
+                .map_err(|err| validation_error(format!("{field}.namespace"), err.to_string()))?;
+            let id = ValidatedBeadId::parse(id_raw.trim())
+                .map_err(|err| validation_error(format!("{field}.id"), err.to_string()))?;
+            (namespace.into(), id.into())
+        }
+        None => {
+            let id = ValidatedBeadId::parse(raw)
+                .map_err(|err| validation_error(field, err.to_string()))?;
+            (default_namespace.clone(), id.into())
+        }
+    };
+    Ok(BeadRef::new(namespace, id))
 }
 
 pub fn normalize_bead_slug_for(field: &str, slug: &str) -> Result<BeadSlug> {
@@ -122,6 +149,36 @@ mod tests {
             ValidationError::Field { field, .. } => {
                 assert_eq!(field, "id");
             }
+        }
+    }
+
+    #[test]
+    fn normalize_bead_ref_defaults_namespace() {
+        let sessions = NamespaceId::parse("sessions").unwrap();
+        let bead_ref = normalize_bead_ref_for("id", "beads-rs-1", &sessions).unwrap();
+        assert_eq!(bead_ref.namespace(), &sessions);
+        assert_eq!(bead_ref.id().as_str(), "beads-rs-1");
+    }
+
+    #[test]
+    fn normalize_bead_ref_accepts_namespace_prefix() {
+        let sessions = NamespaceId::parse("sessions").unwrap();
+        let bead_ref = normalize_bead_ref_for("id", "core/beads-rs-1", &sessions).unwrap();
+        assert_eq!(bead_ref.namespace(), &NamespaceId::core());
+        assert_eq!(bead_ref.id().as_str(), "beads-rs-1");
+    }
+
+    #[test]
+    fn normalize_bead_ref_distinguishes_bad_namespace_and_bad_id() {
+        let default_namespace = NamespaceId::core();
+        let err = normalize_bead_ref_for("id", "1bad/beads-rs-1", &default_namespace).unwrap_err();
+        match err {
+            ValidationError::Field { field, .. } => assert_eq!(field, "id.namespace"),
+        }
+
+        let err = normalize_bead_ref_for("id", "core/not", &default_namespace).unwrap_err();
+        match err {
+            ValidationError::Field { field, .. } => assert_eq!(field, "id.id"),
         }
     }
 

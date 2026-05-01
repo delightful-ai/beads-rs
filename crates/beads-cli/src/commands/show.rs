@@ -4,9 +4,9 @@ use super::common::{fmt_issue_ref, fmt_labels, fmt_wall_ms};
 use super::{CommandError, CommandResult};
 use crate::render::{print_json, print_line};
 use crate::runtime::{CliRuntimeCtx, send};
-use crate::validation::{normalize_bead_id, validation_error};
+use crate::validation::{normalize_bead_id, normalize_bead_ref_for, validation_error};
 use beads_api::{Issue, IssueSummary, Note, QueryResult, ShowDetails};
-use beads_core::{BeadId, BeadType, NamespaceId, WorkflowStatus};
+use beads_core::{BeadId, BeadRef, BeadType, NamespaceId, WorkflowStatus};
 use beads_surface::ipc::{IdPayload, ListPayload, Request, ResponsePayload};
 use beads_surface::{Filters, SortField};
 use std::collections::{BTreeSet, HashMap};
@@ -85,10 +85,13 @@ pub fn handle(ctx: &CliRuntimeCtx, args: ShowArgs) -> CommandResult<()> {
     Ok(())
 }
 
-fn fetch_show_details(ctx: &CliRuntimeCtx, id: &BeadId) -> CommandResult<ShowDetails> {
+fn fetch_show_details(ctx: &CliRuntimeCtx, bead_ref: &BeadRef) -> CommandResult<ShowDetails> {
+    let read_ctx = ctx.with_namespace(bead_ref.namespace().clone());
     let req = Request::ShowDetails {
-        ctx: ctx.read_ctx(),
-        payload: IdPayload { id: id.clone() },
+        ctx: read_ctx.read_ctx(),
+        payload: IdPayload {
+            id: bead_ref.id().clone(),
+        },
     };
     match send(&req)? {
         ResponsePayload::Query(QueryResult::ShowDetails(details)) => Ok(details),
@@ -106,20 +109,25 @@ fn fetch_show_details(ctx: &CliRuntimeCtx, id: &BeadId) -> CommandResult<ShowDet
     }
 }
 
-fn fetch_show_view(ctx: &CliRuntimeCtx, id: &BeadId) -> CommandResult<ShowView> {
+fn fetch_show_view(ctx: &CliRuntimeCtx, bead_ref: &BeadRef) -> CommandResult<ShowView> {
+    let read_ctx = ctx.with_namespace(bead_ref.namespace().clone());
     let req = Request::ShowDetails {
-        ctx: ctx.read_ctx(),
-        payload: IdPayload { id: id.clone() },
+        ctx: read_ctx.read_ctx(),
+        payload: IdPayload {
+            id: bead_ref.id().clone(),
+        },
     };
     match send(&req)? {
         ResponsePayload::Query(QueryResult::ShowDetails(details)) => build_show_view(
-            ctx,
+            &read_ctx,
             details.issue,
             details.incoming,
             details.outgoing,
             details.summaries,
         ),
-        ResponsePayload::Query(QueryResult::Issue(view)) => fetch_show_view_legacy(ctx, id, view),
+        ResponsePayload::Query(QueryResult::Issue(view)) => {
+            fetch_show_view_legacy(&read_ctx, bead_ref.id(), view)
+        }
         other => Err(CommandError::Ipc(
             beads_surface::ipc::IpcError::DaemonUnavailable(format!(
                 "unexpected response for show details: {other:?}"
@@ -226,7 +234,7 @@ fn resolve_show_ids(
     positional: Vec<String>,
     id_flag: Vec<String>,
     current: bool,
-) -> CommandResult<Vec<BeadId>> {
+) -> CommandResult<Vec<BeadRef>> {
     if current && (!positional.is_empty() || !id_flag.is_empty()) {
         return Err(validation_error(
             "current",
@@ -236,7 +244,10 @@ fn resolve_show_ids(
     }
 
     if current {
-        return Ok(vec![resolve_current_issue_id(ctx)?]);
+        return Ok(vec![BeadRef::new(
+            ctx.active_namespace(),
+            resolve_current_issue_id(ctx)?,
+        )]);
     }
 
     let raw_ids = positional.into_iter().chain(id_flag).collect::<Vec<_>>();
@@ -248,9 +259,10 @@ fn resolve_show_ids(
         .into());
     }
 
+    let default_namespace = ctx.active_namespace();
     raw_ids
         .into_iter()
-        .map(|raw| normalize_bead_id(&raw).map_err(Into::into))
+        .map(|raw| normalize_bead_ref_for("id", &raw, &default_namespace).map_err(Into::into))
         .collect()
 }
 
@@ -856,8 +868,31 @@ mod tests {
             false,
         )
         .expect("show ids");
-        assert_eq!(ids[0].as_str(), "beads-rs-k8u3");
-        assert_eq!(ids[1].as_str(), "beads-rs-k8u3.5");
+        assert_eq!(ids[0].namespace(), &NamespaceId::core());
+        assert_eq!(ids[0].id().as_str(), "beads-rs-k8u3");
+        assert_eq!(ids[1].id().as_str(), "beads-rs-k8u3.5");
+    }
+
+    #[test]
+    fn resolve_show_ids_accepts_namespace_qualified_id() {
+        let ids = resolve_show_ids(
+            &CliRuntimeCtx {
+                repo: std::path::PathBuf::from("/tmp/beads"),
+                json: false,
+                namespace: None,
+                durability: None,
+                client_request_id: None,
+                require_min_seen: None,
+                wait_timeout_ms: None,
+                actor_id: None,
+            },
+            vec!["sessions/beads-rs-k8u3".to_string()],
+            Vec::new(),
+            false,
+        )
+        .expect("show ids");
+        assert_eq!(ids[0].namespace().as_str(), "sessions");
+        assert_eq!(ids[0].id().as_str(), "beads-rs-k8u3");
     }
 
     #[test]
