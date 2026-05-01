@@ -1,6 +1,6 @@
 # Namespaces as containers for session, external-messaging, and wisp state
 
-**Status:** research + design; no code changes.
+**Status:** current design + implementation plan; namespace partitioning exists, namespace graph semantics are tracked by `beads-rs-12u7.2.7`.
 **Audience:** implementers deciding whether to ship `sessions`, `external-messaging`, and `wisps` as first-class non-core namespaces.
 
 This file answers three questions:
@@ -50,6 +50,29 @@ CRDT merge is per-namespace: `StoreState::join` in `namespaced_state.rs:14-33` t
 
 **Verdict:** cross-namespace dep/parent references are a design gap. They are not prohibited; they are not modeled; they appear to work until you try to traverse. See §3 for the implications.
 
+**Chosen fix:** make namespace part of bead identity at every graph boundary. The implementation target is a core reference type shaped like:
+
+```rust
+pub struct BeadRef {
+    pub namespace: NamespaceId,
+    pub id: BeadId,
+}
+```
+
+and a dependency key shaped like:
+
+```rust
+pub struct DepKey {
+    pub from: BeadRef,
+    pub to: BeadRef,
+    pub kind: DepKind,
+}
+```
+
+Bare bead IDs remain legal at CLI/API boundaries only when the caller supplies an active namespace. The default active namespace is `core`. A same textual `BeadId` in `core` and `sessions` is two distinct refs, not one global object.
+
+This is a hard cutover. Do not add a nameless-dep compatibility shim; update the wire/snapshot/event encodings and their tests in the same change.
+
 ### 1.5 Current sync model
 
 One git ref per **checkpoint group**, not per namespace:
@@ -83,6 +106,8 @@ This is the largest gap between the spec and the code. The wisps story the user 
 
 The CLI exposes a global `--namespace` flag (`crates/beads-cli/src/cli.rs:50-52`) with config fallback via `DefaultsConfig.namespace` (`crates/beads-rs/src/cli/mod.rs:218-240`). No command today takes a namespace *argument*; all commands implicitly use the global flag.
 
+Target CLI rule: default `bd` usage means `core`. Inputs may use namespace-qualified refs (`sessions/<id>`, `extmsg/<id>`, `core/<id>`) where a command accepts bead refs; bare IDs resolve in the active namespace. Rendering should not overload model/operator context: JSON remains explicit about namespaces, while all-core human output may omit the `core/` prefix and mixed/non-core output must show qualified refs.
+
 ### 1.8 Existing multi-namespace coverage
 
 The unit layer has solid coverage: `namespace.rs` tests (lines 329-428), `namespace_policies.rs` tests (lines 49-157), `namespaced_state.rs` tests (lines 104-139), `canonical_cbor` tests over events carrying non-core namespaces.
@@ -95,8 +120,8 @@ End-to-end coverage is thin. Searches for `NamespaceId::parse("wf"` / `"sys"` / 
 | --- | --- |
 | `NamespaceId` parse + validation | Solid. Tests cover happy and sad paths. |
 | Per-namespace `CanonicalState` partitioning | Solid. `StoreState::join` merges per-namespace. |
-| `Bead` / `DepKey` carry namespace | **No.** Namespace lives on the *event* and the *state partition*. |
-| Cross-namespace dep/parent refs | Not modeled. Silently allowed, silently orphaned on traversal. |
+| `Bead` / `DepKey` carry namespace | **No today.** Target is explicit `BeadRef { namespace, id }` endpoints in `DepKey`. |
+| Cross-namespace dep/parent refs | Not modeled today. Target is first-class namespaced endpoint refs plus StoreState-aware traversal. |
 | Git sync per-namespace | Via checkpoint groups. Multi-group is implemented; default config uses a single group with just `core`. |
 | WAL per-namespace | Yes; per-(namespace, origin, seq). |
 | Replication: per-peer namespace ACL | `allowed_namespaces` on roster entries. |
@@ -196,9 +221,9 @@ Three namespaces beyond `core` means:
 - **Zero new WAL structure.** WAL is already per-(namespace, origin, seq) and `list_namespaces` already enumerates.
 - **Zero or one new git refs.** The decision is whether to put `sessions`, `extmsg`, `wisps` in the existing `core` checkpoint group (one ref) or split into separate groups (more refs). Default is probably one group per retention/replication class: `{core, extmsg}` together; `{sessions, wisps}` each on their own ref, because neither should follow the code repo's `main` branch lifecycle.
 - **One new enforcement path: retention GC.** This is the load-bearing gap. Without it, `wisps` is ambitious marketing. Estimate: medium-sized feature. Needs a daemon-side sweeper that walks `StoreState` per namespace, reads `RetentionPolicy`, applies `TtlBasis` against `CanonicalState` per-bead stamps, emits tombstone events. Not complicated; not implemented.
-- **One new enforcement path: cross-namespace refs.** Either (a) extend `DepKey` to carry both namespaces and migrate existing WAL/checkpoint/state; or (b) add a new `CrossNamespaceRef` edge table stored in whichever namespace owns the edge; or (c) decide cross-namespace refs are always by **opaque BeadId only** and accept that traversal from `sessions` to `core` requires the caller to state the target namespace explicitly.
-  - Option (c) is the cheapest and the one most consistent with the current code. It's also the most hostile to users who expect `bd show sessions/session-foo` to follow the edge to `core/bd-1234` without hand-holding. Recommend option (c) for the first cut, with CLI affordances that prompt for the target namespace, and revisit later if traversal pressure grows.
-- **One new UX path: namespace-qualified bead refs.** The CLI already renders non-core namespaces with a `ns/` prefix in `fmt_show_issue_ref` (`crates/beads-cli/src/commands/show.rs:600-605`). What it does not do is *accept* a `ns/id` form on the input side — all ID lookup today assumes the namespace from `--namespace` or config default. Minor UX work.
+- **One new enforcement path: cross-namespace refs.** Extend `DepKey` to carry namespaced `from` and `to` endpoints via the canonical `BeadRef` type. The graph/query code that needs to traverse deps moves to `StoreState`-aware helpers; namespace-local `CanonicalState` stays the owner for one namespace's bead data.
+- **One new UX path: namespace-qualified bead refs.** The CLI already renders non-core namespaces with a `ns/` prefix in `fmt_show_issue_ref` (`crates/beads-cli/src/commands/show.rs:600-605`). It must also accept `ns/id` form on the input side. Bare IDs keep using the active namespace, and the active namespace defaults to `core`.
+- **One rendering discipline:** namespace correctness must not make default model context noisy. JSON and mixed/non-core results are explicit; all-core human output can stay compact.
 
 ### 3.2 Per-namespace CRDT state tree
 
@@ -268,14 +293,13 @@ Reasoning:
 
 ### 4.3 Concrete next steps
 
-1. **File a bead: enforce `persist_to_git`.** Checkpoint-group assembly filters out namespaces whose policy has `persist_to_git = false` from any group whose `durable_copy_via_git = true`. Add an integration test that creates a bead in `tmp`, verifies it is absent from `refs/beads/{store_id}/core`.
-2. **File a bead: enforce `ready_eligible` in ready queries.** `compute_ready` reads the active namespace's policy and short-circuits if `ready_eligible = false`. Add a test that creates a Session-like bead in a `ready_eligible=false` namespace, verifies `bd ready` excludes it.
-3. **File a bead: decide cross-namespace ref model.** Option (c) — opaque `BeadId`-only refs with explicit target-namespace resolution in the CLI — is the low-cost path. Write the ADR; update `DepKey` docstring to reflect that `to: BeadId` is always a same-namespace target; add a `bd show ns/id` form that qualifies the target explicitly for readers.
-4. **File a bead: add `sessions` namespace as the first real non-core namespace.** Seed it in `default_namespace_policies()`; add smoke tests for create-in-sessions, list-in-sessions, replicate-in-sessions-none.
-5. **File a bead: extmsg namespace.** Decide 1-namespace vs 2-namespace (`extmsg` + `extmsg_delivery`). Prefer 1 unless delivery retention pressure is observed.
-6. **File an epic: GC sweeper + wisps.** Design the sweeper. Decide one-namespace-per-retention-class vs one-wisps-namespace-with-richer-policy. Implement `RetentionPolicy::Ttl` enforcement, `TtlBasis::LastMutationStamp` evaluation, `GcAuthority::CheckpointWriter` single-writer guard, tombstone emission. Then introduce wisp namespaces.
+1. **`beads-rs-12u7.2.7.1`: behavior spec cleanup.** Keep this document and the decision log aligned with the hard-cutover `BeadRef` model, default-core UX, compact rendering, and current enforcement gaps.
+2. **`beads-rs-12u7.2.7.2` through `.5`: core graph identity.** Add the canonical namespaced bead ref, make `DepKey` use namespaced endpoints, update wire/snapshot encodings, and add `StoreState` graph helpers.
+3. **`beads-rs-12u7.2.7.6` through `.11`: runtime and user surfaces.** Wire dep mutations, daemon show/deps/tree/ready traversal, CLI `ns/id` parsing, API JSON endpoint namespaces, and compact default rendering.
+4. **`beads-rs-12u7.2.7.12` through `.14`: policy and sync guardrails.** Enforce `persist_to_git` at checkpoint-group assembly, add non-core replication/checkpoint E2E coverage, and keep wisps unavailable until retention GC exists.
+5. **`beads-rs-12u7.2.7.15`: product smoke.** Prove the future `core -> sessions -> extmsg` reference chain with robust tests before calling namespace behavior ready for Gas City.
 
-Until step 6 lands, `wisps` should not exist as a reserved name.
+Until retention GC lands, `wisps` should not exist as a reserved name.
 
 ---
 

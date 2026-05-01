@@ -106,10 +106,12 @@ A bead's `BeadType` is still whatever fits the underlying work (`Task`, `Event`,
 
 ## CLI
 
-- `bd create --ephemeral [--retention-class <class>]` sets `Ephemerality::Ephemeral(class)` and routes to `wisps`.
+- Future `bd create --ephemeral [--retention-class <class>]` sets `Ephemerality::Ephemeral(class)` and routes to `wisps`.
   - `--retention-class` defaults to `heartbeat` if omitted when `--ephemeral` is set.
 - `bd list` filters by namespace via existing `--namespace` flag. `bd list --namespace=wisps` shows ephemeral beads.
 - `bd purge` (see [`../cmds/gascity/03-purge.md`](../cmds/gascity/03-purge.md)) may be the manual force-sweep; the automatic sweeper runs on a schedule.
+
+Until the retention sweeper exists, the ephemeral create path must stay unavailable or explicitly error. A namespace placement alone does not delete anything, and accepting `--ephemeral` before GC enforcement would make the UI promise stronger behavior than the store provides.
 
 ## Cross-references
 

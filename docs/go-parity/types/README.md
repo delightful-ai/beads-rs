@@ -72,7 +72,7 @@ Per D3, these are durable coordination state, not runtime-adjacent — they stay
 
 ## Namespace: `sessions`
 
-Session-lifecycle state. Runtime-adjacent; the process itself lives in gascity's provider (tmux/k8s/subprocess), these beads hold identity and durable checkpoints. Needs [`../primitives/namespaces.md`](../primitives/namespaces.md) **cross-namespace DepKey fix** before beads here can reference `core` workflow beads.
+Session-lifecycle state. Runtime-adjacent; the process itself lives in gascity's provider (tmux/k8s/subprocess), these beads hold identity and durable checkpoints. Needs [`../primitives/namespaces.md`](../primitives/namespaces.md) **namespace-qualified BeadRef / DepKey fix** before beads here can reference `core` workflow beads.
 
 Spec lives in [`../primitives/metadata-remapping.md`](../primitives/metadata-remapping.md) §A.8. Promote to individual `types/*.md` files when the sessions namespace ships.
 
@@ -85,7 +85,7 @@ Spec lives in [`../primitives/metadata-remapping.md`](../primitives/metadata-rem
 
 ## Namespace: `extmsg`
 
-External-messaging bookkeeping. Bindings and deliveries need durability + cross-clone sync but are semantically distinct from the workflow graph — they're the agent-to-bead registry. Needs the cross-namespace DepKey fix.
+External-messaging bookkeeping. Bindings and deliveries need durability + cross-clone sync but are semantically distinct from the workflow graph — they're the agent-to-bead registry. Needs the namespace-qualified BeadRef / DepKey fix.
 
 Spec lives in [`../primitives/metadata-remapping.md`](../primitives/metadata-remapping.md) §A.11.
 
@@ -94,7 +94,7 @@ Spec lives in [`../primitives/metadata-remapping.md`](../primitives/metadata-rem
 
 ## Namespace: `wisps`
 
-Ephemeral/GC-eligible beads. Retention is a namespace-level policy driven by each bead's `RetentionClass`. **Ships after the GC sweeper lands** — see [`../DECISION_LOG.md`](../DECISION_LOG.md) Floor 4.
+Ephemeral/GC-eligible beads. Retention is a namespace-level policy driven by each bead's `RetentionClass`. **Ships after the GC sweeper lands** — see [`../DECISION_LOG.md`](../DECISION_LOG.md) Floor 4. Until then, no `bd create --ephemeral` path should claim wisp deletion semantics.
 
 - [`wisp`](wisp.md) — NOT a type variant; `Ephemerality` field + `wisps` namespace placement. See the file for the decision record.
 

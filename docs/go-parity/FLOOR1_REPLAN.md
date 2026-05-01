@@ -125,7 +125,7 @@ Audit note: vendor Go beads currently has `DependencyType.AffectsReadyWork()` re
    Type session lifecycle projection, wake/create/drain/sleep/archive/quarantine transitions, claim/lease fields, counters, and alias/name reservation.
 
 10. Namespaces.
-   Keep cross-namespace `DepKey` in scope for sessions/extmsg, but do not block basic typed bead acceptance on full namespace policy enforcement.
+   Keep namespace graph semantics in scope for sessions/extmsg, but do not block basic typed bead acceptance on full namespace policy enforcement. The current namespace execution split lives under `beads-rs-12u7.2.7`: canonical `BeadRef { namespace, id }`, namespaced `DepKey` endpoints, StoreState-aware graph traversal, CLI `ns/id` refs, compact default-core rendering, and the first policy/sync guardrails.
 
 11. Reusable CRDT helper extraction.
    Factor `Max`, append log, claim/lease, OR-set, or resettable counter helpers from the typed field work once each owner and proof family is explicit.

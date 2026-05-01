@@ -81,7 +81,9 @@ Things that don't need a home — they're derivable:
 
 `Bead` doesn't carry a namespace field (it's on the event); `DepKey` doesn't either. Cross-namespace deps are silently allowed but graph traversal in one namespace can't see beads in another. This is the **real blocker** for sessions + extmsg namespaces, not the policy-enforcement gaps.
 
-Proposed fix (not yet specced): add `namespace: NamespaceId` to `DepKey`, propagate through `CanonicalState` traversal APIs. Probably a small change, but it's structural and load-bearing. Needs design work before any variant goes into a non-`core` namespace.
+Chosen fix: introduce a canonical namespaced bead reference (`BeadRef { namespace, id }`) and make `DepKey` carry namespaced `from` and `to` endpoints. Bare IDs remain boundary syntax only and resolve in the active namespace, which defaults to `core`. Graph traversal that can cross namespaces must operate on `StoreState`, not a single namespace-local `CanonicalState`.
+
+Default/operator UX constraint: this must not flood normal model context with redundant namespace text. JSON and mixed/non-core outputs stay explicit; all-core human output can stay compact.
 
 ### OQ2. Namespace policy enforcement is ~90% skeleton
 
@@ -132,9 +134,9 @@ Floor 1 (foundations; refined by FLOOR1_REPLAN.md):
     work: implement Max<T>, AppendLog<T>, Cas<T>, Counter as the merge laws required by concrete fields such as convergence iteration, control_epoch, attempt logs, pending_create_claim, and resettable session counters
     note: OrSet<T> exists; verify it fits the new callers
 
-  Cross-namespace DepKey fix (OQ1)
+  Cross-namespace BeadRef / DepKey fix (OQ1)
     prereq for: sessions namespace, extmsg namespace
-    work: add namespace to DepKey; propagate through CanonicalState traversal
+    work: add namespace-qualified bead refs; make DepKey endpoints namespaced; propagate through StoreState-aware graph traversal, wire encodings, CLI refs, API JSON, and compact rendering tests
 
   Namespace policy enforcement (OQ2)
     prereq for: wisps namespace (needs retention), sessions namespace (maybe needs visibility)
@@ -165,7 +167,7 @@ Floor 2 (depends on Floor 1):
     prereq: core variants (needs to create all the types)
     work: parse JSON plan file, atomic batch create + dep wiring
 
-Floor 3 (depends on Floor 2 + cross-ns DepKey fix):
+Floor 3 (depends on Floor 2 + cross-namespace graph fix):
 
   Sessions namespace
     prereq: cross-namespace DepKey (Floor 1) + Session/Wait/Nudge/TranscriptEntry variants (Floor 2)
