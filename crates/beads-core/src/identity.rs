@@ -751,6 +751,57 @@ impl From<BeadId> for String {
     }
 }
 
+/// Namespace-qualified bead identifier.
+///
+/// `BeadId` is only unique inside a namespace. Use this type at graph and API
+/// boundaries that need to identify a bead without relying on ambient context.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct BeadRef {
+    pub namespace: NamespaceId,
+    pub id: BeadId,
+}
+
+impl BeadRef {
+    pub fn new(namespace: NamespaceId, id: BeadId) -> Self {
+        Self { namespace, id }
+    }
+
+    pub fn parse(raw: &str, default_namespace: &NamespaceId) -> Result<Self, CoreError> {
+        let raw = raw.trim();
+        let (namespace, id) = match raw.split_once('/') {
+            Some((namespace, id)) => (NamespaceId::parse(namespace)?, BeadId::parse(id)?),
+            None => (default_namespace.clone(), BeadId::parse(raw)?),
+        };
+        Ok(Self { namespace, id })
+    }
+
+    pub fn namespace(&self) -> &NamespaceId {
+        &self.namespace
+    }
+
+    pub fn id(&self) -> &BeadId {
+        &self.id
+    }
+
+    pub fn into_parts(self) -> (NamespaceId, BeadId) {
+        (self.namespace, self.id)
+    }
+}
+
+impl fmt::Display for BeadRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.namespace, self.id)
+    }
+}
+
+impl ContentHashable for BeadRef {
+    fn hash_content(&self, hasher: &mut impl Digest) {
+        hasher.update(self.namespace.as_str().as_bytes());
+        hasher.update([0]);
+        self.id.hash_content(hasher);
+    }
+}
+
 /// Note identifier - unique within a bead.
 ///
 /// Daemon-generated, no specific format required.
@@ -1182,6 +1233,59 @@ mod tests {
     fn bead_id_slug_is_canonicalized() {
         let id = BeadId::parse("BeAds-Rs-abc1").unwrap();
         assert_eq!(id.as_str(), "beads-rs-abc1");
+    }
+
+    #[test]
+    fn bead_ref_parse_explicit_namespace() {
+        let default_namespace = NamespaceId::core();
+        let bead_ref = BeadRef::parse("sessions/bd-task", &default_namespace).unwrap();
+
+        assert_eq!(
+            bead_ref.namespace(),
+            &NamespaceId::parse("sessions").unwrap()
+        );
+        assert_eq!(bead_ref.id().as_str(), "bd-task");
+        assert_eq!(bead_ref.to_string(), "sessions/bd-task");
+
+        let core_ref =
+            BeadRef::parse("core/bd-task", &NamespaceId::parse("sessions").unwrap()).unwrap();
+        assert_eq!(core_ref.namespace(), &NamespaceId::core());
+        assert_eq!(core_ref.to_string(), "core/bd-task");
+    }
+
+    #[test]
+    fn bead_ref_parse_bare_uses_default_namespace() {
+        let sessions = NamespaceId::parse("sessions").unwrap();
+        let bead_ref = BeadRef::parse("bd-task", &sessions).unwrap();
+
+        assert_eq!(bead_ref.namespace(), &sessions);
+        assert_eq!(bead_ref.id().as_str(), "bd-task");
+        assert_eq!(bead_ref.to_string(), "sessions/bd-task");
+    }
+
+    #[test]
+    fn bead_ref_identity_includes_namespace() {
+        let id = BeadId::parse("bd-task").unwrap();
+        let core_ref = BeadRef::new(NamespaceId::core(), id.clone());
+        let sessions_ref = BeadRef::new(NamespaceId::parse("sessions").unwrap(), id);
+
+        assert_ne!(core_ref, sessions_ref);
+        assert_eq!(core_ref.id(), sessions_ref.id());
+        assert_ne!(core_ref.namespace(), sessions_ref.namespace());
+    }
+
+    #[test]
+    fn bead_ref_serde_roundtrips_as_structured_ref() {
+        let bead_ref = BeadRef::new(
+            NamespaceId::parse("sessions").unwrap(),
+            BeadId::parse("bd-task").unwrap(),
+        );
+
+        let json = serde_json::to_string(&bead_ref).unwrap();
+        assert_eq!(json, r#"{"namespace":"sessions","id":"bd-task"}"#);
+
+        let decoded: BeadRef = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, bead_ref);
     }
 
     #[test]
