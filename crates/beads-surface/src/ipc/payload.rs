@@ -92,7 +92,11 @@ pub struct DeletePayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_namespace: Option<NamespaceId>,
     pub from: BeadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_namespace: Option<NamespaceId>,
     pub to: BeadId,
     pub kind: DepKind,
 }

@@ -309,7 +309,9 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
             let _ = send(&Request::AddDep {
                 ctx: ctx.mutation_ctx(),
                 payload: DepPayload {
+                    from_namespace: None,
                     from: id.clone(),
+                    to_namespace: None,
                     to,
                     kind,
                 },

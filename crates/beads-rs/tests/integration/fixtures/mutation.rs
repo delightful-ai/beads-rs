@@ -145,7 +145,9 @@ pub fn add_dep_request(
     kind: DepKind,
 ) -> MutationPayload {
     MutationPayload::AddDep(DepPayload {
+        from_namespace: None,
         from: parse_bead_id(from),
+        to_namespace: None,
         to: parse_bead_id(to),
         kind,
     })
@@ -157,7 +159,9 @@ pub fn remove_dep_request(
     kind: DepKind,
 ) -> MutationPayload {
     MutationPayload::RemoveDep(DepPayload {
+        from_namespace: None,
         from: parse_bead_id(from),
+        to_namespace: None,
         to: parse_bead_id(to),
         kind,
     })

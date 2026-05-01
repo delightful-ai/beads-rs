@@ -74,7 +74,13 @@ pub fn handle(ctx: &CliRuntimeCtx, cmd: DepCmd) -> CommandResult<()> {
                 .map_err(|err| validation_error("dep", err.to_string()))?;
             let req = Request::AddDep {
                 ctx: ctx.mutation_ctx(),
-                payload: DepPayload { from, to, kind },
+                payload: DepPayload {
+                    from_namespace: None,
+                    from,
+                    to_namespace: None,
+                    to,
+                    kind,
+                },
             };
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
@@ -109,7 +115,13 @@ fn handle_dep_remove(ctx: &CliRuntimeCtx, args: DepRmArgs) -> CommandResult<()> 
     if explicit_kind {
         let req = Request::RemoveDep {
             ctx: ctx.mutation_ctx(),
-            payload: DepPayload { from, to, kind },
+            payload: DepPayload {
+                from_namespace: None,
+                from,
+                to_namespace: None,
+                to,
+                kind,
+            },
         };
         let ok = send(&req)?;
         return print_ok(&ok, ctx.json);
@@ -123,7 +135,9 @@ fn handle_dep_remove(ctx: &CliRuntimeCtx, args: DepRmArgs) -> CommandResult<()> 
         let req = Request::RemoveDep {
             ctx: ctx.mutation_ctx(),
             payload: DepPayload {
+                from_namespace: None,
                 from: from.clone(),
+                to_namespace: None,
                 to: to.clone(),
                 kind,
             },
@@ -136,7 +150,13 @@ fn handle_dep_remove(ctx: &CliRuntimeCtx, args: DepRmArgs) -> CommandResult<()> 
     } else {
         let req = Request::RemoveDep {
             ctx: ctx.mutation_ctx(),
-            payload: DepPayload { from, to, kind },
+            payload: DepPayload {
+                from_namespace: None,
+                from,
+                to_namespace: None,
+                to,
+                kind,
+            },
         };
         let ok = send(&req)?;
         print_ok(&ok, ctx.json)

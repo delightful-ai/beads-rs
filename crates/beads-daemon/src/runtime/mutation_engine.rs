@@ -7,15 +7,15 @@ use uuid::Uuid;
 use super::ops::{MapLiveError, OpError, ValidatedSurfaceBeadPatch};
 use crate::core::limits::LimitViolation;
 use crate::core::{
-    ActorId, BeadId, BeadPatchWireV1, BeadSlug, BeadType, BranchName, CanonicalState,
+    ActorId, BeadId, BeadPatchWireV1, BeadRef, BeadSlug, BeadType, BranchName, CanonicalState,
     ClientRequestId, DepAddKey, DepKey, DepKind, DepSpec, DepSpecSet, Dot, EventBody, EventBytes,
-    EventKindV1, HlcMax, Label, Labels, Limits, NamespaceId, NoteAppendV1, NoteId, ParentEdge,
-    Priority, ReplicaId, Seq1, Stamp, StoreIdentity, TraceId, TxnDeltaError, TxnDeltaV1, TxnId,
-    TxnOpV1, TxnV1, ValidatedBeadPatch, ValidatedEventBody, ValidatedEventKindV1,
-    ValidatedMutationCommand, ValidatedTxnV1, WallClock, WireDepAddV1, WireDepRemoveV1, WireDotV1,
-    WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireNoteV1, WireParentAddV1, WireParentRemoveV1,
-    WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus, encode_event_body_canonical,
-    sha256_bytes, to_canon_json_bytes,
+    EventKindV1, HlcMax, Label, Labels, Limits, NamespaceId, NamespacePolicy, NoteAppendV1, NoteId,
+    ParentEdge, Priority, ReplicaId, Seq1, Stamp, StoreIdentity, StoreState, TraceId,
+    TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, ValidatedBeadPatch, ValidatedEventBody,
+    ValidatedEventKindV1, ValidatedMutationCommand, ValidatedTxnV1, WallClock, WireDepAddV1,
+    WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireNoteV1,
+    WireParentAddV1, WireParentRemoveV1, WirePatch, WireStamp, WireTombstoneV1, WorkflowStatus,
+    encode_event_body_canonical, sha256_bytes, to_canon_json_bytes,
 };
 use crate::remote::RemoteUrl;
 use crate::runtime::ipc::{
@@ -183,12 +183,16 @@ pub enum ParsedMutationRequest {
         reason: Option<String>,
     },
     AddDep {
+        from_namespace: Option<NamespaceId>,
         from: BeadId,
+        to_namespace: Option<NamespaceId>,
         to: BeadId,
         kind: DepKind,
     },
     RemoveDep {
+        from_namespace: Option<NamespaceId>,
         from: BeadId,
+        to_namespace: Option<NamespaceId>,
         to: BeadId,
         kind: DepKind,
     },
@@ -297,25 +301,49 @@ impl ParsedMutationRequest {
     }
 
     pub fn parse_add_dep(payload: DepPayload) -> Result<Self, OpError> {
-        let DepPayload { from, to, kind } = payload;
+        let DepPayload {
+            from_namespace,
+            from,
+            to_namespace,
+            to,
+            kind,
+        } = payload;
         if kind == DepKind::Parent {
             return Err(OpError::ValidationFailed {
                 field: "dependency".into(),
                 reason: "parent edges must use set-parent".into(),
             });
         }
-        Ok(ParsedMutationRequest::AddDep { from, to, kind })
+        Ok(ParsedMutationRequest::AddDep {
+            from_namespace,
+            from,
+            to_namespace,
+            to,
+            kind,
+        })
     }
 
     pub fn parse_remove_dep(payload: DepPayload) -> Result<Self, OpError> {
-        let DepPayload { from, to, kind } = payload;
+        let DepPayload {
+            from_namespace,
+            from,
+            to_namespace,
+            to,
+            kind,
+        } = payload;
         if kind == DepKind::Parent {
             return Err(OpError::ValidationFailed {
                 field: "dependency".into(),
                 reason: "parent edges must use set-parent".into(),
             });
         }
-        Ok(ParsedMutationRequest::RemoveDep { from, to, kind })
+        Ok(ParsedMutationRequest::RemoveDep {
+            from_namespace,
+            from,
+            to_namespace,
+            to,
+            kind,
+        })
     }
 
     pub fn parse_add_note(payload: AddNotePayload) -> Result<Self, OpError> {
@@ -359,9 +387,55 @@ impl MutationEngine {
     }
 
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn plan(
         &self,
         state: &CanonicalState,
+        now_ms: u64,
+        stamped: StampedContext,
+        store: StoreIdentity,
+        id_ctx: Option<&IdContext>,
+        req: ParsedMutationRequest,
+        dot_alloc: &mut dyn DotAllocator,
+    ) -> Result<PlannedMutation, OpError> {
+        self.plan_inner(
+            state, None, None, now_ms, stamped, store, id_ctx, req, dot_alloc,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn plan_for_store(
+        &self,
+        store_state: &StoreState,
+        namespace_policies: &BTreeMap<NamespaceId, NamespacePolicy>,
+        now_ms: u64,
+        stamped: StampedContext,
+        store: StoreIdentity,
+        id_ctx: Option<&IdContext>,
+        req: ParsedMutationRequest,
+        dot_alloc: &mut dyn DotAllocator,
+    ) -> Result<PlannedMutation, OpError> {
+        let namespace = stamped.ctx.namespace.clone();
+        let state = store_state.get_or_default(&namespace);
+        self.plan_inner(
+            &state,
+            Some(store_state),
+            Some(namespace_policies),
+            now_ms,
+            stamped,
+            store,
+            id_ctx,
+            req,
+            dot_alloc,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plan_inner(
+        &self,
+        state: &CanonicalState,
+        store_state: Option<&StoreState>,
+        namespace_policies: Option<&BTreeMap<NamespaceId, NamespacePolicy>>,
         now_ms: u64,
         stamped: StampedContext,
         store: StoreIdentity,
@@ -437,19 +511,44 @@ impl MutationEngine {
             ParsedMutationRequest::Delete { id, reason } => {
                 self.plan_delete(state, &stamp, id, reason)?
             }
-            ParsedMutationRequest::AddDep { from, to, kind } => self.plan_add_dep(
+            ParsedMutationRequest::AddDep {
+                from_namespace,
+                from,
+                to_namespace,
+                to,
+                kind,
+            } => self.plan_add_dep(
                 state,
+                store_state,
+                namespace_policies,
                 &namespace,
                 &stamp,
+                from_namespace,
                 from,
+                to_namespace,
                 to,
                 kind,
                 dot_alloc,
                 &mut durability,
             )?,
-            ParsedMutationRequest::RemoveDep { from, to, kind } => {
-                self.plan_remove_dep(state, &namespace, &stamp, from, to, kind)?
-            }
+            ParsedMutationRequest::RemoveDep {
+                from_namespace,
+                from,
+                to_namespace,
+                to,
+                kind,
+            } => self.plan_remove_dep(
+                state,
+                store_state,
+                namespace_policies,
+                &namespace,
+                &stamp,
+                from_namespace,
+                from,
+                to_namespace,
+                to,
+                kind,
+            )?,
             ParsedMutationRequest::AddNote { id, content } => {
                 self.plan_add_note(state, &stamp, id, content)?
             }
@@ -640,18 +739,32 @@ impl MutationEngine {
                 id: id.clone(),
                 reason: reason.clone(),
             }),
-            ParsedMutationRequest::AddDep { from, to, kind } => Ok(CanonicalMutationOp::AddDep {
+            ParsedMutationRequest::AddDep {
+                from_namespace,
+                from,
+                to_namespace,
+                to,
+                kind,
+            } => Ok(CanonicalMutationOp::AddDep {
+                from_namespace: from_namespace.clone(),
                 from: from.clone(),
+                to_namespace: to_namespace.clone(),
                 to: to.clone(),
                 kind: *kind,
             }),
-            ParsedMutationRequest::RemoveDep { from, to, kind } => {
-                Ok(CanonicalMutationOp::RemoveDep {
-                    from: from.clone(),
-                    to: to.clone(),
-                    kind: *kind,
-                })
-            }
+            ParsedMutationRequest::RemoveDep {
+                from_namespace,
+                from,
+                to_namespace,
+                to,
+                kind,
+            } => Ok(CanonicalMutationOp::RemoveDep {
+                from_namespace: from_namespace.clone(),
+                from: from.clone(),
+                to_namespace: to_namespace.clone(),
+                to: to.clone(),
+                kind: *kind,
+            }),
             ParsedMutationRequest::AddNote { id, content } => {
                 enforce_note_limit(content, &self.limits)?;
                 Ok(CanonicalMutationOp::AddNote {
@@ -879,13 +992,12 @@ impl MutationEngine {
         }
 
         for spec in dependencies.iter() {
-            let key = Self::dep_add_key_into_inner(self.checked_dep_add_key(
-                state,
-                namespace,
-                id.clone(),
-                spec.id().clone(),
-                spec.kind(),
-            )?);
+            let key = DepKey::new_local(namespace, id.clone(), spec.id().clone(), spec.kind())
+                .map_err(|e| OpError::ValidationFailed {
+                    field: "dependency".into(),
+                    reason: e.to_string(),
+                })?;
+            let key = Self::dep_add_key_into_inner(self.checked_dep_add_key(state, None, key)?);
             delta
                 .insert(TxnOpV1::DepAdd(WireDepAddV1 {
                     key,
@@ -1105,29 +1217,24 @@ impl MutationEngine {
     fn checked_dep_add_key(
         &self,
         state: &CanonicalState,
-        namespace: &NamespaceId,
-        from: BeadId,
-        to: BeadId,
-        kind: DepKind,
+        store_state: Option<&StoreState>,
+        key: DepKey,
     ) -> Result<DepAddKey, OpError> {
-        if kind == DepKind::Parent {
+        if key.kind() == DepKind::Parent {
             return Err(OpError::ValidationFailed {
                 field: "dependency".into(),
                 reason: "parent edges must use set-parent".into(),
             });
         }
-        let key = DepKey::new_local(namespace, from, to, kind).map_err(|e| {
-            OpError::ValidationFailed {
-                field: "dependency".into(),
-                reason: e.to_string(),
-            }
-        })?;
-        state
-            .check_dep_add_key(key)
-            .map_err(|err| OpError::ValidationFailed {
-                field: "dependency".into(),
-                reason: err.to_string(),
-            })
+
+        match store_state {
+            Some(store_state) => store_state.check_dep_add_key(key),
+            None => state.check_dep_add_key(key),
+        }
+        .map_err(|err| OpError::ValidationFailed {
+            field: "dependency".into(),
+            reason: err.to_string(),
+        })
     }
 
     fn dep_add_key_into_inner(key: DepAddKey) -> DepKey {
@@ -1137,31 +1244,106 @@ impl MutationEngine {
         }
     }
 
+    fn dep_ref(
+        active_namespace: &NamespaceId,
+        endpoint_namespace: Option<NamespaceId>,
+        id: BeadId,
+    ) -> BeadRef {
+        BeadRef::new(
+            endpoint_namespace.unwrap_or_else(|| active_namespace.clone()),
+            id,
+        )
+    }
+
+    fn require_configured_dep_namespace(
+        namespace_policies: Option<&BTreeMap<NamespaceId, NamespacePolicy>>,
+        active_namespace: &NamespaceId,
+        bead_ref: &BeadRef,
+    ) -> Result<(), OpError> {
+        match namespace_policies {
+            Some(policies) if !policies.contains_key(bead_ref.namespace()) => {
+                Err(OpError::NamespaceUnknown {
+                    namespace: bead_ref.namespace().clone(),
+                })
+            }
+            None if bead_ref.namespace() != active_namespace => Err(OpError::NamespaceUnknown {
+                namespace: bead_ref.namespace().clone(),
+            }),
+            _ => Ok(()),
+        }
+    }
+
+    fn require_dep_owner_namespace(
+        active_namespace: &NamespaceId,
+        from_ref: &BeadRef,
+    ) -> Result<(), OpError> {
+        if from_ref.namespace() == active_namespace {
+            return Ok(());
+        }
+        Err(OpError::ValidationFailed {
+            field: "dependency".into(),
+            reason: format!(
+                "dependency source namespace {} must match mutation namespace {}",
+                from_ref.namespace(),
+                active_namespace
+            ),
+        })
+    }
+
+    fn require_live_dep_endpoint(
+        state: &CanonicalState,
+        store_state: Option<&StoreState>,
+        active_namespace: &NamespaceId,
+        bead_ref: &BeadRef,
+    ) -> Result<(), OpError> {
+        if let Some(store_state) = store_state {
+            if store_state.resolve_ref(bead_ref).is_none() {
+                return Err(OpError::NotFound(bead_ref.id().clone()));
+            }
+            return Ok(());
+        }
+
+        if bead_ref.namespace() != active_namespace {
+            return Err(OpError::NamespaceUnknown {
+                namespace: bead_ref.namespace().clone(),
+            });
+        }
+        if state.get_live(bead_ref.id()).is_none() {
+            return Err(OpError::NotFound(bead_ref.id().clone()));
+        }
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn plan_add_dep(
         &self,
         state: &CanonicalState,
+        store_state: Option<&StoreState>,
+        namespace_policies: Option<&BTreeMap<NamespaceId, NamespacePolicy>>,
         namespace: &NamespaceId,
         _stamp: &Stamp,
+        from_namespace: Option<NamespaceId>,
         from: BeadId,
+        to_namespace: Option<NamespaceId>,
         to: BeadId,
         kind: DepKind,
         dot_alloc: &mut dyn DotAllocator,
         durability: &mut PendingPlanningDurabilityEffects,
     ) -> Result<PlannedDelta, OpError> {
-        if state.get_live(&from).is_none() {
-            return Err(OpError::NotFound(from));
-        }
-        if state.get_live(&to).is_none() {
-            return Err(OpError::NotFound(to));
-        }
-        let key = Self::dep_add_key_into_inner(self.checked_dep_add_key(
-            state,
-            namespace,
-            from.clone(),
-            to.clone(),
-            kind,
-        )?);
+        let from_ref = Self::dep_ref(namespace, from_namespace.clone(), from.clone());
+        let to_ref = Self::dep_ref(namespace, to_namespace.clone(), to.clone());
+        Self::require_configured_dep_namespace(namespace_policies, namespace, &from_ref)?;
+        Self::require_configured_dep_namespace(namespace_policies, namespace, &to_ref)?;
+        Self::require_dep_owner_namespace(namespace, &from_ref)?;
+        Self::require_live_dep_endpoint(state, store_state, namespace, &from_ref)?;
+        Self::require_live_dep_endpoint(state, store_state, namespace, &to_ref)?;
+
+        let key = DepKey::new(from_ref, to_ref, kind).map_err(|e| OpError::ValidationFailed {
+            field: "dependency".into(),
+            reason: e.to_string(),
+        })?;
+        let key =
+            Self::dep_add_key_into_inner(self.checked_dep_add_key(state, store_state, key)?);
 
         let mut delta = TxnDeltaV1::new();
         delta
@@ -1171,17 +1353,28 @@ impl MutationEngine {
             }))
             .map_err(delta_error_to_op)?;
 
-        let canonical = CanonicalMutationOp::AddDep { from, to, kind };
+        let canonical = CanonicalMutationOp::AddDep {
+            from_namespace,
+            from,
+            to_namespace,
+            to,
+            kind,
+        };
 
         Ok(PlannedDelta { delta, canonical })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn plan_remove_dep(
         &self,
         state: &CanonicalState,
+        _store_state: Option<&StoreState>,
+        namespace_policies: Option<&BTreeMap<NamespaceId, NamespacePolicy>>,
         namespace: &NamespaceId,
         _stamp: &Stamp,
+        from_namespace: Option<NamespaceId>,
         from: BeadId,
+        to_namespace: Option<NamespaceId>,
         to: BeadId,
         kind: DepKind,
     ) -> Result<PlannedDelta, OpError> {
@@ -1191,11 +1384,14 @@ impl MutationEngine {
                 reason: "parent edges must use set-parent".into(),
             });
         }
-        let key = DepKey::new_local(namespace, from.clone(), to.clone(), kind).map_err(|e| {
-            OpError::ValidationFailed {
-                field: "dependency".into(),
-                reason: e.to_string(),
-            }
+        let from_ref = Self::dep_ref(namespace, from_namespace.clone(), from.clone());
+        let to_ref = Self::dep_ref(namespace, to_namespace.clone(), to.clone());
+        Self::require_configured_dep_namespace(namespace_policies, namespace, &from_ref)?;
+        Self::require_configured_dep_namespace(namespace_policies, namespace, &to_ref)?;
+        Self::require_dep_owner_namespace(namespace, &from_ref)?;
+        let key = DepKey::new(from_ref, to_ref, kind).map_err(|e| OpError::ValidationFailed {
+            field: "dependency".into(),
+            reason: e.to_string(),
         })?;
 
         let mut delta = TxnDeltaV1::new();
@@ -1206,7 +1402,13 @@ impl MutationEngine {
             }))
             .map_err(delta_error_to_op)?;
 
-        let canonical = CanonicalMutationOp::RemoveDep { from, to, kind };
+        let canonical = CanonicalMutationOp::RemoveDep {
+            from_namespace,
+            from,
+            to_namespace,
+            to,
+            kind,
+        };
 
         Ok(PlannedDelta { delta, canonical })
     }
@@ -1507,12 +1709,20 @@ enum CanonicalMutationOp {
         parent: Option<BeadId>,
     },
     AddDep {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from_namespace: Option<NamespaceId>,
         from: BeadId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        to_namespace: Option<NamespaceId>,
         to: BeadId,
         kind: DepKind,
     },
     RemoveDep {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from_namespace: Option<NamespaceId>,
         from: BeadId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        to_namespace: Option<NamespaceId>,
         to: BeadId,
         kind: DepKind,
     },
@@ -2102,6 +2312,21 @@ mod tests {
         }
     }
 
+    fn store_identity(seed: u8) -> StoreIdentity {
+        StoreIdentity::new(StoreId::new(Uuid::from_bytes([seed; 16])), 0.into())
+    }
+
+    fn namespace_policies(
+        extra_namespaces: &[NamespaceId],
+    ) -> BTreeMap<NamespaceId, NamespacePolicy> {
+        let mut policies = BTreeMap::new();
+        policies.insert(NamespaceId::core(), NamespacePolicy::core_default());
+        for namespace in extra_namespaces {
+            policies.insert(namespace.clone(), NamespacePolicy::core_default());
+        }
+        policies
+    }
+
     #[test]
     fn request_hash_is_stable_with_label_ordering() {
         let engine = MutationEngine::new(Limits::default());
@@ -2497,7 +2722,9 @@ mod tests {
     #[test]
     fn add_dep_rejects_parent_kind() {
         let err = ParsedMutationRequest::parse_add_dep(DepPayload {
+            from_namespace: None,
             from: BeadId::parse("bd-child").unwrap(),
+            to_namespace: None,
             to: BeadId::parse("bd-parent").unwrap(),
             kind: DepKind::Parent,
         })
@@ -2544,7 +2771,9 @@ mod tests {
         let stamped = make_stamped_context(ctx, stamp.clone());
         let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([2u8; 16])), 0.into());
         let req = ParsedMutationRequest::parse_add_dep(DepPayload {
+            from_namespace: None,
             from: bead_b.clone(),
+            to_namespace: None,
             to: bead_a.clone(),
             kind: DepKind::Blocks,
         })
@@ -2604,7 +2833,9 @@ mod tests {
         let stamped = make_stamped_context(ctx, stamp.clone());
         let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([2u8; 16])), 0.into());
         let req = ParsedMutationRequest::parse_add_dep(DepPayload {
+            from_namespace: None,
             from: bead_b.clone(),
+            to_namespace: None,
             to: bead_a.clone(),
             kind: DepKind::Related,
         })
@@ -2632,6 +2863,318 @@ mod tests {
                 .any(|op| matches!(op, TxnOpV1::DepAdd(_)))
         );
         assert_eq!(effects.dot_meta_sync_boundaries, 1);
+    }
+
+    #[test]
+    fn add_dep_bare_endpoints_default_to_active_core_namespace() {
+        let engine = MutationEngine::new(Limits::default());
+        let actor = actor_id("alice");
+        let from = BeadId::parse("bd-from").unwrap();
+        let to = BeadId::parse("bd-to").unwrap();
+        let mut state = CanonicalState::new();
+        state.insert(make_bead(from.as_str(), &actor)).unwrap();
+        state.insert(make_bead(to.as_str(), &actor)).unwrap();
+        let stamp = make_stamp(10, &actor);
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([9u8; 16])),
+        };
+        let req = ParsedMutationRequest::parse_add_dep(DepPayload {
+            from_namespace: None,
+            from: from.clone(),
+            to_namespace: None,
+            to: to.clone(),
+            kind: DepKind::Blocks,
+        })
+        .unwrap();
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
+
+        let planned = engine
+            .plan(
+                &state,
+                stamp.at.wall_ms,
+                make_stamped_context(ctx, stamp),
+                store_identity(2),
+                None,
+                req,
+                &mut dots,
+            )
+            .expect("plan core dep");
+        let (draft, _) = planned.acknowledge_durability();
+        let add = draft
+            .command
+            .raw_delta()
+            .iter()
+            .find_map(|op| match op {
+                TxnOpV1::DepAdd(add) => Some(add),
+                _ => None,
+            })
+            .expect("dep add");
+
+        assert_eq!(add.key.from_ref(), &BeadRef::new(NamespaceId::core(), from));
+        assert_eq!(add.key.to_ref(), &BeadRef::new(NamespaceId::core(), to));
+    }
+
+    #[test]
+    fn add_dep_accepts_namespaced_endpoint_in_configured_namespace() {
+        let engine = MutationEngine::new(Limits::default());
+        let actor = actor_id("alice");
+        let sessions = NamespaceId::parse("sessions").unwrap();
+        let session_id = BeadId::parse("bd-session").unwrap();
+        let core_id = BeadId::parse("bd-core").unwrap();
+
+        let mut core_state = CanonicalState::new();
+        core_state
+            .insert(make_bead(core_id.as_str(), &actor))
+            .unwrap();
+        let mut sessions_state = CanonicalState::new();
+        sessions_state
+            .insert(make_bead(session_id.as_str(), &actor))
+            .unwrap();
+        let mut store_state = StoreState::new();
+        store_state.set_core_state(core_state);
+        store_state.set_namespace_state(sessions.clone(), sessions_state);
+
+        let policies = namespace_policies(std::slice::from_ref(&sessions));
+        let stamp = make_stamp(10, &actor);
+        let ctx = MutationContext {
+            namespace: sessions.clone(),
+            actor_id: actor.clone(),
+            client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([9u8; 16])),
+        };
+        let req = ParsedMutationRequest::parse_add_dep(DepPayload {
+            from_namespace: Some(sessions.clone()),
+            from: session_id.clone(),
+            to_namespace: Some(NamespaceId::core()),
+            to: core_id.clone(),
+            kind: DepKind::Blocks,
+        })
+        .unwrap();
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
+
+        let planned = engine
+            .plan_for_store(
+                &store_state,
+                &policies,
+                stamp.at.wall_ms,
+                make_stamped_context(ctx, stamp),
+                store_identity(2),
+                None,
+                req,
+                &mut dots,
+            )
+            .expect("plan cross-namespace dep");
+        let (draft, effects) = planned.acknowledge_durability();
+        let add = draft
+            .command
+            .raw_delta()
+            .iter()
+            .find_map(|op| match op {
+                TxnOpV1::DepAdd(add) => Some(add),
+                _ => None,
+            })
+            .expect("dep add");
+
+        assert_eq!(add.key.from_ref(), &BeadRef::new(sessions, session_id));
+        assert_eq!(
+            add.key.to_ref(),
+            &BeadRef::new(NamespaceId::core(), core_id)
+        );
+        assert_eq!(effects.dot_meta_sync_boundaries, 1);
+    }
+
+    #[test]
+    fn add_dep_rejects_unknown_endpoint_namespace_before_planning_delta() {
+        let engine = MutationEngine::new(Limits::default());
+        let actor = actor_id("alice");
+        let missing = NamespaceId::parse("missing").unwrap();
+        let mut store_state = StoreState::new();
+        store_state
+            .core_mut()
+            .insert(make_bead("bd-core", &actor))
+            .unwrap();
+        let policies = namespace_policies(&[]);
+        let stamp = make_stamp(10, &actor);
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([9u8; 16])),
+        };
+        let req = ParsedMutationRequest::parse_add_dep(DepPayload {
+            from_namespace: Some(missing.clone()),
+            from: BeadId::parse("bd-missing").unwrap(),
+            to_namespace: Some(NamespaceId::core()),
+            to: BeadId::parse("bd-core").unwrap(),
+            kind: DepKind::Blocks,
+        })
+        .unwrap();
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
+
+        let err = engine
+            .plan_for_store(
+                &store_state,
+                &policies,
+                stamp.at.wall_ms,
+                make_stamped_context(ctx, stamp),
+                store_identity(2),
+                None,
+                req,
+                &mut dots,
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            OpError::NamespaceUnknown { namespace } if namespace == missing
+        ));
+        assert_eq!(dots.counter, 0);
+    }
+
+    #[test]
+    fn add_dep_rejects_source_namespace_that_differs_from_mutation_namespace() {
+        let engine = MutationEngine::new(Limits::default());
+        let actor = actor_id("alice");
+        let sessions = NamespaceId::parse("sessions").unwrap();
+        let session_id = BeadId::parse("bd-session").unwrap();
+        let core_id = BeadId::parse("bd-core").unwrap();
+        let mut store_state = StoreState::new();
+        store_state
+            .core_mut()
+            .insert(make_bead(core_id.as_str(), &actor))
+            .unwrap();
+        store_state
+            .ensure_namespace(sessions.clone())
+            .insert(make_bead(session_id.as_str(), &actor))
+            .unwrap();
+        let policies = namespace_policies(std::slice::from_ref(&sessions));
+        let stamp = make_stamp(10, &actor);
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([9u8; 16])),
+        };
+        let req = ParsedMutationRequest::parse_add_dep(DepPayload {
+            from_namespace: Some(sessions),
+            from: session_id,
+            to_namespace: Some(NamespaceId::core()),
+            to: core_id,
+            kind: DepKind::Blocks,
+        })
+        .unwrap();
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
+
+        let err = engine
+            .plan_for_store(
+                &store_state,
+                &policies,
+                stamp.at.wall_ms,
+                make_stamped_context(ctx, stamp),
+                store_identity(2),
+                None,
+                req,
+                &mut dots,
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            OpError::ValidationFailed { field, .. } if field == "dependency"
+        ));
+        assert_eq!(dots.counter, 0);
+    }
+
+    #[test]
+    fn remove_dep_uses_fully_qualified_key() {
+        let engine = MutationEngine::new(Limits::default());
+        let actor = actor_id("alice");
+        let sessions = NamespaceId::parse("sessions").unwrap();
+        let from = BeadId::parse("bd-shared").unwrap();
+        let to = BeadId::parse("bd-target").unwrap();
+        let policies = namespace_policies(std::slice::from_ref(&sessions));
+        let stamp = make_stamp(10, &actor);
+        let key = DepKey::new(
+            BeadRef::new(sessions.clone(), from.clone()),
+            BeadRef::new(NamespaceId::core(), to.clone()),
+            DepKind::Blocks,
+        )
+        .unwrap();
+        let mut store_state = StoreState::new();
+        store_state
+            .core_mut()
+            .insert(make_bead(to.as_str(), &actor))
+            .unwrap();
+        store_state
+            .ensure_namespace(sessions.clone())
+            .insert(make_bead(from.as_str(), &actor))
+            .unwrap();
+        let add_key = store_state.check_dep_add_key(key.clone()).unwrap();
+        store_state.get_mut(&sessions).unwrap().apply_dep_add(
+            add_key,
+            Dot {
+                replica: ReplicaId::new(Uuid::from_bytes([4u8; 16])),
+                counter: 1,
+            },
+            stamp.clone(),
+        );
+        let ctx = MutationContext {
+            namespace: sessions.clone(),
+            actor_id: actor.clone(),
+            client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([9u8; 16])),
+        };
+        let req = ParsedMutationRequest::parse_remove_dep(DepPayload {
+            from_namespace: Some(sessions.clone()),
+            from: from.clone(),
+            to_namespace: Some(NamespaceId::core()),
+            to: to.clone(),
+            kind: DepKind::Blocks,
+        })
+        .unwrap();
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
+
+        let planned = engine
+            .plan_for_store(
+                &store_state,
+                &policies,
+                stamp.at.wall_ms,
+                make_stamped_context(ctx, stamp),
+                store_identity(2),
+                None,
+                req,
+                &mut dots,
+            )
+            .expect("plan remove");
+        let (draft, effects) = planned.acknowledge_durability();
+        let remove = draft
+            .command
+            .raw_delta()
+            .iter()
+            .find_map(|op| match op {
+                TxnOpV1::DepRemove(remove) => Some(remove),
+                _ => None,
+            })
+            .expect("dep remove");
+        let wrong_core_key = DepKey::new_local(
+            &NamespaceId::core(),
+            from.clone(),
+            to.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap();
+
+        assert_eq!(remove.key.from_ref(), &BeadRef::new(sessions.clone(), from));
+        assert_eq!(remove.key.to_ref(), &BeadRef::new(NamespaceId::core(), to));
+        assert_ne!(&remove.key, &wrong_core_key);
+        assert_eq!(
+            remove.ctx,
+            WireDvvV1::from(&store_state.get(&sessions).unwrap().dep_dvv(&key))
+        );
+        assert_eq!(effects.dot_meta_sync_boundaries, 0);
     }
 
     #[test]

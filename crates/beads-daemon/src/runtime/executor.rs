@@ -179,6 +179,7 @@ impl Daemon {
         };
         let roster = load_replica_roster(&layout, store_id)
             .map_err(|err| OpError::StoreRuntime(Box::new(err)))?;
+        let namespace_policies = policies.clone();
         let coordinator =
             DurabilityCoordinator::new(origin_replica_id, policies, roster, peer_acks);
         let wait_timeout = Duration::from_millis(limits.dead_ms);
@@ -242,10 +243,11 @@ impl Daemon {
         .map_err(wal_index_to_op)?;
         let planned = {
             let store_runtime = proof.runtime_mut();
-            let state_snapshot = store_runtime.state.get_or_default(&namespace);
+            let store_state_snapshot = store_runtime.state.clone();
             let mut dot_alloc = RuntimeDotAllocator::new(origin_replica_id, atomic_txn.index_mut());
-            engine.plan(
-                &state_snapshot,
+            engine.plan_for_store(
+                &store_state_snapshot,
+                &namespace_policies,
                 now_ms,
                 stamped_ctx,
                 store,
