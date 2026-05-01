@@ -2,7 +2,7 @@ use clap::{Args, Subcommand};
 
 use super::{CommandResult, print_ok};
 use crate::parsers::{parse_dep_edge, parse_dep_kind};
-use crate::render::{dep_record_json_value, dependency_summary_json_value, print_json};
+use crate::render::{dep_record_json_value, dependency_summary_json_value_for_edge, print_json};
 use crate::runtime::{CliRuntimeCtx, send};
 use crate::validation::{normalize_bead_id, normalize_bead_ids, validation_error};
 use beads_api::{DepCycles, DepEdge};
@@ -153,7 +153,7 @@ fn handle_dep_list(ctx: &CliRuntimeCtx, args: DepListArgs) -> CommandResult<()> 
             let (_, outgoing) = fetch_dep_edges(ctx, id)?;
             for edge in outgoing {
                 if kind_matches(kind_filter.as_deref(), &edge.kind) {
-                    records.push(dep_record_json_value(&edge.from, &edge.to, &edge.kind));
+                    records.push(dep_record_json_value(&edge));
                 }
             }
         }
@@ -192,7 +192,7 @@ fn handle_dep_list(ctx: &CliRuntimeCtx, args: DepListArgs) -> CommandResult<()> 
                 DepDirection::Up => edge.from.as_str(),
             };
             if let Some(summary) = summaries.get(target) {
-                out.push(dependency_summary_json_value(summary, &edge.kind));
+                out.push(dependency_summary_json_value_for_edge(summary, &edge));
             }
         }
         print_json(&serde_json::Value::Array(out))?;

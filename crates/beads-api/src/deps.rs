@@ -33,3 +33,37 @@ impl From<&CoreDepKey> for DepEdge {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use beads_core::{BeadId, BeadRef, DepKind, NamespaceId};
+
+    #[test]
+    fn dep_edge_from_core_key_carries_endpoint_namespaces() {
+        let key = CoreDepKey::new(
+            BeadRef::new(
+                NamespaceId::parse("sessions").unwrap(),
+                BeadId::parse("bd-a").unwrap(),
+            ),
+            BeadRef::new(
+                NamespaceId::parse("extmsg").unwrap(),
+                BeadId::parse("bd-b").unwrap(),
+            ),
+            DepKind::Blocks,
+        )
+        .unwrap();
+
+        let edge = DepEdge::from(&key);
+        assert_eq!(edge.from_namespace, "sessions");
+        assert_eq!(edge.from, "bd-a");
+        assert_eq!(edge.to_namespace, "extmsg");
+        assert_eq!(edge.to, "bd-b");
+
+        let json = serde_json::to_value(&edge).unwrap();
+        assert_eq!(json["from_namespace"], "sessions");
+        assert_eq!(json["from"], "bd-a");
+        assert_eq!(json["to_namespace"], "extmsg");
+        assert_eq!(json["to"], "bd-b");
+    }
+}

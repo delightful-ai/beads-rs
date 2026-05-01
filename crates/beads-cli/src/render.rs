@@ -235,12 +235,12 @@ pub fn show_details_json_value(details: &ShowDetails) -> Value {
     let dependencies = details
         .outgoing
         .iter()
-        .filter_map(|edge| dependency_issue_json(&summaries, &edge.to, &edge.kind))
+        .filter_map(|edge| dependency_issue_json(&summaries, edge, &edge.to))
         .collect::<Vec<_>>();
     let dependents = details
         .incoming
         .iter()
-        .filter_map(|edge| dependency_issue_json(&summaries, &edge.from, &edge.kind))
+        .filter_map(|edge| dependency_issue_json(&summaries, edge, &edge.from))
         .collect::<Vec<_>>();
     if !dependencies.is_empty() {
         map.insert("dependencies".into(), Value::Array(dependencies));
@@ -274,11 +274,23 @@ pub fn dependency_summary_json_value(summary: &IssueSummary, dependency_type: &s
     value
 }
 
-pub fn dep_record_json_value(from: &str, to: &str, kind: &str) -> Value {
+pub fn dependency_summary_json_value_for_edge(summary: &IssueSummary, edge: &DepEdge) -> Value {
+    let mut value = dependency_summary_json_value(summary, &edge.kind);
+    if let Value::Object(ref mut map) = value {
+        insert_dep_edge_fields(map, edge);
+    }
+    value
+}
+
+pub fn dep_record_json_value(edge: &DepEdge) -> Value {
     json!({
-        "issue_id": from,
-        "depends_on_id": to,
-        "type": dep_kind_to_go_wire(kind),
+        "issue_id": edge.from.as_str(),
+        "depends_on_id": edge.to.as_str(),
+        "type": dep_kind_to_go_wire(&edge.kind),
+        "from_namespace": edge.from_namespace.as_str(),
+        "from": edge.from.as_str(),
+        "to_namespace": edge.to_namespace.as_str(),
+        "to": edge.to.as_str(),
     })
 }
 
@@ -445,12 +457,19 @@ fn summary_map(summaries: &[IssueSummary]) -> std::collections::HashMap<&str, &I
 
 fn dependency_issue_json(
     summaries: &std::collections::HashMap<&str, &IssueSummary>,
+    edge: &DepEdge,
     id: &str,
-    kind: &str,
 ) -> Option<Value> {
     summaries
         .get(id)
-        .map(|summary| dependency_summary_json_value(summary, kind))
+        .map(|summary| dependency_summary_json_value_for_edge(summary, edge))
+}
+
+fn insert_dep_edge_fields(map: &mut Map<String, Value>, edge: &DepEdge) {
+    map.insert("from_namespace".into(), json!(edge.from_namespace.as_str()));
+    map.insert("from".into(), json!(edge.from.as_str()));
+    map.insert("to_namespace".into(), json!(edge.to_namespace.as_str()));
+    map.insert("to".into(), json!(edge.to.as_str()));
 }
 
 fn insert_opt_str(map: &mut Map<String, Value>, key: &str, value: Option<&str>) {

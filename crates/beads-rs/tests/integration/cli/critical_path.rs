@@ -2755,6 +2755,10 @@ fn test_gascity_floor0_cli_json_and_dep_wire() {
     assert_eq!(single_deps.len(), 1);
     assert_eq!(single_deps[0]["id"].as_str(), Some(blocker_id.as_str()));
     assert_eq!(single_deps[0]["dependency_type"].as_str(), Some("tracks"));
+    assert_eq!(single_deps[0]["from_namespace"].as_str(), Some("core"));
+    assert_eq!(single_deps[0]["from"].as_str(), Some(work_id.as_str()));
+    assert_eq!(single_deps[0]["to_namespace"].as_str(), Some("core"));
+    assert_eq!(single_deps[0]["to"].as_str(), Some(blocker_id.as_str()));
 
     let batch_deps_out = repo
         .bd()
@@ -2772,6 +2776,10 @@ fn test_gascity_floor0_cli_json_and_dep_wire() {
         record["issue_id"].as_str() == Some(work_id.as_str())
             && record["depends_on_id"].as_str() == Some(blocker_id.as_str())
             && record["type"].as_str() == Some("tracks")
+            && record["from_namespace"].as_str() == Some("core")
+            && record["from"].as_str() == Some(work_id.as_str())
+            && record["to_namespace"].as_str() == Some("core")
+            && record["to"].as_str() == Some(blocker_id.as_str())
     }));
 
     let show_out = repo
@@ -2788,6 +2796,22 @@ fn test_gascity_floor0_cli_json_and_dep_wire() {
     assert_eq!(
         shown[0]["dependencies"][0]["dependency_type"].as_str(),
         Some("tracks")
+    );
+    assert_eq!(
+        shown[0]["dependencies"][0]["from_namespace"].as_str(),
+        Some("core")
+    );
+    assert_eq!(
+        shown[0]["dependencies"][0]["from"].as_str(),
+        Some(work_id.as_str())
+    );
+    assert_eq!(
+        shown[0]["dependencies"][0]["to_namespace"].as_str(),
+        Some("core")
+    );
+    assert_eq!(
+        shown[0]["dependencies"][0]["to"].as_str(),
+        Some(blocker_id.as_str())
     );
 
     repo.bd()
