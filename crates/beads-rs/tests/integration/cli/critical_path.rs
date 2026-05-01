@@ -3,6 +3,8 @@
 //! These tests run the actual `bd` binary against temp git repos.
 
 #[cfg(feature = "slow-tests")]
+use std::collections::BTreeMap;
+#[cfg(feature = "slow-tests")]
 use std::fs;
 #[cfg(feature = "slow-tests")]
 use std::path::{Path, PathBuf};
@@ -20,6 +22,8 @@ use crate::fixtures::git::repo_has_branch;
 use crate::fixtures::wait;
 #[cfg(feature = "slow-tests")]
 use beads_api::UnlockAction;
+#[cfg(feature = "slow-tests")]
+use beads_core::{NamespaceId, NamespacePolicies, NamespacePolicy, NamespaceVisibility};
 use predicates::prelude::*;
 
 fn cli_issue_id_from_output(bytes: &[u8]) -> String {
@@ -2655,6 +2659,76 @@ fn test_init_accepts_gascity_flags_and_prefix() {
 }
 
 #[cfg(feature = "slow-tests")]
+fn gascity_sidecar_policy() -> NamespacePolicy {
+    let mut policy = NamespacePolicy::sys_default();
+    policy.visibility = NamespaceVisibility::Normal;
+    policy
+}
+
+#[cfg(feature = "slow-tests")]
+fn write_gascity_namespace_defaults(repo: &BdRuntimeRepo) {
+    let mut namespaces = BTreeMap::new();
+    namespaces.insert(
+        NamespaceId::parse("sessions").expect("valid sessions namespace"),
+        gascity_sidecar_policy(),
+    );
+    namespaces.insert(
+        NamespaceId::parse("extmsg").expect("valid extmsg namespace"),
+        gascity_sidecar_policy(),
+    );
+    let policies = NamespacePolicies { namespaces };
+
+    let mut config = toml::map::Map::new();
+    config.insert(
+        "namespace_defaults".to_string(),
+        toml::Value::try_from(policies).expect("serialize namespace defaults"),
+    );
+    let config_dir = repo.runtime_dir().join("config");
+    fs::create_dir_all(&config_dir).expect("create test config dir");
+    fs::write(
+        config_dir.join("config.toml"),
+        toml::to_string_pretty(&config).expect("serialize config toml"),
+    )
+    .expect("write namespace default config");
+}
+
+#[cfg(feature = "slow-tests")]
+fn create_gascity_issue(
+    repo: &BdRuntimeRepo,
+    namespace: Option<&str>,
+    title: &str,
+) -> (String, serde_json::Value) {
+    let mut cmd = repo.bd();
+    if let Some(namespace) = namespace {
+        cmd.args(["--namespace", namespace]);
+    }
+    let output = cmd
+        .args(["create", title, "--type=task", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let issue: serde_json::Value = serde_json::from_slice(&output).expect("parse create json");
+    assert_eq!(
+        issue["namespace"].as_str(),
+        Some(namespace.unwrap_or("core"))
+    );
+    let id = issue["id"].as_str().expect("issue id").to_string();
+    (id, issue)
+}
+
+#[cfg(feature = "slow-tests")]
+fn json_array_from_cli(bytes: &[u8]) -> Vec<serde_json::Value> {
+    serde_json::from_slice::<Vec<serde_json::Value>>(bytes).expect("parse CLI JSON array")
+}
+
+#[cfg(feature = "slow-tests")]
+fn json_array_has_id(items: &[serde_json::Value], id: &str) -> bool {
+    items.iter().any(|item| item["id"].as_str() == Some(id))
+}
+
+#[cfg(feature = "slow-tests")]
 #[test]
 fn test_gascity_floor0_cli_json_and_dep_wire() {
     let repo = BdRuntimeRepo::new_local_only();
@@ -2823,6 +2897,221 @@ fn test_gascity_floor0_cli_json_and_dep_wire() {
         .assert()
         .success()
         .stdout(predicate::eq("[]\n"));
+}
+
+#[cfg(feature = "slow-tests")]
+#[test]
+fn test_gascity_sessions_extmsg_namespace_smoke() {
+    let repo = BdRuntimeRepo::new_local_only();
+    write_gascity_namespace_defaults(&repo);
+
+    repo.bd()
+        .args(["init", "--server", "-p", "gc", "--skip-hooks"])
+        .assert()
+        .success();
+
+    let (core_id, _) = create_gascity_issue(&repo, None, "Gas City core workflow");
+    let (session_id, _) =
+        create_gascity_issue(&repo, Some("sessions"), "Gas City session lifecycle");
+    let (extmsg_id, _) = create_gascity_issue(&repo, Some("extmsg"), "Gas City extmsg delivery");
+
+    let session_ref = format!("sessions/{session_id}");
+    let extmsg_ref = format!("extmsg/{extmsg_id}");
+
+    repo.bd()
+        .args(["dep", "add", &session_ref, &core_id, "--type", "related"])
+        .assert()
+        .success();
+    repo.bd()
+        .args(["dep", "add", &extmsg_ref, &session_ref, "--type", "related"])
+        .assert()
+        .success();
+
+    let core_list_out = repo
+        .bd()
+        .args(["list", "--json", "--all", "--limit", "0"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let core_list = json_array_from_cli(&core_list_out);
+    assert!(json_array_has_id(&core_list, &core_id));
+    assert!(!json_array_has_id(&core_list, &session_id));
+    assert!(!json_array_has_id(&core_list, &extmsg_id));
+    assert!(core_list.iter().all(|issue| issue["namespace"] == "core"));
+
+    let session_list_out = repo
+        .bd()
+        .args([
+            "--namespace",
+            "sessions",
+            "list",
+            "--json",
+            "--all",
+            "--limit",
+            "0",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let session_list = json_array_from_cli(&session_list_out);
+    assert!(json_array_has_id(&session_list, &session_id));
+    assert!(!json_array_has_id(&session_list, &core_id));
+    assert!(
+        session_list
+            .iter()
+            .all(|issue| issue["namespace"] == "sessions")
+    );
+
+    let extmsg_list_out = repo
+        .bd()
+        .args([
+            "--namespace",
+            "extmsg",
+            "list",
+            "--json",
+            "--all",
+            "--limit",
+            "0",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let extmsg_list = json_array_from_cli(&extmsg_list_out);
+    assert!(json_array_has_id(&extmsg_list, &extmsg_id));
+    assert!(!json_array_has_id(&extmsg_list, &core_id));
+    assert!(
+        extmsg_list
+            .iter()
+            .all(|issue| issue["namespace"] == "extmsg")
+    );
+
+    let default_ready_out = repo
+        .bd()
+        .args(["ready", "--json", "--limit", "0"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let default_ready = json_array_from_cli(&default_ready_out);
+    assert!(json_array_has_id(&default_ready, &core_id));
+    assert!(!json_array_has_id(&default_ready, &session_id));
+    assert!(!json_array_has_id(&default_ready, &extmsg_id));
+
+    repo.bd()
+        .args(["--namespace", "sessions", "ready", "--json", "--limit", "0"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[]\n"));
+    repo.bd()
+        .args(["--namespace", "extmsg", "ready", "--json", "--limit", "0"])
+        .assert()
+        .success()
+        .stdout(predicate::eq("[]\n"));
+
+    let session_show_out = repo
+        .bd()
+        .args(["show", &session_ref, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let session_show = json_array_from_cli(&session_show_out);
+    let session_dep = &session_show[0]["dependencies"][0];
+    assert_eq!(session_dep["dependency_type"].as_str(), Some("related"));
+    assert_eq!(session_dep["from_namespace"].as_str(), Some("sessions"));
+    assert_eq!(session_dep["from"].as_str(), Some(session_id.as_str()));
+    assert_eq!(session_dep["to_namespace"].as_str(), Some("core"));
+    assert_eq!(session_dep["to"].as_str(), Some(core_id.as_str()));
+
+    let core_show_out = repo
+        .bd()
+        .args(["show", &core_id, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let core_show = json_array_from_cli(&core_show_out);
+    let core_dependent = &core_show[0]["dependents"][0];
+    assert_eq!(core_dependent["dependency_type"].as_str(), Some("related"));
+    assert_eq!(core_dependent["from_namespace"].as_str(), Some("sessions"));
+    assert_eq!(core_dependent["from"].as_str(), Some(session_id.as_str()));
+    assert_eq!(core_dependent["to_namespace"].as_str(), Some("core"));
+    assert_eq!(core_dependent["to"].as_str(), Some(core_id.as_str()));
+
+    let extmsg_show_out = repo
+        .bd()
+        .args(["show", &extmsg_ref, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let extmsg_show = json_array_from_cli(&extmsg_show_out);
+    let extmsg_dep = &extmsg_show[0]["dependencies"][0];
+    assert_eq!(extmsg_dep["dependency_type"].as_str(), Some("related"));
+    assert_eq!(extmsg_dep["from_namespace"].as_str(), Some("extmsg"));
+    assert_eq!(extmsg_dep["from"].as_str(), Some(extmsg_id.as_str()));
+    assert_eq!(extmsg_dep["to_namespace"].as_str(), Some("sessions"));
+    assert_eq!(extmsg_dep["to"].as_str(), Some(session_id.as_str()));
+
+    let tree_out = repo
+        .bd()
+        .args(["dep", "tree", &extmsg_ref, "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let tree: serde_json::Value = serde_json::from_slice(&tree_out).expect("parse dep tree json");
+    assert_eq!(tree["result"].as_str(), Some("dep_tree"));
+    let tree_edges = tree["data"]["edges"].as_array().expect("dep tree edges");
+    assert_eq!(tree_edges.len(), 2);
+    assert!(tree_edges.iter().any(|edge| {
+        edge["from_namespace"] == "extmsg"
+            && edge["from"] == extmsg_id
+            && edge["to_namespace"] == "sessions"
+            && edge["to"] == session_id
+    }));
+    assert!(tree_edges.iter().any(|edge| {
+        edge["from_namespace"] == "sessions"
+            && edge["from"] == session_id
+            && edge["to_namespace"] == "core"
+            && edge["to"] == core_id
+    }));
+
+    let default_list_human = repo
+        .bd()
+        .args(["list", "--all", "--limit", "0"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let default_list_human = String::from_utf8(default_list_human).expect("utf8 list");
+    assert!(default_list_human.contains(&core_id));
+    assert!(!default_list_human.contains(&format!("core/{core_id}")));
+    assert!(!default_list_human.contains(&session_id));
+    assert!(!default_list_human.contains(&extmsg_id));
+
+    let session_deps_human = repo
+        .bd()
+        .args(["dep", "list", &session_ref])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let session_deps_human = String::from_utf8(session_deps_human).expect("utf8 deps");
+    assert!(session_deps_human.contains(&format!("core/{core_id}")));
 }
 
 #[cfg(feature = "slow-tests")]
