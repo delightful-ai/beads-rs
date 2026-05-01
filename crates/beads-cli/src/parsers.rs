@@ -39,19 +39,19 @@ impl ParseError {
 
 pub fn parse_bead_type(raw: &str) -> Result<BeadType> {
     let s = raw.trim().to_lowercase();
+    if let Some(bead_type) = BeadType::parse(&s) {
+        return Ok(bead_type);
+    }
+
     match s.as_str() {
         "bug" | "bugs" => Ok(BeadType::Bug),
-        "feature" | "feat" | "features" => Ok(BeadType::Feature),
+        "features" => Ok(BeadType::Feature),
         "task" | "todo" | "tasks" => Ok(BeadType::Task),
         "epic" | "epics" => Ok(BeadType::Epic),
         "chore" | "chores" | "maintenance" => Ok(BeadType::Chore),
-        "decision" | "dec" | "adr" => Ok(BeadType::Decision),
-        "message" | "msg" => Ok(BeadType::Message),
-        "molecule" | "mol" => Ok(BeadType::Molecule),
-        "spike" | "research" | "investigation" => Ok(BeadType::Spike),
-        "story" | "user-story" | "user_story" => Ok(BeadType::Story),
-        "milestone" => Ok(BeadType::Milestone),
-        "event" => Ok(BeadType::Event),
+        "msg" => Ok(BeadType::Message),
+        "mol" => Ok(BeadType::Molecule),
+        "research" => Ok(BeadType::Spike),
         _ => Err(ParseError::UnknownBeadType {
             raw: raw.to_string(),
         }),
@@ -210,6 +210,7 @@ mod tests {
             ("  bug  ", BeadType::Bug),
             ("feature", BeadType::Feature),
             ("feat", BeadType::Feature),
+            ("enhancement", BeadType::Feature),
             ("features", BeadType::Feature),
             ("task", BeadType::Task),
             ("todo", BeadType::Task),
@@ -229,11 +230,23 @@ mod tests {
             ("spike", BeadType::Spike),
             ("research", BeadType::Spike),
             ("investigation", BeadType::Spike),
+            ("timebox", BeadType::Spike),
             ("story", BeadType::Story),
             ("user-story", BeadType::Story),
             ("user_story", BeadType::Story),
             ("milestone", BeadType::Milestone),
+            ("ms", BeadType::Milestone),
             ("event", BeadType::Event),
+            ("convoy", BeadType::Convoy),
+            ("gate", BeadType::Gate),
+            ("merge-request", BeadType::MergeRequest),
+            ("merge_request", BeadType::MergeRequest),
+            ("agent", BeadType::Agent),
+            ("role", BeadType::Role),
+            ("rig", BeadType::Rig),
+            ("session", BeadType::Session),
+            ("spec", BeadType::Spec),
+            ("convergence", BeadType::Convergence),
         ];
 
         for (input, expected) in cases {
@@ -257,6 +270,33 @@ mod tests {
                 }
                 _ => panic!("Expected UnknownBeadType error for '{}'", input),
             }
+        }
+    }
+
+    #[test]
+    fn test_parse_dep_kind_accepts_well_known_go_vocabulary() {
+        for raw in [
+            "blocks",
+            "parent-child",
+            "conditional-blocks",
+            "waits-for",
+            "related",
+            "discovered-from",
+            "replies-to",
+            "relates-to",
+            "duplicates",
+            "supersedes",
+            "authored-by",
+            "assigned-to",
+            "approved-by",
+            "attests",
+            "tracks",
+            "until",
+            "caused-by",
+            "validates",
+            "delegated-from",
+        ] {
+            assert!(parse_dep_kind(raw).is_ok(), "{raw}");
         }
     }
 }

@@ -615,18 +615,19 @@ fn parse_md_priority(s: &str) -> Priority {
 }
 
 fn parse_md_type(s: &str) -> BeadType {
-    match s.trim().to_lowercase().as_str() {
+    let normalized = s.trim().to_lowercase();
+    if let Some(bead_type) = BeadType::parse(&normalized) {
+        return bead_type;
+    }
+
+    match normalized.as_str() {
         "bug" | "bugs" => BeadType::Bug,
-        "feature" | "features" | "feat" => BeadType::Feature,
+        "features" => BeadType::Feature,
         "epic" | "epics" => BeadType::Epic,
         "chore" | "chores" | "maintenance" => BeadType::Chore,
-        "decision" | "dec" | "adr" => BeadType::Decision,
-        "message" | "msg" => BeadType::Message,
-        "molecule" | "mol" => BeadType::Molecule,
-        "spike" | "research" | "investigation" => BeadType::Spike,
-        "story" | "user-story" | "user_story" => BeadType::Story,
-        "milestone" => BeadType::Milestone,
-        "event" => BeadType::Event,
+        "msg" => BeadType::Message,
+        "mol" => BeadType::Molecule,
+        "research" => BeadType::Spike,
         _ => BeadType::Task,
     }
 }

@@ -411,19 +411,14 @@ fn legacy_dot_from_bytes(bytes: &[u8], stamp: &Stamp) -> Dot {
 
 fn parse_issue_type(raw: &str) -> Result<BeadType> {
     let normalized = raw.trim().to_lowercase();
+    if let Some(bead_type) = BeadType::parse(&normalized) {
+        return Ok(bead_type);
+    }
+
     match normalized.as_str() {
-        "bug" => Ok(BeadType::Bug),
-        "feature" => Ok(BeadType::Feature),
-        "task" => Ok(BeadType::Task),
-        "epic" => Ok(BeadType::Epic),
-        "chore" => Ok(BeadType::Chore),
-        "decision" | "dec" | "adr" => Ok(BeadType::Decision),
-        "message" | "msg" => Ok(BeadType::Message),
-        "molecule" | "mol" => Ok(BeadType::Molecule),
-        "spike" | "research" | "investigation" => Ok(BeadType::Spike),
-        "story" | "user-story" | "user_story" => Ok(BeadType::Story),
-        "milestone" => Ok(BeadType::Milestone),
-        "event" => Ok(BeadType::Event),
+        "msg" => Ok(BeadType::Message),
+        "mol" => Ok(BeadType::Molecule),
+        "research" => Ok(BeadType::Spike),
         other => Err(validation_error(
             "issue_type",
             format!("unknown issue_type `{}`", other),

@@ -13,7 +13,7 @@ use super::ipc::{ReadConsistency, Response, ResponseExt, ResponsePayload};
 use super::ops::{MapLiveError, OpError};
 use super::query::{Filters, QueryResult};
 use super::store::runtime::StoreRuntime;
-use crate::core::{BeadId, CanonicalState, DepKey, DepKind, WallClock};
+use crate::core::{BeadId, CanonicalState, DepKey, WallClock};
 use crate::git_lane::GitLaneState;
 use crate::remote::RemoteUrl;
 use beads_api::{
@@ -334,17 +334,7 @@ impl Daemon {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
             let state = ctx.state;
 
-            // Collect IDs that are blocked by *blocking* deps (kind=blocks).
-            let mut blocked: std::collections::HashSet<&BeadId> = std::collections::HashSet::new();
-            for key in state.dep_store().values() {
-                // Only count `blocks` edges where the target is not closed.
-                if key.kind() == crate::core::DepKind::Blocks
-                    && let Some(to_bead) = state.get_live(key.to())
-                    && !to_bead.fields.workflow.value.is_closed()
-                {
-                    blocked.insert(key.from());
-                }
-            }
+            let blocked_by = compute_blocked_by(state);
 
             // Count blocked and closed issues for summary.
             let mut blocked_count = 0usize;
@@ -356,7 +346,7 @@ impl Daemon {
                     closed_count += 1;
                     continue;
                 }
-                if blocked.contains(id) {
+                if blocked_by.contains_key(id) {
                     blocked_count += 1;
                     continue;
                 }
@@ -1019,7 +1009,7 @@ impl Daemon {
 #[cfg(test)]
 mod tests {
     use super::{Issue, IssueSummary};
-    use super::{dep_cycles_from_state, sort_ready_issues};
+    use super::{compute_blocked_by, dep_cycles_from_state, sort_ready_issues};
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey,
         DepKind, Dot, Lww, NamespaceId, Priority, ReplicaId, Stamp, Workflow, WorkflowStatus,
@@ -1121,6 +1111,68 @@ mod tests {
         let issue = Issue::from_view(&namespace, &view);
 
         assert_eq!(issue.namespace, namespace);
+    }
+
+    fn add_dep(state: &mut CanonicalState, from: &str, to: &str, kind: DepKind, counter: u64) {
+        let key = DepKey::new(
+            BeadId::parse(from).expect("from id"),
+            BeadId::parse(to).expect("to id"),
+            kind,
+        )
+        .expect("dep key");
+        let dep_key = state.check_dep_add_key(key).expect("checked dep key");
+        let dot = Dot {
+            replica: ReplicaId::new(Uuid::from_u128(counter as u128 + 1)),
+            counter,
+        };
+        let actor = ActorId::new("tester").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(10_000 + counter, 0), actor);
+        state.apply_dep_add(dep_key, dot, stamp);
+    }
+
+    #[test]
+    fn blocked_by_uses_live_ready_work_dep_kinds() {
+        let actor = ActorId::new("tester").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(3_000, 0), actor);
+        let mut state = CanonicalState::new();
+
+        for id in ["bd-cond", "bd-waits", "bd-parent", "bd-track", "bd-blocker"] {
+            state.insert(make_bead(id, &stamp)).expect("insert bead");
+        }
+
+        add_dep(
+            &mut state,
+            "bd-cond",
+            "bd-blocker",
+            DepKind::ConditionalBlocks,
+            1,
+        );
+        add_dep(&mut state, "bd-waits", "bd-blocker", DepKind::WaitsFor, 2);
+        add_dep(&mut state, "bd-parent", "bd-blocker", DepKind::Parent, 3);
+        add_dep(&mut state, "bd-track", "bd-blocker", DepKind::Tracks, 4);
+
+        let blocked_by = compute_blocked_by(&state);
+
+        assert_eq!(
+            blocked_by
+                .get(&BeadId::parse("bd-cond").unwrap())
+                .map(Vec::as_slice),
+            Some(&[BeadId::parse("bd-blocker").unwrap()][..])
+        );
+        assert_eq!(
+            blocked_by
+                .get(&BeadId::parse("bd-waits").unwrap())
+                .map(Vec::as_slice),
+            Some(&[BeadId::parse("bd-blocker").unwrap()][..])
+        );
+        assert!(
+            !blocked_by.contains_key(&BeadId::parse("bd-parent").unwrap()),
+            "parent-child is structural and must not block ready work"
+        );
+        assert!(
+            !blocked_by.contains_key(&BeadId::parse("bd-track").unwrap()),
+            "tracks must remain non-blocking"
+        );
     }
 
     #[test]

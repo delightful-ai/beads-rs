@@ -1,9 +1,11 @@
 # Dependency Kinds
 
-**Pin:** Go `bd` v1.0.2 (`c446a2ef`), gascity `main` (read 2026-04-20), beads-rs HEAD.
-**Status:** _partial_ — beads-rs's `DepKind` enum covers 4 of Go's 19+ variants. Gascity actively uses 7 of those variants as edge data on the wire, so the enum surface is a real user of this gap, not a hypothetical.
+**Pin:** Go `bd` v1.0.2 (`c446a2ef`), gascity `main` (read 2026-04-20, re-audited 2026-05-01), beads-rs HEAD.
+**Status:** _active Floor 1 work_ — the `beads-rs-12u7.2.2` branch adds Rust variants for the 19 well-known Go dependency kinds. The remaining design gap is typed per-edge payloads, especially `waits-for`.
 
-Source of truth for Go's enumeration: `~/vendor/github.com/gastownhall/beads/internal/types/types.go:764-801`. Source of truth for beads-rs: `crates/beads-core/src/domain.rs:51-92`.
+Source of truth for Go's enumeration: `~/vendor/github.com/gastownhall/beads/internal/types/types.go:768-832`. Source of truth for beads-rs: `crates/beads-core/src/domain.rs`.
+
+Readiness audit: prefer live ready-work implementations over the stale `DependencyType.AffectsReadyWork()` helper. Go beads `internal/storage/issueops/blocked.go` and Gas City `internal/beads/{memstore,caching_store}.go` filter ready blockers to `blocks`, `waits-for`, and `conditional-blocks`. `parent-child` remains structural/DAG state, not a plain ready-work blocker.
 
 ---
 
@@ -35,7 +37,7 @@ Every value documented here is backed by a specific constant in Go's source or a
   - `internal/molecule/*.go` — molecule instantiation emits parent-child edges from every step to the root.
   - `cmd/gc/cmd_sling_routevars_test.go:62`, `cmd/gc/session_model_phase0_workflow_spec_test.go:71,123,221,222` — session/workflow models rely on parent-child for scoping.
   - Gascity's `ApplyGraphPlan` uses `parent_key`/`parent_id` on graph nodes to emit implicit parent-child edges (see `internal/beads/beads.go:37-38`).
-- **Transitive closure:** Yes, forms a tree per molecule. Readiness traversal walks up the parent chain to find containing molecules.
+- **Transitive closure:** Yes, forms a tree per molecule. Some higher-level molecule/session code walks parent chains for containment, but the live `ready` query does not block a child just because its parent is open.
 - **CRDT merge:** Parent-child is special-cased in gascity's `MemStore.DepAdd` (`internal/beads/memstore.go:388-400`) — a parent-child edge does not collapse a same-direction non-parent-child edge. beads-rs's `DepKind::Parent` participates in DAG cycle checking (`domain.rs:89-91`). Concurrent parent-child additions on the same child (from two actors trying to reparent) converge via LWW on the edge write-stamp.
 
 ### `conditional-blocks`
@@ -49,7 +51,7 @@ Every value documented here is backed by a specific constant in Go's source or a
   - `internal/beads/memstore.go:256`, `caching_store.go:415,442` — in-process stores filter on it.
   - `types.go:826` — `AffectsReadyWork()` returns true.
 - **Transitive closure:** Partial — the conditional-blocks edge only gates on the terminal state of the immediate predecessor, but that predecessor itself may be gated by further edges.
-- **CRDT merge:** Same OR-set + write-stamp rules as `blocks`. **Rust does not have this variant.**
+- **CRDT merge:** Same OR-set + write-stamp rules as `blocks`. Rust has a `DepKind::ConditionalBlocks` variant in the Floor 1 branch.
 
 ### `waits-for`
 
@@ -208,33 +210,33 @@ Parse aliases (`domain.rs:66-69`):
 |---------------------|:-:|-------------|--------|
 | `blocks` | **yes** (many) | `Blocks` | faithful |
 | `parent-child` | **yes** (many) | `Parent` | faithful |
-| `conditional-blocks` | **yes** (`ralph.go`, `graphroute`, `sling`, `convoy_dispatch`, `memstore`, `caching_store`) | missing | **MUST ADD** |
-| `waits-for` | **yes** (formula/compile, ralph, graphroute, sling, convoy_dispatch, memstore, caching_store) | missing | **MUST ADD** (plus gate-metadata design; see `types/gate.md`) |
+| `conditional-blocks` | **yes** (`ralph.go`, `graphroute`, `sling`, `convoy_dispatch`, `memstore`, `caching_store`) | `ConditionalBlocks` | added in Floor 1 branch |
+| `waits-for` | **yes** (formula/compile, ralph, graphroute, sling, convoy_dispatch, memstore, caching_store) | `WaitsFor` | added in Floor 1 branch; typed payload still open |
 | `related` | no (gascity doesn't emit) | `Related` | tolerated |
 | `discovered-from` | no (beads agents do; gascity preserves) | `DiscoveredFrom` | tolerated |
-| `replies-to` | no (beadmail reserved) | missing | deferred |
-| `relates-to` | yes (`handler_beads_graph_test.go` sets it; gascity must round-trip) | missing | **MUST ADD** |
-| `duplicates` | no | missing | deferred |
-| `supersedes` | no | missing | deferred |
-| `authored-by` | no (HOP foundation) | missing | deferred |
-| `assigned-to` | no (HOP foundation) | missing | deferred |
-| `approved-by` | no (HOP foundation) | missing | deferred |
-| `attests` | no (HOP foundation) | missing | deferred |
-| `tracks` | **yes** (molecule/graph_apply, cmd_graph_test) | missing | **MUST ADD** |
-| `until` | no | missing | deferred |
-| `caused-by` | no | missing | deferred |
-| `validates` | no | missing | deferred |
-| `delegated-from` | no (cascade reserved) | missing | deferred |
+| `replies-to` | no (beadmail reserved) | `RepliesTo` | added for well-known vocabulary |
+| `relates-to` | yes (`handler_beads_graph_test.go` sets it; gascity must round-trip) | `RelatesTo` | added in Floor 1 branch |
+| `duplicates` | no | `Duplicates` | added for well-known vocabulary |
+| `supersedes` | no | `Supersedes` | added for well-known vocabulary |
+| `authored-by` | no (HOP foundation) | `AuthoredBy` | added for well-known vocabulary |
+| `assigned-to` | no (HOP foundation) | `AssignedTo` | added for well-known vocabulary |
+| `approved-by` | no (HOP foundation) | `ApprovedBy` | added for well-known vocabulary |
+| `attests` | no (HOP foundation) | `Attests` | added for well-known vocabulary |
+| `tracks` | **yes** (molecule/graph_apply, cmd_graph_test) | `Tracks` | added in Floor 1 branch |
+| `until` | no | `Until` | added for well-known vocabulary |
+| `caused-by` | no | `CausedBy` | added for well-known vocabulary |
+| `validates` | no | `Validates` | added for well-known vocabulary |
+| `delegated-from` | no (cascade reserved) | `DelegatedFrom` | added for well-known vocabulary |
 
 ### Required work in beads-rs
 
 Load-bearing for gascity:
 
-1. **Add `DepKind::ConditionalBlocks`** with parse aliases `["conditional_blocks", "conditionalblocks", "conditional-blocks"]`. Mark `requires_dag() = true` (cycles forbidden). Include in `affects_readiness()` (new method, per Go's `AffectsReadyWork`).
+1. **Add `DepKind::ConditionalBlocks`** with parse aliases `["conditional_blocks", "conditionalblocks", "conditional-blocks"]`. Mark `requires_dag() = true` (cycles forbidden). Include in `affects_readiness()`.
 2. **Add `DepKind::WaitsFor`** with parse aliases `["waits_for", "waitsfor", "waits-for"]`. Mark `requires_dag() = true`. Include in `affects_readiness()`. Needs per-edge `WaitsForMeta`-equivalent struct — typed, not a JSON blob (see `types/gate.md`).
 3. **Add `DepKind::Tracks`** with parse aliases `["tracks", "track"]`. Mark `requires_dag() = false`. Does NOT affect readiness.
 4. **Add `DepKind::RelatesTo`** with parse aliases `["relates_to", "relatesto", "relates-to"]`. Mark `requires_dag() = false`. Informational.
-5. **Add `affects_readiness()` method on `DepKind`.** Returns true for `Blocks | Parent | ConditionalBlocks | WaitsFor`. This is the predicate gascity's readiness computation and Rust's equivalent both need.
+5. **Add `affects_readiness()` method on `DepKind`.** Returns true for `Blocks | ConditionalBlocks | WaitsFor`. `Parent` stays DAG-enforced but non-readiness, matching Gas City and Go's live ready-work implementations.
 
 Deferred (not blocking gascity today, but add as soon as the owning subsystem lands in Rust):
 

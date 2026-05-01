@@ -27,6 +27,16 @@ pub enum BeadType {
     Story,
     Milestone,
     Event,
+    Convoy,
+    Gate,
+    #[serde(rename = "merge-request", alias = "merge_request")]
+    MergeRequest,
+    Agent,
+    Role,
+    Rig,
+    Session,
+    Spec,
+    Convergence,
 }
 
 crate::enum_str! {
@@ -35,24 +45,34 @@ crate::enum_str! {
         fn parse_str(raw: &str) -> Option<Self>;
         variants {
             Bug => ["bug"],
-            Feature => ["feature"],
+            Feature => ["feature", "feat", "enhancement"],
             Task => ["task"],
             Epic => ["epic"],
             Chore => ["chore"],
-            Decision => ["decision"],
+            Decision => ["decision", "dec", "adr"],
             Message => ["message"],
             Molecule => ["molecule"],
-            Spike => ["spike"],
-            Story => ["story"],
-            Milestone => ["milestone"],
+            Spike => ["spike", "investigation", "timebox"],
+            Story => ["story", "user-story", "user_story"],
+            Milestone => ["milestone", "ms"],
             Event => ["event"],
+            Convoy => ["convoy"],
+            Gate => ["gate"],
+            MergeRequest => ["merge-request", "merge_request", "mergerequest"],
+            Agent => ["agent"],
+            Role => ["role"],
+            Rig => ["rig"],
+            Session => ["session"],
+            Spec => ["spec"],
+            Convergence => ["convergence"],
         }
     }
 }
 
 impl BeadType {
     pub fn parse(raw: &str) -> Option<Self> {
-        Self::parse_str(raw)
+        let s = raw.trim().to_lowercase();
+        Self::parse_str(&s)
     }
 }
 
@@ -134,6 +154,14 @@ impl DepKind {
         matches!(
             self,
             Self::Blocks | Self::Parent | Self::ConditionalBlocks | Self::WaitsFor
+        )
+    }
+
+    /// Returns true if this dependency kind affects ready-work calculation.
+    pub fn affects_readiness(&self) -> bool {
+        matches!(
+            self,
+            Self::Blocks | Self::ConditionalBlocks | Self::WaitsFor
         )
     }
 }
@@ -221,6 +249,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn bead_type_parse_accepts_gascity_known_types_and_aliases() {
+        let cases = [
+            ("enhancement", BeadType::Feature),
+            ("feat", BeadType::Feature),
+            ("dec", BeadType::Decision),
+            ("adr", BeadType::Decision),
+            ("investigation", BeadType::Spike),
+            ("timebox", BeadType::Spike),
+            ("user-story", BeadType::Story),
+            ("user_story", BeadType::Story),
+            ("ms", BeadType::Milestone),
+            ("convoy", BeadType::Convoy),
+            ("gate", BeadType::Gate),
+            ("merge-request", BeadType::MergeRequest),
+            ("merge_request", BeadType::MergeRequest),
+            ("agent", BeadType::Agent),
+            ("role", BeadType::Role),
+            ("rig", BeadType::Rig),
+            ("session", BeadType::Session),
+            ("spec", BeadType::Spec),
+            ("convergence", BeadType::Convergence),
+        ];
+
+        for (raw, expected) in cases {
+            assert_eq!(BeadType::parse(raw), Some(expected), "{raw}");
+        }
+    }
+
+    #[test]
+    fn bead_type_json_preserves_gascity_strings_and_rejects_unknowns() {
+        assert_eq!(
+            serde_json::to_string(&BeadType::MergeRequest).unwrap(),
+            r#""merge-request""#
+        );
+        assert_eq!(
+            serde_json::from_str::<BeadType>(r#""merge_request""#).unwrap(),
+            BeadType::MergeRequest
+        );
+        assert_eq!(BeadType::parse("wisp"), None);
+        assert!(serde_json::from_str::<BeadType>(r#""wisp""#).is_err());
+    }
+
+    #[test]
     fn dep_kind_parse_accepts_aliases() {
         assert_eq!(DepKind::parse("blocks").unwrap(), DepKind::Blocks);
         assert_eq!(DepKind::parse("block").unwrap(), DepKind::Blocks);
@@ -236,6 +307,75 @@ mod tests {
             DepKind::parse("discoveredfrom").unwrap(),
             DepKind::DiscoveredFrom
         );
+    }
+
+    #[test]
+    fn dep_kind_parse_accepts_well_known_go_vocabulary() {
+        let cases = [
+            ("blocks", DepKind::Blocks),
+            ("parent-child", DepKind::Parent),
+            ("conditional-blocks", DepKind::ConditionalBlocks),
+            ("waits-for", DepKind::WaitsFor),
+            ("related", DepKind::Related),
+            ("discovered-from", DepKind::DiscoveredFrom),
+            ("replies-to", DepKind::RepliesTo),
+            ("relates-to", DepKind::RelatesTo),
+            ("duplicates", DepKind::Duplicates),
+            ("supersedes", DepKind::Supersedes),
+            ("authored-by", DepKind::AuthoredBy),
+            ("assigned-to", DepKind::AssignedTo),
+            ("approved-by", DepKind::ApprovedBy),
+            ("attests", DepKind::Attests),
+            ("tracks", DepKind::Tracks),
+            ("until", DepKind::Until),
+            ("caused-by", DepKind::CausedBy),
+            ("validates", DepKind::Validates),
+            ("delegated-from", DepKind::DelegatedFrom),
+        ];
+
+        for (raw, expected) in cases {
+            assert_eq!(DepKind::parse(raw).unwrap(), expected, "{raw}");
+        }
+    }
+
+    #[test]
+    fn dep_kind_readiness_predicate_matches_live_ready_queries() {
+        let readiness_affecting = [
+            DepKind::Blocks,
+            DepKind::ConditionalBlocks,
+            DepKind::WaitsFor,
+        ];
+        for kind in readiness_affecting {
+            assert!(
+                kind.affects_readiness(),
+                "expected {kind:?} to affect ready work"
+            );
+        }
+
+        let non_readiness = [
+            DepKind::Parent,
+            DepKind::Related,
+            DepKind::DiscoveredFrom,
+            DepKind::RepliesTo,
+            DepKind::RelatesTo,
+            DepKind::Duplicates,
+            DepKind::Supersedes,
+            DepKind::AuthoredBy,
+            DepKind::AssignedTo,
+            DepKind::ApprovedBy,
+            DepKind::Attests,
+            DepKind::Tracks,
+            DepKind::Until,
+            DepKind::CausedBy,
+            DepKind::Validates,
+            DepKind::DelegatedFrom,
+        ];
+        for kind in non_readiness {
+            assert!(
+                !kind.affects_readiness(),
+                "expected {kind:?} to be informational"
+            );
+        }
     }
 
     #[test]

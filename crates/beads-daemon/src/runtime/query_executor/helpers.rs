@@ -7,7 +7,7 @@ pub(super) fn compute_blocked_by(
         std::collections::BTreeMap::new();
 
     for key in state.dep_store().values() {
-        if key.kind() != DepKind::Blocks {
+        if !key.kind().affects_readiness() {
             continue;
         }
 

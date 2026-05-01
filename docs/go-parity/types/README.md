@@ -45,7 +45,7 @@ The mainline namespace. Synced to git, persistent retention, default visibility.
 - [`role`](role.md) — agent role/persona identity
 - [`agent`](agent.md) — agent runtime identity (NOTE: distinct from session-runtime state; see Sessions namespace below)
 - [`rig`](rig.md) — city namespace / store boundary identity
-- [`slot`](slot.md) — per-issue slot (claim-adjacent; see `primitives/metadata-remapping.md` for slot vs claim reconciliation)
+- [`slot`](slot.md) — deferred slot/claim mechanism; current vendor code does not require a `BeadType::Slot`
 
 ### Workflow control (from Agent 1's gascity subsystem decomposition)
 

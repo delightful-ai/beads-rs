@@ -83,12 +83,15 @@ Examples:
 
 ## D4. Dependency kinds should mirror the full known vocabulary
 
-Rust currently has four dep kinds. Go beads has a well-known vocabulary for workflow, graph, entity, tracking, reference, and delegation edges, while still accepting bounded custom strings.
+The earlier Rust enum had only four dep kinds. Go beads has a well-known vocabulary for workflow, graph, entity, tracking, reference, and delegation edges, while still accepting bounded custom strings.
 
-Floor 1 should add the full known vocabulary, not just the four names that appeared in the first draft. Readiness semantics must match Go:
+Floor 1 should add the full known vocabulary, not just the four names that appeared in the first draft. Readiness semantics must match the live ready-work paths, not stale helper comments:
 
-- readiness-affecting: `blocks`, `parent-child`, `conditional-blocks`, `waits-for`;
+- readiness-affecting: `blocks`, `conditional-blocks`, `waits-for`;
+- structural/DAG but non-readiness: `parent-child`;
 - non-readiness: the rest, including `tracks`, `relates-to`, `duplicates`, `supersedes`, `authored-by`, `assigned-to`, `approved-by`, `attests`, `until`, `caused-by`, `validates`, `delegated-from`.
+
+Audit note: vendor Go beads currently has `DependencyType.AffectsReadyWork()` returning true for `parent-child`, but its authoritative `GetReadyWork`/`computeBlockedIDs` SQL filters only `blocks`, `waits-for`, and `conditional-blocks`. Gas City's `MemStore.Ready` and `CachingStore.Ready` use the same three-kind filter. Treat `parent-child` as structural unless those live ready-work paths change.
 
 `waits-for` edge metadata should become a typed edge payload. Gas City-compatible JSON may still expose the old metadata string where its parser requires it.
 
@@ -101,7 +104,7 @@ Floor 1 should add the full known vocabulary, not just the four names that appea
    Add known variants and aliases. Do not base known type acceptance on `types.custom`.
 
 3. Full `DepKind` vocabulary.
-   Add all known Go dep kinds, readiness semantics, `dep add --type`, `dep remove`, `dep list`, and typed `waits-for` payload shape.
+   Add all known Go dep kinds, readiness semantics, `dep add --type`, `dep remove`, and `dep list`. Split typed `waits-for` payload shape into its own child if the enum/readiness pass would otherwise keep mixing vocabulary and edge-payload design.
 
 4. Gas City config facade.
    Implement only the `types.custom` surface Gas City doctor needs. Treat it as compatibility state or a virtual view.

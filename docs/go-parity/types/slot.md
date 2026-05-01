@@ -18,12 +18,13 @@ subdividing the bead. When gascity's work-type upgrade from simple mutex
 assignment to richer multi-assignee models completes, slots are the
 atomic unit.
 
-gascity registers `slot` as a required custom type
-(`internal/doctor/checks_custom_types.go:21`). The sampled code does not
-show programmatic slot creation — slot-as-bead-type coexists with
-"Slots" as a generic mechanism on any bead. This file documents the type
-(the bead variant); `primitives/slots.md` documents the mechanism (the
-per-bead slot map).
+Earlier drafts treated `slot` as a required custom type, but the current
+Gas City doctor list does not include it. Current vendor Go beads also
+creates merge slots as `IssueType: task` plus the `gt:slot` label and
+slot metadata (`internal/storage/merge_slot.go`), not as `issue_type:
+slot`. Keep `Slot` out of `BeadType` for Floor 1 until a live source path
+requires a slot bead variant. This file documents the deferred bead-type
+shape; `primitives/slots.md` documents the mechanism.
 
 Distinguishing feature vs adjacent:
 

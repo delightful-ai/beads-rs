@@ -315,8 +315,8 @@ fn write_stamp_to_rfc3339(ws: &crate::core::time::WriteStamp) -> String {
 pub fn is_bead_blocked(bead_id: &crate::core::identity::BeadId, state: &CanonicalState) -> bool {
     // Get all dependencies where this bead depends on something
     for key in state.deps_from(bead_id) {
-        // Only Blocks kind actually blocks
-        if key.kind() != DepKind::Blocks {
+        // Only readiness-affecting kinds actually block.
+        if !key.kind().affects_readiness() {
             continue;
         }
 

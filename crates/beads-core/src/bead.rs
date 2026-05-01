@@ -425,7 +425,16 @@ impl MutateForTest for BeadType {
             BeadType::Spike => BeadType::Story,
             BeadType::Story => BeadType::Milestone,
             BeadType::Milestone => BeadType::Event,
-            BeadType::Event => BeadType::Bug,
+            BeadType::Event => BeadType::Convoy,
+            BeadType::Convoy => BeadType::Gate,
+            BeadType::Gate => BeadType::MergeRequest,
+            BeadType::MergeRequest => BeadType::Agent,
+            BeadType::Agent => BeadType::Role,
+            BeadType::Role => BeadType::Rig,
+            BeadType::Rig => BeadType::Session,
+            BeadType::Session => BeadType::Spec,
+            BeadType::Spec => BeadType::Convergence,
+            BeadType::Convergence => BeadType::Bug,
         };
     }
 }
