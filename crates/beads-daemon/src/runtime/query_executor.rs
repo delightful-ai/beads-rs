@@ -13,7 +13,7 @@ use super::ipc::{ReadConsistency, Response, ResponseExt, ResponsePayload};
 use super::ops::{MapLiveError, OpError};
 use super::query::{Filters, QueryResult};
 use super::store::runtime::StoreRuntime;
-use crate::core::{BeadId, CanonicalState, WallClock};
+use crate::core::{BeadId, BeadRef, CanonicalState, NamespaceId, StoreState, WallClock};
 use crate::git_lane::GitLaneState;
 use crate::remote::RemoteUrl;
 use beads_api::{
@@ -29,6 +29,7 @@ struct ReadCtx<'a> {
     remote: RemoteUrl,
     read: ReadScope,
     store: &'a StoreRuntime,
+    store_state: &'a StoreState,
     state: &'a CanonicalState,
     repo_state: Option<&'a GitLaneState>,
 }
@@ -41,6 +42,115 @@ struct StatusParts {
     last_sync_wall_ms: Option<u64>,
     consecutive_failures: u32,
     remote_url: RemoteUrl,
+}
+
+fn issue_summary_for_ref(store_state: &StoreState, bead_ref: &BeadRef) -> Option<IssueSummary> {
+    let state = store_state.get(bead_ref.namespace())?;
+    let view = state.bead_view(bead_ref.id())?;
+    Some(IssueSummary::from_view(bead_ref.namespace(), &view))
+}
+
+fn show_details_for_store(
+    read_namespace: &NamespaceId,
+    id: &BeadId,
+    state: &CanonicalState,
+    store_state: &StoreState,
+) -> Result<ShowDetails, OpError> {
+    let root_ref = BeadRef::new(read_namespace.clone(), id.clone());
+    if store_state.resolve_ref(&root_ref).is_none() {
+        return Err(OpError::NotFound(id.clone()));
+    }
+
+    let view = state.bead_view(id).expect("live bead should have view");
+    let mut issue = Issue::from_view(read_namespace, &view);
+    let (incoming, outgoing) = deps_for_store(read_namespace, id, store_state)?;
+
+    issue.deps_incoming = incoming.clone();
+    issue.deps_outgoing = outgoing.clone();
+
+    let mut related_refs = std::collections::BTreeSet::new();
+    for edge in &incoming {
+        if let (Ok(namespace), Ok(id)) = (
+            NamespaceId::parse(&edge.from_namespace),
+            BeadId::parse(&edge.from),
+        ) {
+            related_refs.insert(BeadRef::new(namespace, id));
+        }
+    }
+    for edge in &outgoing {
+        if let (Ok(namespace), Ok(id)) = (
+            NamespaceId::parse(&edge.to_namespace),
+            BeadId::parse(&edge.to),
+        ) {
+            related_refs.insert(BeadRef::new(namespace, id));
+        }
+    }
+
+    let summaries = related_refs
+        .into_iter()
+        .filter_map(|bead_ref| issue_summary_for_ref(store_state, &bead_ref))
+        .collect();
+
+    Ok(ShowDetails {
+        issue,
+        incoming,
+        outgoing,
+        summaries,
+    })
+}
+
+fn deps_for_store(
+    read_namespace: &NamespaceId,
+    id: &BeadId,
+    store_state: &StoreState,
+) -> Result<(Vec<DepEdge>, Vec<DepEdge>), OpError> {
+    let root_ref = BeadRef::new(read_namespace.clone(), id.clone());
+    if store_state.resolve_ref(&root_ref).is_none() {
+        return Err(OpError::NotFound(id.clone()));
+    }
+
+    let incoming = store_state
+        .deps_to(&root_ref)
+        .into_iter()
+        .map(|key| DepEdge::from(&key))
+        .collect();
+    let outgoing = store_state
+        .deps_from(&root_ref)
+        .into_iter()
+        .map(|key| DepEdge::from(&key))
+        .collect();
+    Ok((incoming, outgoing))
+}
+
+fn dep_tree_for_store(
+    read_namespace: &NamespaceId,
+    id: &BeadId,
+    store_state: &StoreState,
+) -> Result<Vec<DepEdge>, OpError> {
+    let root_ref = BeadRef::new(read_namespace.clone(), id.clone());
+    if store_state.resolve_ref(&root_ref).is_none() {
+        return Err(OpError::NotFound(id.clone()));
+    }
+
+    let mut edges = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(root_ref);
+
+    while let Some(current) = queue.pop_front() {
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+
+        for key in store_state.deps_from(&current) {
+            edges.push(DepEdge::from(&key));
+            if !visited.contains(key.to_ref()) {
+                queue.push_back(key.to_ref().clone());
+            }
+        }
+    }
+
+    Ok(edges)
 }
 
 impl Daemon {
@@ -67,6 +177,7 @@ impl Daemon {
             remote,
             read,
             store,
+            store_state: &store.state,
             state,
             repo_state,
         })
@@ -94,6 +205,7 @@ impl Daemon {
             remote,
             read,
             store,
+            store_state: &store.state,
             state,
             repo_state,
         })
@@ -182,41 +294,8 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
-            ctx.state.require_live(id).map_live_err(id)?;
-
-            let view = ctx.state.bead_view(id).expect("live bead should have view");
-            let mut issue = Issue::from_view(ctx.read.namespace(), &view);
-
-            let mut incoming = Vec::new();
-            let mut outgoing = Vec::new();
-            let mut related_ids = std::collections::BTreeSet::new();
-
-            for key in ctx.state.deps_from(id) {
-                outgoing.push(DepEdge::from(&key));
-                related_ids.insert(key.to().clone());
-            }
-
-            for key in ctx.state.deps_to(id) {
-                incoming.push(DepEdge::from(&key));
-                related_ids.insert(key.from().clone());
-            }
-
-            issue.deps_incoming = incoming.clone();
-            issue.deps_outgoing = outgoing.clone();
-
-            let mut summaries = Vec::with_capacity(related_ids.len());
-            for related_id in related_ids {
-                if let Some(dep_view) = ctx.state.bead_view(&related_id) {
-                    summaries.push(IssueSummary::from_view(ctx.read.namespace(), &dep_view));
-                }
-            }
-
-            let details = ShowDetails {
-                issue,
-                incoming,
-                outgoing,
-                summaries,
-            };
+            let details =
+                show_details_for_store(ctx.read.namespace(), id, ctx.state, ctx.store_state)?;
             Ok(ResponsePayload::query(QueryResult::ShowDetails(details)))
         })
     }
@@ -378,29 +457,7 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
-            let state = ctx.state;
-
-            // Check if bead exists
-            state.require_live(id).map_live_err(id)?;
-
-            // Collect all edges in the transitive closure
-            let mut edges = Vec::new();
-            let mut visited = std::collections::HashSet::new();
-            let mut queue = std::collections::VecDeque::new();
-            queue.push_back(id.clone());
-
-            while let Some(current) = queue.pop_front() {
-                if !visited.insert(current.clone()) {
-                    continue;
-                }
-
-                for key in state.deps_from(&current) {
-                    edges.push(DepEdge::from(&key));
-                    if !visited.contains(key.to()) {
-                        queue.push_back(key.to().clone());
-                    }
-                }
-            }
+            let edges = dep_tree_for_store(ctx.read.namespace(), id, ctx.store_state)?;
 
             Ok(ResponsePayload::query(QueryResult::DepTree {
                 root: id.clone(),
@@ -418,21 +475,7 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
-            let state = ctx.state;
-
-            // Check if bead exists
-            state.require_live(id).map_live_err(id)?;
-
-            let mut incoming = Vec::new();
-            let mut outgoing = Vec::new();
-
-            for key in state.deps_from(id) {
-                outgoing.push(DepEdge::from(&key));
-            }
-
-            for key in state.deps_to(id) {
-                incoming.push(DepEdge::from(&key));
-            }
+            let (incoming, outgoing) = deps_for_store(ctx.read.namespace(), id, ctx.store_state)?;
 
             Ok(ResponsePayload::query(QueryResult::Deps {
                 incoming,
@@ -474,6 +517,7 @@ impl Daemon {
                 remote,
                 read,
                 store,
+                store_state: _,
                 state,
                 repo_state,
             } = ctx;
@@ -998,12 +1042,12 @@ impl Daemon {
 
 #[cfg(test)]
 mod tests {
-    use super::{Issue, IssueSummary};
+    use super::{Issue, IssueSummary, dep_tree_for_store, deps_for_store, show_details_for_store};
     use super::{compute_blocked_by, dep_cycles_from_state, sort_ready_issues};
     use crate::core::{
-        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey,
-        DepKind, Dot, Lww, NamespaceId, Priority, ReplicaId, Stamp, Workflow, WorkflowStatus,
-        WriteStamp,
+        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadRef, BeadType, CanonicalState, Claim,
+        DepKey, DepKind, Dot, Lww, NamespaceId, Priority, ReplicaId, Stamp, StoreState, Workflow,
+        WorkflowStatus, WriteStamp,
     };
     use uuid::Uuid;
 
@@ -1121,6 +1165,70 @@ mod tests {
         state.apply_dep_add(dep_key, dot, stamp);
     }
 
+    fn ref_in(namespace: &NamespaceId, id: &str) -> BeadRef {
+        BeadRef::new(namespace.clone(), BeadId::parse(id).expect("bead id"))
+    }
+
+    fn add_store_dep(
+        store: &mut StoreState,
+        owner_namespace: &NamespaceId,
+        from_namespace: &NamespaceId,
+        from: &str,
+        to_namespace: &NamespaceId,
+        to: &str,
+        counter: u64,
+    ) {
+        let key = DepKey::new(
+            ref_in(from_namespace, from),
+            ref_in(to_namespace, to),
+            DepKind::Blocks,
+        )
+        .expect("dep key");
+        let dep_key = store.check_dep_add_key(key).expect("checked dep key");
+        let dot = Dot {
+            replica: ReplicaId::new(Uuid::from_u128(counter as u128 + 1)),
+            counter,
+        };
+        let actor = ActorId::new("tester").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(20_000 + counter, 0), actor);
+        store
+            .get_mut(owner_namespace)
+            .expect("owner namespace")
+            .apply_dep_add(dep_key, dot, stamp);
+    }
+
+    fn cross_namespace_store() -> (StoreState, NamespaceId, NamespaceId, NamespaceId) {
+        let actor = ActorId::new("tester").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(4_000, 0), actor);
+        let sessions = NamespaceId::parse("sessions").unwrap();
+        let extmsg = NamespaceId::parse("extmsg").unwrap();
+        let core = NamespaceId::core();
+        let mut store = StoreState::new();
+        store
+            .core_mut()
+            .insert(make_bead("bd-core", &stamp))
+            .expect("core bead");
+        store
+            .ensure_namespace(sessions.clone())
+            .insert(make_bead("bd-session", &stamp))
+            .expect("session bead");
+        store
+            .ensure_namespace(extmsg.clone())
+            .insert(make_bead("bd-extmsg", &stamp))
+            .expect("extmsg bead");
+        add_store_dep(
+            &mut store,
+            &sessions,
+            &sessions,
+            "bd-session",
+            &core,
+            "bd-core",
+            1,
+        );
+        add_store_dep(&mut store, &core, &core, "bd-core", &extmsg, "bd-extmsg", 2);
+        (store, sessions, core, extmsg)
+    }
+
     #[test]
     fn blocked_by_uses_live_ready_work_dep_kinds() {
         let actor = ActorId::new("tester").unwrap();
@@ -1164,6 +1272,60 @@ mod tests {
             !blocked_by.contains_key(&BeadId::parse("bd-track").unwrap()),
             "tracks must remain non-blocking"
         );
+    }
+
+    #[test]
+    fn deps_for_store_returns_cross_namespace_edges_from_either_endpoint() {
+        let (store, sessions, core, _) = cross_namespace_store();
+        let session_id = BeadId::parse("bd-session").unwrap();
+        let core_id = BeadId::parse("bd-core").unwrap();
+
+        let (_, outgoing) = deps_for_store(&sessions, &session_id, &store).unwrap();
+        assert_eq!(outgoing.len(), 1);
+        assert_eq!(outgoing[0].from_namespace, "sessions");
+        assert_eq!(outgoing[0].from, "bd-session");
+        assert_eq!(outgoing[0].to_namespace, "core");
+        assert_eq!(outgoing[0].to, "bd-core");
+
+        let (incoming, _) = deps_for_store(&core, &core_id, &store).unwrap();
+        assert_eq!(incoming.len(), 1);
+        assert_eq!(incoming[0].from_namespace, "sessions");
+        assert_eq!(incoming[0].from, "bd-session");
+        assert_eq!(incoming[0].to_namespace, "core");
+        assert_eq!(incoming[0].to, "bd-core");
+    }
+
+    #[test]
+    fn show_details_for_store_summarizes_cross_namespace_targets() {
+        let (store, sessions, _, _) = cross_namespace_store();
+        let session_state = store.get(&sessions).expect("sessions state");
+        let details = show_details_for_store(
+            &sessions,
+            &BeadId::parse("bd-session").unwrap(),
+            session_state,
+            &store,
+        )
+        .unwrap();
+
+        assert_eq!(details.issue.namespace, sessions);
+        assert_eq!(details.outgoing.len(), 1);
+        assert_eq!(details.outgoing[0].to_namespace, "core");
+        assert_eq!(details.summaries.len(), 1);
+        assert_eq!(details.summaries[0].namespace, NamespaceId::core());
+        assert_eq!(details.summaries[0].id, "bd-core");
+    }
+
+    #[test]
+    fn dep_tree_for_store_traverses_cross_namespace_edges() {
+        let (store, sessions, _, _) = cross_namespace_store();
+        let edges =
+            dep_tree_for_store(&sessions, &BeadId::parse("bd-session").unwrap(), &store).unwrap();
+
+        assert_eq!(edges.len(), 2);
+        assert_eq!(edges[0].from_namespace, "sessions");
+        assert_eq!(edges[0].to_namespace, "core");
+        assert_eq!(edges[1].from_namespace, "core");
+        assert_eq!(edges[1].to_namespace, "extmsg");
     }
 
     #[test]
