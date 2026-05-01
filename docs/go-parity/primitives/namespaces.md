@@ -15,9 +15,9 @@ This file answers three questions:
 
 ### 1.1 The claim vs. the code
 
-The user's framing — "Rust has a namespace feature, and it was designed especially for this" — is **half true**. The spec (`REALTIME_SPEC_DRAFT.md:215-252`) and the types (`crates/beads-core/src/namespace.rs`) describe a rich per-namespace policy model with sync, retention, visibility, ready-eligibility, and GC authority dimensions. The types exist, they parse, they round-trip through config, and they survive an admin `reload_policies` call.
+The user's framing — "Rust has a namespace feature, and it was designed especially for this" — is **mostly true for graph identity and sync policy, still false for retention/visibility policy**. The spec (`REALTIME_SPEC_DRAFT.md:215-252`) and the types (`crates/beads-core/src/namespace.rs`) describe a rich per-namespace policy model with sync, retention, visibility, ready-eligibility, and GC authority dimensions. The types exist, they parse, they round-trip through config, and they survive an admin `reload_policies` call.
 
-But most of the policy fields are **defined, parsed, and diffed — not enforced**. `persist_to_git`, `retention`, `visibility`, `ready_eligible`, `gc_authority`, and `ttl_basis` are each read in exactly two places today: the struct literal in `core_default()`/`sys_default()`/`wf_default()`/`tmp_default()` and the diff printer in `runtime/admin/policy_reload.rs`. Only `replicate_mode` is actually consumed by behavior (by the durability coordinator, `crates/beads-daemon-core/src/durability.rs:264-323`). Treat the rest as a scaffolded surface waiting for enforcement, not a finished feature.
+The namespace graph path now has hard semantics: dependency endpoints carry `BeadRef { namespace, id }`, traversal is `StoreState`-aware, `ready_eligible` suppresses namespaces from ready output, and checkpoint-group assembly rejects namespaces with `persist_to_git=false` instead of silently publishing them. The remaining major inert policy fields are `retention`, `visibility`, `gc_authority`, and `ttl_basis`; those still need dedicated enforcement before sessions/extmsg/wisps can rely on them for lifecycle behavior.
 
 ### 1.2 `NamespaceId`: parse rules and default
 

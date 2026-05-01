@@ -60,6 +60,14 @@ pub struct CreateArgs {
     #[arg(long)]
     pub stdin: bool,
 
+    /// Unavailable until retention GC sweeper exists.
+    #[arg(long, hide = true)]
+    pub ephemeral: bool,
+
+    /// Unavailable until retention GC sweeper exists.
+    #[arg(long = "wisp-type", hide = true, value_name = "TYPE")]
+    pub wisp_type: Option<String>,
+
     /// Assignee (compat; only supports current actor).
     #[arg(short = 'a', long)]
     pub assignee: Option<String>,
@@ -114,6 +122,8 @@ pub struct CreateArgs {
 }
 
 pub fn handle(ctx: &CliRuntimeCtx, mut args: CreateArgs) -> CommandResult<()> {
+    reject_unavailable_ephemeral_args(&args)?;
+
     if let Some(path) = args.file.take() {
         if args.title.is_some() || args.title_flag.is_some() {
             return Err(
@@ -261,6 +271,18 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: CreateArgs) -> CommandResult<()> {
     } else {
         print_line(&render_create(&issue))?;
     }
+    Ok(())
+}
+
+fn reject_unavailable_ephemeral_args(args: &CreateArgs) -> CommandResult<()> {
+    if args.ephemeral || args.wisp_type.is_some() {
+        return Err(validation_error(
+            "ephemeral",
+            "ephemeral/wisp creation requires a retention GC sweeper; no bead is routed to the wisps namespace until that lands",
+        )
+        .into());
+    }
+
     Ok(())
 }
 
@@ -652,6 +674,36 @@ mod tests {
     use crate::commands::CommandError;
     use beads_core::NamespaceId;
 
+    fn sample_create_args() -> CreateArgs {
+        CreateArgs {
+            title: Some("Title".to_string()),
+            title_flag: None,
+            file: None,
+            bead_type: None,
+            priority: None,
+            description: None,
+            body: None,
+            message: None,
+            body_file: None,
+            description_file: None,
+            stdin: false,
+            ephemeral: false,
+            wisp_type: None,
+            assignee: None,
+            labels: Vec::new(),
+            label: Vec::new(),
+            design: None,
+            design_file: None,
+            acceptance: None,
+            external_ref: None,
+            id: None,
+            parent: None,
+            deps: Vec::new(),
+            estimate: None,
+            force: false,
+        }
+    }
+
     fn sample_ctx() -> CliRuntimeCtx {
         CliRuntimeCtx {
             repo: std::path::PathBuf::from("/tmp/beads"),
@@ -667,40 +719,40 @@ mod tests {
 
     #[test]
     fn create_rejects_double_stdin_usage() {
-        let err = handle(
-            &sample_ctx(),
-            CreateArgs {
-                title: Some("Title".to_string()),
-                title_flag: None,
-                file: None,
-                bead_type: None,
-                priority: None,
-                description: None,
-                body: None,
-                message: None,
-                body_file: None,
-                description_file: None,
-                stdin: true,
-                assignee: None,
-                labels: Vec::new(),
-                label: Vec::new(),
-                design: None,
-                design_file: Some(std::path::PathBuf::from("-")),
-                acceptance: None,
-                external_ref: None,
-                id: None,
-                parent: None,
-                deps: Vec::new(),
-                estimate: None,
-                force: false,
-            },
-        )
-        .expect_err("double stdin usage must fail");
+        let mut args = sample_create_args();
+        args.stdin = true;
+        args.design_file = Some(std::path::PathBuf::from("-"));
+
+        let err = handle(&sample_ctx(), args).expect_err("double stdin usage must fail");
 
         assert!(matches!(err, CommandError::Validation(_)));
         assert!(
             err.to_string()
                 .contains("description and design cannot both read from stdin")
         );
+    }
+
+    #[test]
+    fn create_rejects_ephemeral_until_retention_gc_exists() {
+        let mut args = sample_create_args();
+        args.ephemeral = true;
+
+        let err = reject_unavailable_ephemeral_args(&args)
+            .expect_err("ephemeral create must stay guarded");
+
+        assert!(matches!(err, CommandError::Validation(_)));
+        assert!(err.to_string().contains("retention GC sweeper"));
+    }
+
+    #[test]
+    fn create_rejects_wisp_type_until_retention_gc_exists() {
+        let mut args = sample_create_args();
+        args.wisp_type = Some("heartbeat".to_string());
+
+        let err = reject_unavailable_ephemeral_args(&args)
+            .expect_err("wisp-type create must stay guarded");
+
+        assert!(matches!(err, CommandError::Validation(_)));
+        assert!(err.to_string().contains("wisps namespace"));
     }
 }

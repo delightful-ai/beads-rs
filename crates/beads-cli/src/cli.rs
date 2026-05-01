@@ -651,6 +651,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_create_accepts_hidden_ephemeral_guard_flags() {
+        let cli = parse_from([
+            "bd",
+            "create",
+            "Heartbeat",
+            "--ephemeral",
+            "--wisp-type",
+            "heartbeat",
+        ]);
+
+        match cli.command {
+            Command::Create(args) => {
+                assert!(args.ephemeral);
+                assert_eq!(args.wisp_type.as_deref(), Some("heartbeat"));
+            }
+            other => panic!("expected create command, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn parse_update_accepts_stdin_and_design_file_flags() {
         let cli = parse_from([
             "bd",

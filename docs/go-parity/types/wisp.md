@@ -111,7 +111,7 @@ A bead's `BeadType` is still whatever fits the underlying work (`Task`, `Event`,
 - `bd list` filters by namespace via existing `--namespace` flag. `bd list --namespace=wisps` shows ephemeral beads.
 - `bd purge` (see [`../cmds/gascity/03-purge.md`](../cmds/gascity/03-purge.md)) may be the manual force-sweep; the automatic sweeper runs on a schedule.
 
-Until the retention sweeper exists, the ephemeral create path must stay unavailable or explicitly error. A namespace placement alone does not delete anything, and accepting `--ephemeral` before GC enforcement would make the UI promise stronger behavior than the store provides.
+Until the retention sweeper exists, the ephemeral create path must stay unavailable or explicitly error. The Rust CLI currently rejects hidden compatibility flags such as `bd create --ephemeral` and `bd create --wisp-type <type>` with a validation error instead of routing anything into a `wisps` namespace. A namespace placement alone does not delete anything, and accepting `--ephemeral` before GC enforcement would make the UI promise stronger behavior than the store provides.
 
 ## Cross-references
 
