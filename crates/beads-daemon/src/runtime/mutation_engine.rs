@@ -370,6 +370,7 @@ impl MutationEngine {
         dot_alloc: &mut dyn DotAllocator,
     ) -> Result<PlannedMutation, OpError> {
         let (ctx, stamp) = stamped.into_parts();
+        let namespace = ctx.namespace.clone();
         let write_stamp = stamp.at.clone();
         let mut durability = PendingPlanningDurabilityEffects::default();
 
@@ -391,6 +392,7 @@ impl MutationEngine {
             } => self.plan_create(
                 state,
                 &stamp,
+                &namespace,
                 dot_alloc,
                 &mut durability,
                 id_ctx,
@@ -417,9 +419,15 @@ impl MutationEngine {
             ParsedMutationRequest::RemoveLabels { id, labels } => {
                 self.plan_remove_labels(state, id, labels)?
             }
-            ParsedMutationRequest::SetParent { id, parent } => {
-                self.plan_set_parent(state, id, parent, &stamp, dot_alloc, &mut durability)?
-            }
+            ParsedMutationRequest::SetParent { id, parent } => self.plan_set_parent(
+                state,
+                &namespace,
+                id,
+                parent,
+                &stamp,
+                dot_alloc,
+                &mut durability,
+            )?,
             ParsedMutationRequest::Close {
                 id,
                 reason,
@@ -429,11 +437,18 @@ impl MutationEngine {
             ParsedMutationRequest::Delete { id, reason } => {
                 self.plan_delete(state, &stamp, id, reason)?
             }
-            ParsedMutationRequest::AddDep { from, to, kind } => {
-                self.plan_add_dep(state, &stamp, from, to, kind, dot_alloc, &mut durability)?
-            }
+            ParsedMutationRequest::AddDep { from, to, kind } => self.plan_add_dep(
+                state,
+                &namespace,
+                &stamp,
+                from,
+                to,
+                kind,
+                dot_alloc,
+                &mut durability,
+            )?,
             ParsedMutationRequest::RemoveDep { from, to, kind } => {
-                self.plan_remove_dep(state, &stamp, from, to, kind)?
+                self.plan_remove_dep(state, &namespace, &stamp, from, to, kind)?
             }
             ParsedMutationRequest::AddNote { id, content } => {
                 self.plan_add_note(state, &stamp, id, content)?
@@ -707,6 +722,7 @@ impl MutationEngine {
         &self,
         state: &CanonicalState,
         stamp: &Stamp,
+        namespace: &NamespaceId,
         dot_alloc: &mut dyn DotAllocator,
         durability: &mut PendingPlanningDurabilityEffects,
         id_ctx: Option<&IdContext>,
@@ -784,12 +800,12 @@ impl MutationEngine {
             if state.get_live(spec.id()).is_none() {
                 return Err(OpError::NotFound(spec.id().clone()));
             }
-            DepKey::new(id.clone(), spec.id().clone(), spec.kind()).map_err(|e| {
-                OpError::ValidationFailed {
+            DepKey::new_local(namespace, id.clone(), spec.id().clone(), spec.kind()).map_err(
+                |e| OpError::ValidationFailed {
                     field: "dependency".into(),
                     reason: e.to_string(),
-                }
-            })?;
+                },
+            )?;
         }
 
         let mut source_repo_value = None;
@@ -848,11 +864,12 @@ impl MutationEngine {
         }
 
         if let Some(parent_id) = parent_id {
-            let edge =
-                ParentEdge::new(id.clone(), parent_id).map_err(|e| OpError::ValidationFailed {
+            let edge = ParentEdge::new_local(namespace, id.clone(), parent_id).map_err(|e| {
+                OpError::ValidationFailed {
                     field: "parent".into(),
                     reason: e.to_string(),
-                })?;
+                }
+            })?;
             delta
                 .insert(TxnOpV1::ParentAdd(WireParentAddV1 {
                     edge,
@@ -864,6 +881,7 @@ impl MutationEngine {
         for spec in dependencies.iter() {
             let key = Self::dep_add_key_into_inner(self.checked_dep_add_key(
                 state,
+                namespace,
                 id.clone(),
                 spec.id().clone(),
                 spec.kind(),
@@ -1087,6 +1105,7 @@ impl MutationEngine {
     fn checked_dep_add_key(
         &self,
         state: &CanonicalState,
+        namespace: &NamespaceId,
         from: BeadId,
         to: BeadId,
         kind: DepKind,
@@ -1097,9 +1116,11 @@ impl MutationEngine {
                 reason: "parent edges must use set-parent".into(),
             });
         }
-        let key = DepKey::new(from, to, kind).map_err(|e| OpError::ValidationFailed {
-            field: "dependency".into(),
-            reason: e.to_string(),
+        let key = DepKey::new_local(namespace, from, to, kind).map_err(|e| {
+            OpError::ValidationFailed {
+                field: "dependency".into(),
+                reason: e.to_string(),
+            }
         })?;
         state
             .check_dep_add_key(key)
@@ -1120,6 +1141,7 @@ impl MutationEngine {
     fn plan_add_dep(
         &self,
         state: &CanonicalState,
+        namespace: &NamespaceId,
         _stamp: &Stamp,
         from: BeadId,
         to: BeadId,
@@ -1135,6 +1157,7 @@ impl MutationEngine {
         }
         let key = Self::dep_add_key_into_inner(self.checked_dep_add_key(
             state,
+            namespace,
             from.clone(),
             to.clone(),
             kind,
@@ -1156,6 +1179,7 @@ impl MutationEngine {
     fn plan_remove_dep(
         &self,
         state: &CanonicalState,
+        namespace: &NamespaceId,
         _stamp: &Stamp,
         from: BeadId,
         to: BeadId,
@@ -1167,11 +1191,12 @@ impl MutationEngine {
                 reason: "parent edges must use set-parent".into(),
             });
         }
-        let key =
-            DepKey::new(from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
+        let key = DepKey::new_local(namespace, from.clone(), to.clone(), kind).map_err(|e| {
+            OpError::ValidationFailed {
                 field: "dependency".into(),
                 reason: e.to_string(),
-            })?;
+            }
+        })?;
 
         let mut delta = TxnDeltaV1::new();
         delta
@@ -1189,6 +1214,7 @@ impl MutationEngine {
     fn plan_set_parent(
         &self,
         state: &CanonicalState,
+        namespace: &NamespaceId,
         id: BeadId,
         parent: Option<BeadId>,
         _stamp: &Stamp,
@@ -1199,16 +1225,16 @@ impl MutationEngine {
 
         let parent_edge = match parent.as_ref() {
             Some(parent_id) => {
-                let edge = ParentEdge::new(id.clone(), parent_id.clone()).map_err(|e| {
-                    OpError::ValidationFailed {
+                let edge = ParentEdge::new_local(namespace, id.clone(), parent_id.clone())
+                    .map_err(|e| OpError::ValidationFailed {
                         field: "parent".into(),
                         reason: e.to_string(),
-                    }
-                })?;
+                    })?;
                 if state.get_live(parent_id).is_none() {
                     return Err(OpError::NotFound(parent_id.clone()));
                 }
-                if let Err(err) = state.check_no_cycle(edge.child(), edge.parent(), DepKind::Parent)
+                if let Err(err) =
+                    state.check_no_cycle(edge.child_ref(), edge.parent_ref(), DepKind::Parent)
                 {
                     return Err(OpError::ValidationFailed {
                         field: "parent".into(),
@@ -2499,7 +2525,13 @@ mod tests {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        let key = DepKey::new(bead_a.clone(), bead_b.clone(), DepKind::Blocks).unwrap();
+        let key = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_a.clone(),
+            bead_b.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap();
         let key = state.check_dep_add_key(key).expect("acyclic key");
         state.apply_dep_add(key, dot, stamp.clone());
 
@@ -2553,7 +2585,13 @@ mod tests {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        let key = DepKey::new(bead_a.clone(), bead_b.clone(), DepKind::Related).unwrap();
+        let key = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_a.clone(),
+            bead_b.clone(),
+            DepKind::Related,
+        )
+        .unwrap();
         let key = state.check_dep_add_key(key).expect("free key");
         state.apply_dep_add(key, dot, stamp.clone());
 
@@ -2612,7 +2650,8 @@ mod tests {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        let edge = ParentEdge::new(bead_a.clone(), bead_b.clone()).unwrap();
+        let edge =
+            ParentEdge::new_local(&NamespaceId::core(), bead_a.clone(), bead_b.clone()).unwrap();
         let key = state
             .check_dep_add_key(edge.to_dep_key())
             .expect("parent key");
@@ -2663,7 +2702,8 @@ mod tests {
             state.insert(make_bead(id.as_str(), &actor)).unwrap();
         }
 
-        let edge = ParentEdge::new(child_id.clone(), parent_a.clone()).unwrap();
+        let edge = ParentEdge::new_local(&NamespaceId::core(), child_id.clone(), parent_a.clone())
+            .unwrap();
         let dot = Dot {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,

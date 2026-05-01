@@ -13,7 +13,7 @@ use super::ipc::{ReadConsistency, Response, ResponseExt, ResponsePayload};
 use super::ops::{MapLiveError, OpError};
 use super::query::{Filters, QueryResult};
 use super::store::runtime::StoreRuntime;
-use crate::core::{BeadId, CanonicalState, DepKey, WallClock};
+use crate::core::{BeadId, CanonicalState, WallClock};
 use crate::git_lane::GitLaneState;
 use crate::remote::RemoteUrl;
 use beads_api::{
@@ -191,18 +191,14 @@ impl Daemon {
             let mut outgoing = Vec::new();
             let mut related_ids = std::collections::BTreeSet::new();
 
-            for (to, kind) in ctx.state.dep_indexes().out_edges(id) {
-                if let Ok(key) = DepKey::new(id.clone(), to.clone(), *kind) {
-                    outgoing.push(DepEdge::from(&key));
-                    related_ids.insert(to.clone());
-                }
+            for key in ctx.state.deps_from(id) {
+                outgoing.push(DepEdge::from(&key));
+                related_ids.insert(key.to().clone());
             }
 
-            for (from, kind) in ctx.state.dep_indexes().in_edges(id) {
-                if let Ok(key) = DepKey::new(from.clone(), id.clone(), *kind) {
-                    incoming.push(DepEdge::from(&key));
-                    related_ids.insert(from.clone());
-                }
+            for key in ctx.state.deps_to(id) {
+                incoming.push(DepEdge::from(&key));
+                related_ids.insert(key.from().clone());
             }
 
             issue.deps_incoming = incoming.clone();
@@ -398,12 +394,10 @@ impl Daemon {
                     continue;
                 }
 
-                for (to, kind) in state.dep_indexes().out_edges(&current) {
-                    if let Ok(key) = DepKey::new(current.clone(), to.clone(), *kind) {
-                        edges.push(DepEdge::from(&key));
-                        if !visited.contains(key.to()) {
-                            queue.push_back(key.to().clone());
-                        }
+                for key in state.deps_from(&current) {
+                    edges.push(DepEdge::from(&key));
+                    if !visited.contains(key.to()) {
+                        queue.push_back(key.to().clone());
                     }
                 }
             }
@@ -432,16 +426,12 @@ impl Daemon {
             let mut incoming = Vec::new();
             let mut outgoing = Vec::new();
 
-            for (to, kind) in state.dep_indexes().out_edges(id) {
-                if let Ok(key) = DepKey::new(id.clone(), to.clone(), *kind) {
-                    outgoing.push(DepEdge::from(&key));
-                }
+            for key in state.deps_from(id) {
+                outgoing.push(DepEdge::from(&key));
             }
 
-            for (from, kind) in state.dep_indexes().in_edges(id) {
-                if let Ok(key) = DepKey::new(from.clone(), id.clone(), *kind) {
-                    incoming.push(DepEdge::from(&key));
-                }
+            for key in state.deps_to(id) {
+                incoming.push(DepEdge::from(&key));
             }
 
             Ok(ResponsePayload::query(QueryResult::Deps {
@@ -978,8 +968,8 @@ impl Daemon {
                     if !visited.insert(current.clone()) {
                         continue;
                     }
-                    for (to, _) in state.dep_indexes().out_edges(&current) {
-                        queue.push_back(to.clone());
+                    for key in state.deps_from(&current) {
+                        queue.push_back(key.to().clone());
                     }
                 }
             }
@@ -1114,7 +1104,8 @@ mod tests {
     }
 
     fn add_dep(state: &mut CanonicalState, from: &str, to: &str, kind: DepKind, counter: u64) {
-        let key = DepKey::new(
+        let key = DepKey::new_local(
+            &NamespaceId::core(),
             BeadId::parse(from).expect("from id"),
             BeadId::parse(to).expect("to id"),
             kind,
@@ -1186,13 +1177,15 @@ mod tests {
         state.insert(make_bead(a, &stamp)).expect("insert bead a");
         state.insert(make_bead(b, &stamp)).expect("insert bead b");
 
-        let ab = DepKey::new(
+        let ab = DepKey::new_local(
+            &NamespaceId::core(),
             crate::core::BeadId::parse(a).unwrap(),
             crate::core::BeadId::parse(b).unwrap(),
             DepKind::Blocks,
         )
         .expect("dep key");
-        let ba = DepKey::new(
+        let ba = DepKey::new_local(
+            &NamespaceId::core(),
             crate::core::BeadId::parse(b).unwrap(),
             crate::core::BeadId::parse(a).unwrap(),
             DepKind::Blocks,

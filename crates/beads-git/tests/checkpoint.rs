@@ -165,7 +165,13 @@ fn build_core_store_state() -> (StoreState, Watermarks<Durable>, CheckpointExpor
     state.insert_tombstone(tombstone);
 
     let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
-    let dep_key = DepKey::new(bead_id.clone(), other_id.clone(), DepKind::Blocks).expect("dep key");
+    let dep_key = DepKey::new_local(
+        &NamespaceId::core(),
+        bead_id.clone(),
+        other_id.clone(),
+        DepKind::Blocks,
+    )
+    .expect("dep key");
     let dot = Dot {
         replica: origin,
         counter: 1,

@@ -1997,7 +1997,8 @@ mod tests {
     use crate::core::identity::BeadId;
     use crate::core::time::{Stamp, WriteStamp};
     use crate::core::{
-        ActorId, CanonicalState, DepKey, Dot, ReplicaId, Seq0, StoreState, Watermark, WatermarkPair,
+        ActorId, CanonicalState, DepKey, Dot, NamespaceId, ReplicaId, Seq0, StoreState, Watermark,
+        WatermarkPair,
     };
     use crate::paths;
     use crate::remote::RemoteUrl;
@@ -3374,7 +3375,13 @@ mod tests {
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         let bead = crate::core::Bead::new(core, fields);
-        let dep_key = DepKey::new(bead_id.clone(), dep_to, DepKind::Blocks).expect("dep key");
+        let dep_key = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id.clone(),
+            dep_to,
+            DepKind::Blocks,
+        )
+        .expect("dep key");
         let mut core_state = CanonicalState::new();
         core_state.insert(bead).expect("insert bead");
         let dep_dot = Dot {

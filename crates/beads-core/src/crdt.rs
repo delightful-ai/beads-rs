@@ -244,7 +244,8 @@ pub mod tests {
                     1 => DepKind::Related,
                     _ => DepKind::Parent,
                 };
-                let key = DepKey::new(from, to, kind).expect("valid dep key");
+                let key =
+                    DepKey::new_local(&NamespaceId::core(), from, to, kind).expect("valid dep key");
                 let dot = Dot {
                     replica: replica_from_idx(replica_idx),
                     counter,

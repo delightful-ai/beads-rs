@@ -11,7 +11,7 @@ use crate::crdt::Crdt;
 use crate::dep::{AcyclicDepKey, DepAddKey, DepKey, FreeDepKey, NoCycleProof, ParentEdge};
 use crate::domain::DepKind;
 use crate::error::{CoreError, InvalidDependency};
-use crate::identity::{ActorId, BeadId, ContentHash, NoteId};
+use crate::identity::{ActorId, BeadId, BeadRef, ContentHash, NoteId};
 use crate::orset::{Dot, Dvv, OrSetChange};
 use crate::time::{Stamp, WallClock, WriteStamp};
 use crate::tombstone::{Tombstone, TombstoneKey};
@@ -490,11 +490,12 @@ impl CanonicalState {
         }
         if !change.is_empty() {
             for added in &change.added {
-                self.dep_indexes.add(added.from(), added.to(), added.kind());
+                self.dep_indexes
+                    .add(added.from_ref(), added.to_ref(), added.kind());
             }
             for removed in &change.removed {
                 self.dep_indexes
-                    .remove(removed.from(), removed.to(), removed.kind());
+                    .remove(removed.from_ref(), removed.to_ref(), removed.kind());
             }
         }
         change
@@ -503,8 +504,8 @@ impl CanonicalState {
     /// Check that adding a DAG-only edge would not introduce a cycle.
     pub fn check_no_cycle(
         &self,
-        from: &BeadId,
-        to: &BeadId,
+        from: &BeadRef,
+        to: &BeadRef,
         kind: DepKind,
     ) -> Result<NoCycleProof, InvalidDependency> {
         if !kind.requires_dag() {
@@ -526,9 +527,9 @@ impl CanonicalState {
             if !visited.insert(current.clone()) {
                 continue;
             }
-            for key in self.deps_from(&current) {
-                if key.kind().requires_dag() && !visited.contains(key.to()) {
-                    queue.push(key.to().clone());
+            for (to, kind) in self.dep_indexes.out_edges(&current) {
+                if kind.requires_dag() && !visited.contains(to) {
+                    queue.push(to.clone());
                 }
             }
         }
@@ -539,7 +540,7 @@ impl CanonicalState {
     /// Convert a raw dep key into a typed key, enforcing DAG proofs for ordering deps.
     pub fn check_dep_add_key(&self, key: DepKey) -> Result<DepAddKey, InvalidDependency> {
         if key.kind().requires_dag() {
-            let proof = self.check_no_cycle(key.from(), key.to(), key.kind())?;
+            let proof = self.check_no_cycle(key.from_ref(), key.to_ref(), key.kind())?;
             let key = AcyclicDepKey::from_dep_key(key, proof)?;
             Ok(DepAddKey::Acyclic(key))
         } else {
@@ -561,7 +562,7 @@ impl CanonicalState {
         if !change.is_empty() {
             for removed in &change.removed {
                 self.dep_indexes
-                    .remove(removed.from(), removed.to(), removed.kind());
+                    .remove(removed.from_ref(), removed.to_ref(), removed.kind());
             }
         }
         change
@@ -782,12 +783,10 @@ impl CanonicalState {
             return Vec::new();
         }
         self.dep_indexes
-            .out_edges(id)
-            .iter()
-            .filter(|(to, _)| self.get_live(to).is_some())
-            .filter_map(|(to, kind): &(BeadId, DepKind)| {
-                DepKey::new(id.clone(), to.clone(), *kind).ok()
-            })
+            .out_edges_for_id(id)
+            .into_iter()
+            .filter(|(_, to, _)| self.get_live(to.id()).is_some())
+            .filter_map(|(from, to, kind)| DepKey::new(from, to, kind).ok())
             .collect()
     }
 
@@ -800,12 +799,10 @@ impl CanonicalState {
             return Vec::new();
         }
         self.dep_indexes
-            .in_edges(id)
-            .iter()
-            .filter(|(from, _)| self.get_live(from).is_some())
-            .filter_map(|(from, kind): &(BeadId, DepKind)| {
-                DepKey::new(from.clone(), id.clone(), *kind).ok()
-            })
+            .in_edges_for_id(id)
+            .into_iter()
+            .filter(|(from, _, _)| self.get_live(from.id()).is_some())
+            .filter_map(|(from, to, kind)| DepKey::new(from, to, kind).ok())
             .collect()
     }
 
@@ -820,12 +817,12 @@ impl CanonicalState {
     /// Get parent edges incoming to a bead (child -> parent).
     pub fn parent_edges_to(&self, parent: &BeadId) -> Vec<ParentEdge> {
         self.dep_indexes
-            .in_edges(parent)
-            .iter()
-            .filter(|(from, kind)| *kind == DepKind::Parent && self.get_live(from).is_some())
-            .filter_map(|(from, _): &(BeadId, DepKind)| {
-                ParentEdge::new(from.clone(), parent.clone()).ok()
+            .in_edges_for_id(parent)
+            .into_iter()
+            .filter(|(from, _, kind)| {
+                *kind == DepKind::Parent && self.get_live(from.id()).is_some()
             })
+            .filter_map(|(from, to, _)| ParentEdge::new(from, to).ok())
             .collect()
     }
 
@@ -843,7 +840,8 @@ impl CanonicalState {
     pub fn rebuild_dep_indexes(&mut self) {
         self.dep_indexes = DepIndexes::new();
         for key in self.dep_store.values() {
-            self.dep_indexes.add(key.from(), key.to(), key.kind());
+            self.dep_indexes
+                .add(key.from_ref(), key.to_ref(), key.kind());
         }
     }
 
@@ -868,15 +866,15 @@ impl CanonicalState {
         let mut adjacency: BTreeMap<BeadId, Vec<BeadId>> = BTreeMap::new();
         let mut nodes: BTreeSet<BeadId> = BTreeSet::new();
         for key in self.dep_store.values() {
-            if self.get_live(key.from()).is_none() || self.get_live(key.to()).is_none() {
+            if self.get_live(key.from_id()).is_none() || self.get_live(key.to_id()).is_none() {
                 continue;
             }
-            nodes.insert(key.from().clone());
-            nodes.insert(key.to().clone());
+            nodes.insert(key.from_id().clone());
+            nodes.insert(key.to_id().clone());
             adjacency
-                .entry(key.from().clone())
+                .entry(key.from_id().clone())
                 .or_default()
-                .push(key.to().clone());
+                .push(key.to_id().clone());
         }
         for targets in adjacency.values_mut() {
             targets.sort();
@@ -1048,6 +1046,10 @@ mod tests {
 
     fn bead_id(id: &str) -> BeadId {
         BeadId::parse(id).unwrap_or_else(|e| panic!("invalid bead id {id}: {e}"))
+    }
+
+    fn core_ref(id: &BeadId) -> BeadRef {
+        BeadRef::new(crate::namespace::NamespaceId::core(), id.clone())
     }
 
     fn apply_dep_add_checked(state: &mut CanonicalState, key: DepKey, dot: Dot, stamp: Stamp) {
@@ -1429,12 +1431,27 @@ mod tests {
             state.insert(make_bead(id, &stamp)).unwrap();
         }
 
-        let ab = DepKey::new(a.clone(), b.clone(), DepKind::Blocks)
-            .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
-        let bc = DepKey::new(b.clone(), c.clone(), DepKind::Blocks)
-            .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
-        let ca = DepKey::new(c.clone(), a.clone(), DepKind::Blocks)
-            .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
+        let ab = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            a.clone(),
+            b.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
+        let bc = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            b.clone(),
+            c.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
+        let ca = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            c.clone(),
+            a.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
 
         let replica = ReplicaId::from(Uuid::from_bytes([2u8; 16]));
         apply_dep_add_unchecked(
@@ -1566,7 +1583,13 @@ mod tests {
         let to = bead_id("bd-dep-to");
         state.insert(make_bead(&from, &base)).unwrap();
 
-        let key = DepKey::new(from.clone(), to, DepKind::Blocks).unwrap();
+        let key = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            from.clone(),
+            to,
+            DepKind::Blocks,
+        )
+        .unwrap();
         let stamp_new = make_stamp(3000, 0, "carol");
         let stamp_old = make_stamp(2000, 0, "bob");
 
@@ -1594,7 +1617,13 @@ mod tests {
         let to = bead_id("bd-dep-dot-to");
         state.insert(make_bead(&from, &base)).unwrap();
 
-        let key = DepKey::new(from.clone(), to, DepKind::Blocks).unwrap();
+        let key = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            from.clone(),
+            to,
+            DepKind::Blocks,
+        )
+        .unwrap();
         let stamp_a = make_stamp(2000, 0, "bob");
         let stamp_b = make_stamp(3000, 0, "carol");
 
@@ -1622,10 +1651,20 @@ mod tests {
         let b = bead_id("bd-bbb");
         let c = bead_id("bd-ccc");
 
-        let ab = DepKey::new(a, b.clone(), DepKind::Blocks)
-            .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
-        let bc =
-            DepKey::new(b, c, DepKind::Blocks).unwrap_or_else(|e| panic!("dep key invalid: {}", e));
+        let ab = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            a,
+            b.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
+        let bc = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            b,
+            c,
+            DepKind::Blocks,
+        )
+        .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
 
         let replica = ReplicaId::from(Uuid::from_bytes([3u8; 16]));
         apply_dep_add_checked(
@@ -1719,18 +1758,24 @@ mod tests {
         let from = BeadId::parse("bd-aaa").unwrap();
         let to = BeadId::parse("bd-bbb").unwrap();
 
-        let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let key = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            from.clone(),
+            to.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap();
         add_dep(&mut state, key, &stamp, 1);
 
         // Should be in out_edges for "from"
-        let out = state.dep_indexes().out_edges(&from);
+        let out = state.dep_indexes().out_edges(&core_ref(&from));
         assert_eq!(out.len(), 1);
-        assert_eq!(out[0], (to.clone(), DepKind::Blocks));
+        assert_eq!(out[0], (core_ref(&to), DepKind::Blocks));
 
         // Should be in in_edges for "to"
-        let in_ = state.dep_indexes().in_edges(&to);
+        let in_ = state.dep_indexes().in_edges(&core_ref(&to));
         assert_eq!(in_.len(), 1);
-        assert_eq!(in_[0], (from.clone(), DepKind::Blocks));
+        assert_eq!(in_[0], (core_ref(&from), DepKind::Blocks));
     }
 
     #[test]
@@ -1740,13 +1785,19 @@ mod tests {
         let from = BeadId::parse("bd-aaa").unwrap();
         let to = BeadId::parse("bd-bbb").unwrap();
 
-        let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let key = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            from.clone(),
+            to.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap();
         add_dep(&mut state, key.clone(), &stamp, 1);
         remove_dep(&mut state, &key, &stamp);
 
         // Deleted edge should NOT be in indexes
-        assert!(state.dep_indexes().out_edges(&from).is_empty());
-        assert!(state.dep_indexes().in_edges(&to).is_empty());
+        assert!(state.dep_indexes().out_edges(&core_ref(&from)).is_empty());
+        assert!(state.dep_indexes().in_edges(&core_ref(&to)).is_empty());
     }
 
     #[test]
@@ -1758,18 +1809,24 @@ mod tests {
         let to = BeadId::parse("bd-bbb").unwrap();
 
         // Insert active edge
-        let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let key = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            from.clone(),
+            to.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap();
         add_dep(&mut state, key.clone(), &stamp1, 1);
 
         // Should be in indexes
-        assert_eq!(state.dep_indexes().out_edges(&from).len(), 1);
+        assert_eq!(state.dep_indexes().out_edges(&core_ref(&from)).len(), 1);
 
         // Now delete it
         remove_dep(&mut state, &key, &stamp2);
 
         // Should be removed from indexes
-        assert!(state.dep_indexes().out_edges(&from).is_empty());
-        assert!(state.dep_indexes().in_edges(&to).is_empty());
+        assert!(state.dep_indexes().out_edges(&core_ref(&from)).is_empty());
+        assert!(state.dep_indexes().in_edges(&core_ref(&to)).is_empty());
     }
 
     #[test]
@@ -1781,19 +1838,25 @@ mod tests {
         let to = BeadId::parse("bd-bbb").unwrap();
 
         // Insert then remove edge
-        let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let key = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            from.clone(),
+            to.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap();
         add_dep(&mut state, key.clone(), &stamp1, 1);
         remove_dep(&mut state, &key, &stamp1);
 
         // Should NOT be in indexes
-        assert!(state.dep_indexes().out_edges(&from).is_empty());
+        assert!(state.dep_indexes().out_edges(&core_ref(&from)).is_empty());
 
         // Now restore it (active edge with newer stamp)
         add_dep(&mut state, key, &stamp2, 2);
 
         // Should be in indexes now
-        assert_eq!(state.dep_indexes().out_edges(&from).len(), 1);
-        assert_eq!(state.dep_indexes().in_edges(&to).len(), 1);
+        assert_eq!(state.dep_indexes().out_edges(&core_ref(&from)).len(), 1);
+        assert_eq!(state.dep_indexes().in_edges(&core_ref(&to)).len(), 1);
     }
 
     #[test]
@@ -1808,10 +1871,20 @@ mod tests {
         }
 
         // Add two deps from the same source
-        let key1 = DepKey::new(from.clone(), to1.clone(), DepKind::Blocks).unwrap();
-        let key2 = ParentEdge::new(from.clone(), to2.clone())
-            .unwrap()
-            .to_dep_key();
+        let key1 = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            from.clone(),
+            to1.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap();
+        let key2 = ParentEdge::new_local(
+            &crate::namespace::NamespaceId::core(),
+            from.clone(),
+            to2.clone(),
+        )
+        .unwrap()
+        .to_dep_key();
         add_dep(&mut state, key1.clone(), &stamp, 1);
         add_dep(&mut state, key2.clone(), &stamp, 2);
 
@@ -1837,8 +1910,20 @@ mod tests {
         }
 
         // Add two deps to the same target
-        let key1 = DepKey::new(from1.clone(), to.clone(), DepKind::Blocks).unwrap();
-        let key2 = DepKey::new(from2.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let key1 = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            from1.clone(),
+            to.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap();
+        let key2 = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            from2.clone(),
+            to.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap();
         add_dep(&mut state, key1.clone(), &stamp, 1);
         add_dep(&mut state, key2.clone(), &stamp, 2);
 
@@ -1861,9 +1946,13 @@ mod tests {
         state.insert(make_bead(&child, &stamp)).unwrap();
         state.insert(make_bead(&parent, &stamp)).unwrap();
 
-        let parent_edge = ParentEdge::new(child.clone(), parent.clone())
-            .expect("valid parent edge")
-            .to_dep_key();
+        let parent_edge = ParentEdge::new_local(
+            &crate::namespace::NamespaceId::core(),
+            child.clone(),
+            parent.clone(),
+        )
+        .expect("valid parent edge")
+        .to_dep_key();
         add_dep(&mut state, parent_edge, &stamp, 1);
 
         state.delete(Tombstone::new(
@@ -1886,7 +1975,13 @@ mod tests {
         let to = BeadId::parse("bd-bbb").unwrap();
 
         // Manually insert into dep store (simulating deserialization)
-        let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let key = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            from.clone(),
+            to.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap();
         let dot = Dot {
             replica: ReplicaId::from(Uuid::from_bytes([7u8; 16])),
             counter: 1,
@@ -1895,14 +1990,14 @@ mod tests {
         state.dep_store.stamp = Some(stamp);
 
         // Index should be empty (not maintained)
-        assert!(state.dep_indexes().out_edges(&from).is_empty());
+        assert!(state.dep_indexes().out_edges(&core_ref(&from)).is_empty());
 
         // Rebuild indexes
         state.rebuild_dep_indexes();
 
         // Now index should be populated
-        assert_eq!(state.dep_indexes().out_edges(&from).len(), 1);
-        assert_eq!(state.dep_indexes().in_edges(&to).len(), 1);
+        assert_eq!(state.dep_indexes().out_edges(&core_ref(&from)).len(), 1);
+        assert_eq!(state.dep_indexes().in_edges(&core_ref(&to)).len(), 1);
     }
 
     #[test]
@@ -1913,7 +2008,13 @@ mod tests {
 
         // State A: has one dep
         let mut state_a = CanonicalState::new();
-        let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let key = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            from.clone(),
+            to.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap();
         add_dep(&mut state_a, key, &stamp, 1);
 
         // State B: empty
@@ -1923,8 +2024,8 @@ mod tests {
         let merged = CanonicalState::join(&state_a, &state_b);
 
         // Index should be populated in merged state
-        assert_eq!(merged.dep_indexes().out_edges(&from).len(), 1);
-        assert_eq!(merged.dep_indexes().in_edges(&to).len(), 1);
+        assert_eq!(merged.dep_indexes().out_edges(&core_ref(&from)).len(), 1);
+        assert_eq!(merged.dep_indexes().in_edges(&core_ref(&to)).len(), 1);
     }
 
     #[test]
@@ -1935,13 +2036,25 @@ mod tests {
         let to = BeadId::parse("bd-bbb").unwrap();
 
         // Add multiple deps of different kinds between same beads
-        let key1 = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
-        let key2 = DepKey::new(from.clone(), to.clone(), DepKind::Related).unwrap();
+        let key1 = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            from.clone(),
+            to.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap();
+        let key2 = DepKey::new_local(
+            &crate::namespace::NamespaceId::core(),
+            from.clone(),
+            to.clone(),
+            DepKind::Related,
+        )
+        .unwrap();
         add_dep(&mut state, key1.clone(), &stamp, 1);
         add_dep(&mut state, key2.clone(), &stamp, 2);
 
         // Should have two edges in indexes
-        let out = state.dep_indexes().out_edges(&from);
+        let out = state.dep_indexes().out_edges(&core_ref(&from));
         assert_eq!(out.len(), 2);
 
         let kinds: std::collections::HashSet<_> = out.iter().map(|(_, k)| *k).collect();

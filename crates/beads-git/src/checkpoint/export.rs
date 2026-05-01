@@ -399,7 +399,7 @@ fn build_namespace_shards(
 
     let mut dep_entries_by_shard: BTreeMap<ShardName, Vec<WireDepEntryV1>> = BTreeMap::new();
     for entry in snapshot.deps.entries {
-        let shard = shard_for_dep(entry.key.from(), entry.key.to(), entry.key.kind());
+        let shard = shard_for_dep(entry.key.from_id(), entry.key.to_id(), entry.key.kind());
         dep_entries_by_shard.entry(shard).or_default().push(entry);
     }
 
@@ -474,6 +474,7 @@ mod tests {
     use crate::core::dep::DepKey;
     use crate::core::domain::{BeadType, DepKind, Priority};
     use crate::core::identity::BeadId;
+    use crate::core::namespace::NamespaceId;
     use crate::core::time::{Stamp, WriteStamp};
     use crate::core::{
         ActorId, BeadSnapshotWireV1, CanonicalState, Dot, ReplicaDurabilityRole, ReplicaEntry,
@@ -624,7 +625,13 @@ mod tests {
             collision_lineage,
             Some("bye".into()),
         );
-        let dep_key = DepKey::new(bead_id.clone(), dep_to.clone(), DepKind::Blocks).unwrap();
+        let dep_key = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id.clone(),
+            dep_to.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap();
         let dep_dot = Dot {
             replica: ReplicaId::from(Uuid::from_bytes([5u8; 16])),
             counter: 1,

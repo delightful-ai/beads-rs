@@ -3853,8 +3853,13 @@ mod tests {
         let mut dep_ab_delta = TxnDeltaV1::new();
         dep_ab_delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                key: DepKey::new(bead_a.clone(), bead_b.clone(), DepKind::Blocks)
-                    .expect("dep key a->b"),
+                key: DepKey::new_local(
+                    &NamespaceId::core(),
+                    bead_a.clone(),
+                    bead_b.clone(),
+                    DepKind::Blocks,
+                )
+                .expect("dep key a->b"),
                 dot: WireDotV1 {
                     replica: origin,
                     counter: 1,
@@ -3885,8 +3890,13 @@ mod tests {
         let mut dep_ba_delta = TxnDeltaV1::new();
         dep_ba_delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                key: DepKey::new(bead_b.clone(), bead_a.clone(), DepKind::Blocks)
-                    .expect("dep key b->a"),
+                key: DepKey::new_local(
+                    &NamespaceId::core(),
+                    bead_b.clone(),
+                    bead_a.clone(),
+                    DepKind::Blocks,
+                )
+                .expect("dep key b->a"),
                 dot: WireDotV1 {
                     replica: origin,
                     counter: 2,
@@ -3947,12 +3957,28 @@ mod tests {
             .state
             .get(&namespace)
             .expect("namespace state");
-        assert!(state.dep_contains(
-            &DepKey::new(bead_a.clone(), bead_b.clone(), DepKind::Blocks).expect("dep key a->b")
-        ));
-        assert!(!state.dep_contains(
-            &DepKey::new(bead_b.clone(), bead_a.clone(), DepKind::Blocks).expect("dep key b->a")
-        ));
+        assert!(
+            state.dep_contains(
+                &DepKey::new_local(
+                    &NamespaceId::core(),
+                    bead_a.clone(),
+                    bead_b.clone(),
+                    DepKind::Blocks
+                )
+                .expect("dep key a->b")
+            )
+        );
+        assert!(
+            !state.dep_contains(
+                &DepKey::new_local(
+                    &NamespaceId::core(),
+                    bead_b.clone(),
+                    bead_a.clone(),
+                    DepKind::Blocks
+                )
+                .expect("dep key b->a")
+            )
+        );
     }
 
     #[test]

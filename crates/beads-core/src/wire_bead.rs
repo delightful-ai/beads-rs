@@ -20,7 +20,7 @@ use super::composite::{Claim, Closure, Note, Workflow};
 use super::crdt::Lww;
 use super::dep::{DepKey, ParentEdge};
 use super::domain::{BeadType, DepKind, Priority};
-use super::identity::{ActorId, BeadId, BranchName, NoteId, ReplicaId};
+use super::identity::{ActorId, BeadId, BeadRef, BranchName, NoteId, ReplicaId};
 use super::orset::{Dot, Dvv, OrSet, OrSetError};
 use super::state::{
     CanonicalState, DepStore, LabelState, LabelStore, NoteStore, legacy_fallback_lineage,
@@ -1300,12 +1300,20 @@ impl WireDepAddV1 {
         &self.key
     }
 
-    pub fn from(&self) -> &BeadId {
-        self.key.from()
+    pub fn from(&self) -> &BeadRef {
+        self.key.from_ref()
     }
 
-    pub fn to(&self) -> &BeadId {
-        self.key.to()
+    pub fn to(&self) -> &BeadRef {
+        self.key.to_ref()
+    }
+
+    pub fn from_id(&self) -> &BeadId {
+        self.key.from_id()
+    }
+
+    pub fn to_id(&self) -> &BeadId {
+        self.key.to_id()
     }
 
     pub fn kind(&self) -> DepKind {
@@ -1325,12 +1333,20 @@ impl WireDepRemoveV1 {
         &self.key
     }
 
-    pub fn from(&self) -> &BeadId {
-        self.key.from()
+    pub fn from(&self) -> &BeadRef {
+        self.key.from_ref()
     }
 
-    pub fn to(&self) -> &BeadId {
-        self.key.to()
+    pub fn to(&self) -> &BeadRef {
+        self.key.to_ref()
+    }
+
+    pub fn from_id(&self) -> &BeadId {
+        self.key.from_id()
+    }
+
+    pub fn to_id(&self) -> &BeadId {
+        self.key.to_id()
     }
 
     pub fn kind(&self) -> DepKind {
@@ -1560,16 +1576,16 @@ impl TxnOpKey {
             }
             TxnOpKey::DepAdd { key, dot } => format!(
                 "dep_add:{}:{}:{}:{}:{}",
-                key.from().as_str(),
-                key.to().as_str(),
+                key.from_ref(),
+                key.to_ref(),
                 key.kind().as_str(),
                 dot.replica,
                 dot.counter
             ),
             TxnOpKey::DepRemove { key } => format!(
                 "dep_remove:{}:{}:{}",
-                key.from().as_str(),
-                key.to().as_str(),
+                key.from_ref(),
+                key.to_ref(),
                 key.kind().as_str()
             ),
             TxnOpKey::ParentAdd { edge, dot } => format!(
@@ -1733,6 +1749,7 @@ mod tests {
     use crate::collections::Labels;
     use crate::composite::Note;
     use crate::identity::{ActorId, ReplicaId};
+    use crate::namespace::NamespaceId;
     use crate::time::Stamp;
 
     fn actor_id(actor: &str) -> ActorId {
@@ -2056,14 +2073,26 @@ mod tests {
             lineage: None,
         };
         let dep_add = WireDepAddV1 {
-            key: DepKey::new(bead_id("bd-order"), bead_id("bd-up"), DepKind::Blocks).unwrap(),
+            key: DepKey::new_local(
+                &NamespaceId::core(),
+                bead_id("bd-order"),
+                bead_id("bd-up"),
+                DepKind::Blocks,
+            )
+            .unwrap(),
             dot: WireDotV1 {
                 replica: ReplicaId::from(uuid::Uuid::from_bytes([1u8; 16])),
                 counter: 1,
             },
         };
         let dep_remove = WireDepRemoveV1 {
-            key: DepKey::new(bead_id("bd-order"), bead_id("bd-down"), DepKind::Related).unwrap(),
+            key: DepKey::new_local(
+                &NamespaceId::core(),
+                bead_id("bd-order"),
+                bead_id("bd-down"),
+                DepKind::Related,
+            )
+            .unwrap(),
             ctx: WireDvvV1 {
                 max: BTreeMap::new(),
                 dots: Vec::new(),
@@ -2138,7 +2167,13 @@ mod tests {
             .unwrap();
         delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                key: DepKey::new(bead_id("bd-rt"), bead_id("bd-rt-dep"), DepKind::Blocks).unwrap(),
+                key: DepKey::new_local(
+                    &NamespaceId::core(),
+                    bead_id("bd-rt"),
+                    bead_id("bd-rt-dep"),
+                    DepKind::Blocks,
+                )
+                .unwrap(),
                 dot: WireDotV1 {
                     replica: ReplicaId::from(uuid::Uuid::from_bytes([2u8; 16])),
                     counter: 7,
@@ -2147,8 +2182,13 @@ mod tests {
             .unwrap();
         delta
             .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-                key: DepKey::new(bead_id("bd-rt"), bead_id("bd-rt-dep2"), DepKind::Related)
-                    .unwrap(),
+                key: DepKey::new_local(
+                    &NamespaceId::core(),
+                    bead_id("bd-rt"),
+                    bead_id("bd-rt-dep2"),
+                    DepKind::Related,
+                )
+                .unwrap(),
                 ctx: WireDvvV1 {
                     max: BTreeMap::from([
                         (ReplicaId::from(uuid::Uuid::from_bytes([1u8; 16])), 5),
@@ -2225,7 +2265,13 @@ mod tests {
         );
         state.insert_note(bead_id("bd-a"), base.clone(), note);
 
-        let dep_key = DepKey::new(bead_id("bd-a"), bead_id("bd-b"), DepKind::Blocks).unwrap();
+        let dep_key = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id("bd-a"),
+            bead_id("bd-b"),
+            DepKind::Blocks,
+        )
+        .unwrap();
         let dep_add = state.check_dep_add_key(dep_key).unwrap();
         let dep_dot = Dot {
             replica: ReplicaId::from(uuid::Uuid::from_bytes([3u8; 16])),
