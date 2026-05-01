@@ -219,6 +219,62 @@ fn test_create_show_close_workflow() {
         .stdout(predicate::str::contains("Bug to fix").not());
 }
 
+#[test]
+fn test_create_with_explicit_id_and_parent() {
+    let repo = TestRepo::new();
+    repo.bd().arg("init").assert().success();
+
+    repo.bd()
+        .args([
+            "create",
+            "--id",
+            "bd-explicit-standalone",
+            "Explicit standalone",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "\"id\": \"bd-explicit-standalone\"",
+        ));
+
+    let parent_output = repo
+        .bd()
+        .args(["create", "Parent Epic", "--type=epic", "--json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let parent_id = cli_issue_id_from_output(&parent_output);
+    let child_id = format!("{parent_id}.7");
+
+    let child_output = repo
+        .bd()
+        .args([
+            "create",
+            "--id",
+            &child_id,
+            "--parent",
+            &parent_id,
+            "Explicit child",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    assert_eq!(cli_issue_id_from_output(&child_output), child_id);
+
+    repo.bd()
+        .args(["list", "--parent", &parent_id, "--tree"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(&child_id))
+        .stdout(predicate::str::contains("Explicit child"));
+}
+
 #[cfg(feature = "slow-tests")]
 #[test]
 fn test_claim_and_unclaim() {

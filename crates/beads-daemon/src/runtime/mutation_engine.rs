@@ -226,13 +226,6 @@ impl ParsedMutationRequest {
             labels,
             dependencies,
         } = payload;
-        if id.is_some() && parent.is_some() {
-            return Err(OpError::ValidationFailed {
-                field: "create".into(),
-                reason: "cannot specify both id and parent".into(),
-            });
-        }
-
         let labels = parse_labels(labels)?;
         let dependencies = parse_dep_specs(&dependencies)?;
         let assignee = normalize_assignee(assignee, actor)?;
@@ -566,13 +559,6 @@ impl MutationEngine {
                 labels,
                 dependencies,
             } => {
-                if id.is_some() && parent.is_some() {
-                    return Err(OpError::ValidationFailed {
-                        field: "create".into(),
-                        reason: "cannot specify both id and parent".into(),
-                    });
-                }
-
                 let title = title.trim().to_string();
                 if title.is_empty() {
                     return Err(OpError::ValidationFailed {
@@ -738,13 +724,6 @@ impl MutationEngine {
         labels: Labels,
         dependencies: DepSpecSet,
     ) -> Result<PlannedDelta, OpError> {
-        if id.is_some() && parent.is_some() {
-            return Err(OpError::ValidationFailed {
-                field: "create".into(),
-                reason: "cannot specify both id and parent".into(),
-            });
-        }
-
         let requested_id = id.clone();
         let requested_parent = parent.clone();
 
@@ -768,13 +747,20 @@ impl MutationEngine {
         })?;
 
         let (id, parent_id) = match (requested_id.as_ref(), requested_parent.as_ref()) {
-            (Some(requested_id), None) => {
+            (Some(requested_id), parent_id) => {
                 if state.get_live(requested_id).is_some()
                     || state.get_tombstone(requested_id).is_some()
                 {
                     return Err(OpError::AlreadyExists(requested_id.clone()));
                 }
-                (requested_id.clone(), None)
+                if let Some(parent_id) = parent_id {
+                    if state.get_live(parent_id).is_none() {
+                        return Err(OpError::NotFound(parent_id.clone()));
+                    }
+                    (requested_id.clone(), Some(parent_id.clone()))
+                } else {
+                    (requested_id.clone(), None)
+                }
             }
             (None, Some(parent_id)) => {
                 let child = next_child_id(state, parent_id)?;
@@ -792,7 +778,6 @@ impl MutationEngine {
                 )?,
                 None,
             ),
-            (Some(_), Some(_)) => unreachable!("guarded above"),
         };
 
         for spec in dependencies.iter() {
@@ -2225,6 +2210,74 @@ mod tests {
         assert!(matches!(patch.assignee, WirePatch::Set(_)));
         assert!(matches!(patch.closed_reason, WirePatch::Clear));
         assert!(matches!(patch.closed_on_branch, WirePatch::Clear));
+    }
+
+    #[test]
+    fn create_with_explicit_id_and_parent_plans_parent_edge() {
+        let engine = MutationEngine::new(Limits::default());
+        let actor = actor_id("alice");
+        let parent_id = BeadId::parse("bd-parent").unwrap();
+        let child_id = BeadId::parse("bd-child").unwrap();
+        let state = make_state_with_bead(parent_id.as_str(), &actor);
+        let ctx = MutationContext {
+            namespace: NamespaceId::core(),
+            actor_id: actor.clone(),
+            client_request_id: None,
+            trace_id: TraceId::new(Uuid::from_bytes([8u8; 16])),
+        };
+        let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([1u8; 16])), 0.into());
+        let id_ctx = IdContext {
+            root_slug: None,
+            remote_url: RemoteUrl::new("github.com/example/beads"),
+        };
+        let req = ParsedMutationRequest::parse_create(
+            CreatePayload {
+                id: Some(child_id.clone()),
+                parent: Some(parent_id.clone()),
+                title: "child".into(),
+                bead_type: BeadType::Task,
+                priority: Priority::default(),
+                description: Some("d".into()),
+                design: None,
+                acceptance_criteria: None,
+                assignee: None,
+                external_ref: None,
+                estimated_minutes: None,
+                labels: Vec::new(),
+                dependencies: Vec::new(),
+            },
+            &actor,
+        )
+        .unwrap();
+        let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
+
+        let planned = engine
+            .plan(
+                &state,
+                1_000,
+                make_stamped_context(ctx, make_stamp(1_000, &actor)),
+                store,
+                Some(&id_ctx),
+                req,
+                &mut dots,
+            )
+            .unwrap();
+        let (draft, effects) = planned.acknowledge_durability();
+        let mut created_id = None;
+        let mut parent_edge = None;
+        for op in draft.command.raw_delta().iter() {
+            match op {
+                TxnOpV1::BeadUpsert(patch) => created_id = Some(patch.id.clone()),
+                TxnOpV1::ParentAdd(add) => parent_edge = Some(add.edge.clone()),
+                _ => {}
+            }
+        }
+
+        assert_eq!(created_id.as_ref(), Some(&child_id));
+        let parent_edge = parent_edge.expect("parent edge");
+        assert_eq!(parent_edge.child(), &child_id);
+        assert_eq!(parent_edge.parent(), &parent_id);
+        assert_eq!(effects.dot_meta_sync_boundaries, 1);
     }
 
     #[test]
