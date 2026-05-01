@@ -120,14 +120,14 @@ End-to-end coverage is thin. Searches for `NamespaceId::parse("wf"` / `"sys"` / 
 | --- | --- |
 | `NamespaceId` parse + validation | Solid. Tests cover happy and sad paths. |
 | Per-namespace `CanonicalState` partitioning | Solid. `StoreState::join` merges per-namespace. |
-| `Bead` / `DepKey` carry namespace | **No today.** Target is explicit `BeadRef { namespace, id }` endpoints in `DepKey`. |
-| Cross-namespace dep/parent refs | Not modeled today. Target is first-class namespaced endpoint refs plus StoreState-aware traversal. |
+| `Bead` / `DepKey` carry namespace | Yes for dependency graph endpoints via `BeadRef { namespace, id }` in `DepKey`. |
+| Cross-namespace dep/parent refs | Yes for dependency endpoints and StoreState-aware traversal. |
 | Git sync per-namespace | Via checkpoint groups. Multi-group is implemented; default config uses a single group with just `core`. |
 | WAL per-namespace | Yes; per-(namespace, origin, seq). |
 | Replication: per-peer namespace ACL | `allowed_namespaces` on roster entries. |
 | `RetentionPolicy` enforcement | **No.** Field exists, no sweeper reads it. |
-| `persist_to_git` enforcement | **No.** Field exists, no git worker reads it. |
-| `ready_eligible` enforcement | **No.** Field exists, no query path consults it. |
+| `persist_to_git` enforcement | Checkpoint group assembly rejects namespaces with `persist_to_git=false`; there is no silent export filtering. |
+| `ready_eligible` enforcement | `bd ready`/ready query suppresses non-ready namespaces. |
 | `visibility` enforcement | **No.** Field exists, no CLI/render path consults it. |
 | `gc_authority`, `ttl_basis` enforcement | **No.** Fields exist, no GC path consults them. |
 | IPC: `namespace` on read + mutate | Yes. Unknown-namespace error wired end-to-end. |
@@ -148,10 +148,10 @@ Membership and Group beads — per the user's framing — stay in `core` because
 
 **Policy dimensions required:**
 
-- `persist_to_git = false` (transcripts are per-machine runtime-adjacent state; they should not follow the code repo around). The *spec* allows this; the *implementation* doesn't filter checkpoint export by `persist_to_git` today. **Gap.**
+- `persist_to_git = false` (transcripts are per-machine runtime-adjacent state; they should not follow the code repo around). Checkpoint group assembly rejects this namespace if a config tries to publish it through a git checkpoint group; there is intentionally no silent filtering.
 - `replicate_mode = None` or `Anchors` — depends on whether session state is local-to-replica or shared across the replica set. Default should be `None` for this namespace: a human operator working on machine A should not see their transcripts replicated to machine B's daemon. The *spec* supports this; replication enforcement via `allowed_namespaces` already exists (`crates/beads-core/src/replica_roster.rs:103`).
 - `retention = Ttl { ttl_ms: 7 days }` for TranscriptEntry; Sessions themselves might be `Forever` until archived. This is heterogeneous *within* one namespace, which is not a dimension the current policy type supports — `RetentionPolicy` is per-namespace, not per-BeadType. **Gap.**
-- `ready_eligible = false` — Session/Wait/Nudge beads should not appear in `bd ready`. No enforcement today. **Gap.**
+- `ready_eligible = false` — Session/Wait/Nudge beads should not appear in `bd ready`; ready-query enforcement is wired.
 - `visibility = Normal` or `Pinned` — session beads probably want `Normal` (they're discoverable) but should not leak into a generic `bd list`. **Gap.**
 
 **Cross-namespace reference model:**
@@ -206,7 +206,7 @@ Membership and Group beads — per the user's framing — stay in `core` because
 **Key infrastructure gaps (all wisp namespaces share these):**
 
 - **No GC sweeper exists.** `RetentionPolicy::Ttl` is defined but not enforced anywhere. Must be built.
-- **No per-namespace `persist_to_git` filtering in the checkpoint path.** The exporter exports the whole `StoreState`; selective inclusion is not implemented.
+- **No per-namespace `persist_to_git` filtering in the checkpoint path.** The exporter exports the namespaces named by the group; group assembly rejects `persist_to_git=false` namespaces instead of silently filtering them.
 - **No per-bead "last touched" write-stamp read by a GC sweeper.** `TtlBasis::LastMutationStamp` is the default and the data is available (`Bead::fields.all_stamps()`), so this one is cheap — but it's not wired.
 
 ---
@@ -238,9 +238,9 @@ The one place this leaks is the `IssueSummary`/`Issue` shape — `namespace` is 
 - Checkpoint meta (`crates/beads-git/src/checkpoint/meta.rs:63, 82, 155`) carries `NamespaceSet`. Default construction seeds `vec![NamespaceId::core()]`.
 - Checkpoint import (`crates/beads-git/src/checkpoint/import.rs:201-315`) iterates the manifest's `namespaces` and dispatches per-namespace via `state_for_namespace`. Rejects manifest paths whose namespace isn't in the allowed set. This path is covered by `commutativity` tests (per `docs/CRDT_AUDIT.md:124-125`).
 - Checkpoint export (`crates/beads-git/src/checkpoint/export.rs`) iterates namespaces of the state being exported.
-- The wire format does not filter by `persist_to_git`. If a namespace is in the group, it's in the ref. Adding `persist_to_git` filtering needs a branch point in either the checkpoint scheduler (exclude the namespace from the group) or the exporter (include the namespace in the group but elide its content).
+- The wire format does not filter by `persist_to_git`. If a namespace is in the group, it's in the ref. The daemon enforces this at checkpoint group assembly: namespaces with `persist_to_git=false` cannot be placed in git-published checkpoint groups.
 
-Cleanest approach: `persist_to_git = false` means "do not put this namespace in any checkpoint group whose `durable_copy_via_git = true`." Enforce at group assembly time, not at export time.
+Policy: `persist_to_git = false` means "do not put this namespace in any checkpoint group." Enforce at group assembly time, not at export time.
 
 ### 3.4 "Just add another namespace for X"
 

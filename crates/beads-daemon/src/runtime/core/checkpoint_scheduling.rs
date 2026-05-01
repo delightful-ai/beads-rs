@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -5,7 +6,7 @@ use crossbeam::channel::Sender;
 
 use super::helpers::resolve_checkpoint_git_ref;
 use super::{Daemon, StoreSessionToken};
-use crate::core::{NamespaceId, ReplicaId, StoreId, WallClock};
+use crate::core::{NamespaceId, NamespacePolicy, ReplicaId, StoreId, WallClock};
 use crate::git::checkpoint::{CheckpointPublishError, CheckpointPublishOutcome};
 use crate::runtime::checkpoint_scheduler::{
     CheckpointGroupConfig, CheckpointGroupKey, CheckpointGroupSnapshot,
@@ -37,12 +38,15 @@ impl Daemon {
         if !self.checkpoint_policy().allows_checkpoints() {
             return Ok(());
         }
-        let store = self
-            .store_sessions
-            .get(&store_id)
-            .expect("loaded store missing from state")
-            .runtime();
-        let configs = self.checkpoint_group_configs(store_id, store.meta.replica_id);
+        let (local_replica_id, policies) = {
+            let store = self
+                .store_sessions
+                .get(&store_id)
+                .expect("loaded store missing from state")
+                .runtime();
+            (store.meta.replica_id, store.policies.clone())
+        };
+        let configs = self.checkpoint_group_configs(store_id, local_replica_id, &policies)?;
         for config in configs {
             self.checkpoint_scheduler.register_group(config);
         }
@@ -54,12 +58,16 @@ impl Daemon {
         &self,
         store_id: StoreId,
         local_replica_id: ReplicaId,
-    ) -> Vec<CheckpointGroupConfig> {
+        policies: &BTreeMap<NamespaceId, NamespacePolicy>,
+    ) -> Result<Vec<CheckpointGroupConfig>, OpError> {
         if self.checkpoint_groups.is_empty() {
-            return vec![CheckpointGroupConfig::core_default(
-                store_id,
-                local_replica_id,
-            )];
+            let config = CheckpointGroupConfig::core_default(store_id, local_replica_id);
+            Self::validate_checkpoint_group_namespaces(
+                &config.group,
+                &config.namespaces,
+                policies,
+            )?;
+            return Ok(vec![config]);
         }
 
         let mut configs = Vec::new();
@@ -77,6 +85,7 @@ impl Daemon {
             } else {
                 spec.namespaces.clone()
             };
+            Self::validate_checkpoint_group_namespaces(group, &namespaces, policies)?;
 
             let mut config = CheckpointGroupConfig::core_default(store_id, local_replica_id);
             config.group = group.clone();
@@ -108,13 +117,41 @@ impl Daemon {
         }
 
         if configs.is_empty() {
-            configs.push(CheckpointGroupConfig::core_default(
-                store_id,
-                local_replica_id,
-            ));
+            let config = CheckpointGroupConfig::core_default(store_id, local_replica_id);
+            Self::validate_checkpoint_group_namespaces(
+                &config.group,
+                &config.namespaces,
+                policies,
+            )?;
+            configs.push(config);
         }
 
-        configs
+        Ok(configs)
+    }
+
+    pub(super) fn validate_checkpoint_group_namespaces(
+        group: &str,
+        namespaces: &[NamespaceId],
+        policies: &BTreeMap<NamespaceId, NamespacePolicy>,
+    ) -> Result<(), OpError> {
+        for namespace in namespaces {
+            let Some(policy) = policies.get(namespace) else {
+                return Err(OpError::NamespaceUnknown {
+                    namespace: namespace.clone(),
+                });
+            };
+            if !policy.persist_to_git {
+                return Err(OpError::NamespacePolicyViolation {
+                    namespace: namespace.clone(),
+                    rule: "persist_to_git".to_string(),
+                    reason: Some(format!(
+                        "checkpoint group `{group}` publishes to git but namespace `{}` has persist_to_git=false",
+                        namespace.as_str()
+                    )),
+                });
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn checkpoint_group_snapshots(
@@ -168,13 +205,7 @@ impl Daemon {
         // Re-register checkpoint groups for all loaded stores
         let store_ids: Vec<StoreId> = self.store_sessions.keys().copied().collect();
         for store_id in store_ids {
-            if let Err(e) = self.register_default_checkpoint_groups(store_id) {
-                tracing::warn!(
-                    store_id = %store_id,
-                    error = ?e,
-                    "failed to re-register checkpoint groups for store"
-                );
-            }
+            self.register_default_checkpoint_groups(store_id)?;
         }
 
         Ok(new_count)
@@ -327,5 +358,57 @@ impl Daemon {
             self.checkpoint_scheduler.complete_failure(key, now);
             self.emit_checkpoint_queue_depth();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn policies_with_extra(
+        namespace: NamespaceId,
+        policy: NamespacePolicy,
+    ) -> BTreeMap<NamespaceId, NamespacePolicy> {
+        let mut policies = BTreeMap::new();
+        policies.insert(NamespaceId::core(), NamespacePolicy::core_default());
+        policies.insert(namespace, policy);
+        policies
+    }
+
+    #[test]
+    fn checkpoint_group_allows_multi_namespace_persisting_group() {
+        let extmsg = NamespaceId::parse("extmsg").unwrap();
+        let policies = policies_with_extra(extmsg.clone(), NamespacePolicy::core_default());
+
+        Daemon::validate_checkpoint_group_namespaces(
+            "durable",
+            &[NamespaceId::core(), extmsg],
+            &policies,
+        )
+        .expect("persisting namespaces are valid");
+    }
+
+    #[test]
+    fn checkpoint_group_rejects_non_persisting_namespace() {
+        let sessions = NamespaceId::parse("sessions").unwrap();
+        let policies = policies_with_extra(sessions.clone(), NamespacePolicy::wf_default());
+
+        let err = Daemon::validate_checkpoint_group_namespaces(
+            "sessions",
+            &[NamespaceId::core(), sessions.clone()],
+            &policies,
+        )
+        .expect_err("non-persisting namespace must be rejected");
+
+        assert!(matches!(
+            err,
+            OpError::NamespacePolicyViolation {
+                namespace,
+                rule,
+                reason: Some(reason),
+            } if namespace == sessions
+                && rule == "persist_to_git"
+                && reason.contains("checkpoint group `sessions`")
+        ));
     }
 }
