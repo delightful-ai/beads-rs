@@ -52,16 +52,25 @@ fn issue_summary_for_ref(store_state: &StoreState, bead_ref: &BeadRef) -> Option
     Some(IssueSummary::from_view(bead_ref.namespace(), &view))
 }
 
+fn require_live_store_ref(
+    store_state: &StoreState,
+    namespace: &NamespaceId,
+    id: &BeadId,
+) -> Result<(), OpError> {
+    let Some(state) = store_state.get(namespace) else {
+        return Err(OpError::NotFound(id.clone()));
+    };
+    state.require_live(id).map_live_err(id)?;
+    Ok(())
+}
+
 fn show_details_for_store(
     read_namespace: &NamespaceId,
     id: &BeadId,
     state: &CanonicalState,
     store_state: &StoreState,
 ) -> Result<ShowDetails, OpError> {
-    let root_ref = BeadRef::new(read_namespace.clone(), id.clone());
-    if store_state.resolve_ref(&root_ref).is_none() {
-        return Err(OpError::NotFound(id.clone()));
-    }
+    require_live_store_ref(store_state, read_namespace, id)?;
 
     let view = state.bead_view(id).expect("live bead should have view");
     let mut issue = Issue::from_view(read_namespace, &view);
@@ -106,10 +115,8 @@ fn deps_for_store(
     id: &BeadId,
     store_state: &StoreState,
 ) -> Result<(Vec<DepEdge>, Vec<DepEdge>), OpError> {
+    require_live_store_ref(store_state, read_namespace, id)?;
     let root_ref = BeadRef::new(read_namespace.clone(), id.clone());
-    if store_state.resolve_ref(&root_ref).is_none() {
-        return Err(OpError::NotFound(id.clone()));
-    }
 
     let incoming = store_state
         .deps_to(&root_ref)
@@ -129,10 +136,8 @@ fn dep_tree_for_store(
     id: &BeadId,
     store_state: &StoreState,
 ) -> Result<Vec<DepEdge>, OpError> {
+    require_live_store_ref(store_state, read_namespace, id)?;
     let root_ref = BeadRef::new(read_namespace.clone(), id.clone());
-    if store_state.resolve_ref(&root_ref).is_none() {
-        return Err(OpError::NotFound(id.clone()));
-    }
 
     let mut edges = Vec::new();
     let mut visited = std::collections::HashSet::new();
@@ -1108,8 +1113,9 @@ mod tests {
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadRef, BeadType, CanonicalState, Claim,
         Closure, DepKey, DepKind, Dot, Lww, NamespaceId, NamespacePolicy, Priority, ReplicaId,
-        Stamp, StoreState, Workflow, WorkflowStatus, WriteStamp,
+        Stamp, StoreState, Tombstone, Workflow, WorkflowStatus, WriteStamp,
     };
+    use crate::runtime::ops::OpError;
     use std::collections::BTreeMap;
     use uuid::Uuid;
 
@@ -1563,6 +1569,26 @@ mod tests {
         assert_eq!(details.summaries.len(), 1);
         assert_eq!(details.summaries[0].namespace, NamespaceId::core());
         assert_eq!(details.summaries[0].id, "bd-core");
+    }
+
+    #[test]
+    fn show_details_for_store_preserves_deleted_lookup_error() {
+        let actor = ActorId::new("tester").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(4_500, 0), actor);
+        let id = BeadId::parse("bd-deleted").unwrap();
+        let mut store = StoreState::new();
+        store
+            .core_mut()
+            .insert(make_bead(id.as_str(), &stamp))
+            .expect("core bead");
+        store
+            .core_mut()
+            .delete(Tombstone::new(id.clone(), stamp, None));
+
+        let err = show_details_for_store(&NamespaceId::core(), &id, store.core(), &store)
+            .expect_err("deleted bead should not hydrate");
+
+        assert!(matches!(err, OpError::BeadDeleted(found) if found == id));
     }
 
     #[test]

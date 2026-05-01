@@ -493,15 +493,9 @@ impl MutationEngine {
             ParsedMutationRequest::RemoveLabels { id, labels } => {
                 self.plan_remove_labels(state, id, labels)?
             }
-            ParsedMutationRequest::SetParent { id, parent } => self.plan_set_parent(
-                state,
-                &namespace,
-                id,
-                parent,
-                &stamp,
-                dot_alloc,
-                &mut durability,
-            )?,
+            ParsedMutationRequest::SetParent { id, parent } => {
+                self.plan_set_parent(state, &namespace, id, parent, dot_alloc, &mut durability)?
+            }
             ParsedMutationRequest::Close {
                 id,
                 reason,
@@ -1419,7 +1413,6 @@ impl MutationEngine {
         namespace: &NamespaceId,
         id: BeadId,
         parent: Option<BeadId>,
-        _stamp: &Stamp,
         dot_alloc: &mut dyn DotAllocator,
         durability: &mut PendingPlanningDurabilityEffects,
     ) -> Result<PlannedDelta, OpError> {

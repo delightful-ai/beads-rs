@@ -1075,8 +1075,7 @@ impl ReplicationRig {
                 let namespaces = self.namespaces.clone();
                 let outbound_store = from_node.session_store();
                 let inbound_store = to_node.session_store();
-                let outbound =
-                    new_outbound_session(identity.clone(), from_replica, &limits, &namespaces);
+                let outbound = new_outbound_session(identity, from_replica, &limits, &namespaces);
                 let inbound = new_inbound_session(identity, to_replica, &limits, &namespaces);
                 let (outbound, action) =
                     begin_outbound_handshake(outbound, &outbound_store, self.clock.now_ms());
@@ -1214,8 +1213,7 @@ impl RigLink {
         let identity = self.from_node.store_identity();
         let from_replica = self.from_node.replica_id();
         let to_replica = self.to_node.replica_id();
-        let outbound =
-            new_outbound_session(identity.clone(), from_replica, limits, &self.namespaces);
+        let outbound = new_outbound_session(identity, from_replica, limits, &self.namespaces);
         let inbound = new_inbound_session(identity, to_replica, limits, &self.namespaces);
         self.outbound_store = self.from_node.session_store();
         self.inbound_store = self.to_node.session_store();
