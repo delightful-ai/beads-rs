@@ -4,7 +4,9 @@ use beads_surface::Filters;
 use beads_surface::ipc::{ListPayload, Request, ResponsePayload};
 use clap::Args;
 
-use super::common::{fmt_issue_ref, fmt_labels, fmt_wall_ms};
+use super::common::{
+    fmt_issue_ref_scoped, fmt_labels, fmt_wall_ms, issue_summaries_need_namespace,
+};
 use super::{CommandResult, print_ok};
 use crate::filters::{CommonFilterArgs, apply_common_filters};
 use crate::parsers::{parse_sort, parse_status};
@@ -138,9 +140,14 @@ pub fn handle_list(ctx: &CliRuntimeCtx, args: ListArgs) -> CommandResult<()> {
 }
 
 pub fn render_issue_list_opts(views: &[beads_api::IssueSummary], show_labels: bool) -> String {
+    let force_namespace = issue_summaries_need_namespace(views);
     let mut out = String::new();
     for view in views {
-        out.push_str(&render_issue_summary_opts(view, show_labels));
+        out.push_str(&render_issue_summary_opts(
+            view,
+            show_labels,
+            force_namespace,
+        ));
         out.push('\n');
     }
     out.trim_end().into()
@@ -150,10 +157,14 @@ fn render_issue_list_flat(views: &[beads_api::IssueSummary], show_labels: bool) 
     render_issue_list_opts(views, show_labels)
 }
 
-fn render_issue_summary_opts(view: &beads_api::IssueSummary, show_labels: bool) -> String {
+fn render_issue_summary_opts(
+    view: &beads_api::IssueSummary,
+    show_labels: bool,
+    force_namespace: bool,
+) -> String {
     let mut summary = format!(
         "{} [P{}] [{}] {}",
-        fmt_issue_ref(&view.namespace, &view.id),
+        fmt_issue_ref_scoped(&view.namespace, &view.id, force_namespace),
         view.priority,
         view.issue_type.as_str(),
         view.status.as_str()
@@ -171,12 +182,17 @@ fn render_issue_summary_opts(view: &beads_api::IssueSummary, show_labels: bool) 
 }
 
 fn render_issue_list_long(views: &[beads_api::IssueSummary], show_labels: bool) -> String {
+    let force_namespace = issue_summaries_need_namespace(views);
     let mut out = String::new();
     for (idx, view) in views.iter().enumerate() {
         if idx > 0 {
             out.push('\n');
         }
-        out.push_str(&render_issue_summary_opts(view, show_labels));
+        out.push_str(&render_issue_summary_opts(
+            view,
+            show_labels,
+            force_namespace,
+        ));
         if !view.description.trim().is_empty() {
             out.push_str(&format!("\n  Description: {}", view.description.trim()));
         }
@@ -244,6 +260,7 @@ fn list_issue_summaries(
 }
 
 fn render_issue_tree(parent: &str, nodes: &[TreeNode], show_labels: bool) -> String {
+    let force_namespace = tree_needs_namespace(nodes);
     let mut out = String::new();
     out.push_str(&format!("Children of {parent}:\n"));
     if nodes.is_empty() {
@@ -251,21 +268,34 @@ fn render_issue_tree(parent: &str, nodes: &[TreeNode], show_labels: bool) -> Str
         return out;
     }
     for node in nodes {
-        render_tree_node(&mut out, node, show_labels, 0);
+        render_tree_node(&mut out, node, show_labels, force_namespace, 0);
     }
     out.trim_end().to_string()
 }
 
-fn render_tree_node(out: &mut String, node: &TreeNode, show_labels: bool, depth: usize) {
+fn render_tree_node(
+    out: &mut String,
+    node: &TreeNode,
+    show_labels: bool,
+    force_namespace: bool,
+    depth: usize,
+) {
     let indent = "  ".repeat(depth);
     out.push_str(&format!(
         "{}- {}\n",
         indent,
-        render_issue_summary_opts(&node.issue, show_labels)
+        render_issue_summary_opts(&node.issue, show_labels, force_namespace)
     ));
     for child in &node.children {
-        render_tree_node(out, child, show_labels, depth + 1);
+        render_tree_node(out, child, show_labels, force_namespace, depth + 1);
     }
+}
+
+fn tree_needs_namespace(nodes: &[TreeNode]) -> bool {
+    nodes.iter().any(|node| {
+        node.issue.namespace != beads_core::NamespaceId::core()
+            || tree_needs_namespace(&node.children)
+    })
 }
 
 #[cfg(test)]
@@ -298,10 +328,26 @@ mod tests {
     }
 
     #[test]
-    fn render_issue_list_includes_namespace() {
+    fn render_issue_list_omits_core_namespace() {
+        let summary = sample_summary("core", "bd-123");
+        let output = render_issue_list_opts(&[summary], false);
+        assert_eq!(output, "bd-123 [P1] [task] open - Title");
+    }
+
+    #[test]
+    fn render_issue_list_includes_non_core_namespace() {
         let summary = sample_summary("wf", "bd-123");
         let output = render_issue_list_opts(&[summary], false);
         assert_eq!(output, "wf/bd-123 [P1] [task] open - Title");
+    }
+
+    #[test]
+    fn render_issue_list_qualifies_core_refs_in_mixed_output() {
+        let core = sample_summary("core", "bd-core");
+        let wf = sample_summary("wf", "bd-wf");
+        let output = render_issue_list_opts(&[core, wf], false);
+        assert!(output.contains("core/bd-core [P1] [task] open - Title"));
+        assert!(output.contains("wf/bd-wf [P1] [task] open - Title"));
     }
 
     #[test]
@@ -324,7 +370,7 @@ mod tests {
         };
         let output = render_issue_tree("bd-123", &[child], false);
         assert!(output.contains("Children of bd-123:"));
-        assert!(output.contains("- core/bd-123.1 [P1] [task] open - Title"));
-        assert!(output.contains("  - core/bd-123.1.1 [P1] [task] open - Title"));
+        assert!(output.contains("- bd-123.1 [P1] [task] open - Title"));
+        assert!(output.contains("  - bd-123.1.1 [P1] [task] open - Title"));
     }
 }

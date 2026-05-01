@@ -2,7 +2,7 @@ use beads_api::QueryResult;
 use beads_surface::ipc::{Request, ResponsePayload, StalePayload};
 use clap::Args;
 
-use super::common::fmt_issue_ref;
+use super::common::{fmt_issue_ref_scoped, issue_summaries_need_namespace};
 use super::{CommandResult, print_ok};
 use crate::runtime::{CliRuntimeCtx, send};
 
@@ -60,6 +60,7 @@ pub fn render_stale(issues: &[beads_api::IssueSummary], threshold_days: u32) -> 
         issues.len(),
         threshold_days
     );
+    let force_namespace = issue_summaries_need_namespace(issues);
 
     for (i, issue) in issues.iter().enumerate() {
         let updated_ms = issue.updated_at.wall_ms;
@@ -71,7 +72,7 @@ pub fn render_stale(issues: &[beads_api::IssueSummary], threshold_days: u32) -> 
             "{}. [P{}] {}: {}\n",
             i + 1,
             issue.priority,
-            fmt_issue_ref(&issue.namespace, &issue.id),
+            fmt_issue_ref_scoped(&issue.namespace, &issue.id, force_namespace),
             issue.title
         ));
         out.push_str(&format!(

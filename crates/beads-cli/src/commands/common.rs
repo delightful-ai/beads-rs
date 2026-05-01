@@ -1,12 +1,42 @@
 use super::{CommandError, CommandResult};
 use crate::runtime::{CliRuntimeCtx, send};
-use beads_api::{Issue, QueryResult};
+use beads_api::{DepEdge, Issue, IssueSummary, QueryResult};
 use beads_core::{BeadId, NamespaceId};
 use beads_surface::ipc::{IdPayload, IpcError, Request, ResponsePayload};
 use std::sync::LazyLock;
 
 pub(crate) fn fmt_issue_ref(namespace: &NamespaceId, id: &str) -> String {
-    format!("{}/{}", namespace.as_str(), id)
+    fmt_issue_ref_scoped(namespace, id, false)
+}
+
+pub(crate) fn fmt_issue_ref_scoped(
+    namespace: &NamespaceId,
+    id: &str,
+    force_namespace: bool,
+) -> String {
+    fmt_ref_parts(namespace.as_str(), id, force_namespace)
+}
+
+pub(crate) fn fmt_dep_endpoint(namespace: &str, id: &str, force_namespace: bool) -> String {
+    fmt_ref_parts(namespace, id, force_namespace)
+}
+
+pub(crate) fn issue_summaries_need_namespace(views: &[IssueSummary]) -> bool {
+    views
+        .iter()
+        .any(|view| view.namespace != NamespaceId::core())
+}
+
+pub(crate) fn dep_edges_need_namespace<'a>(mut edges: impl Iterator<Item = &'a DepEdge>) -> bool {
+    edges.any(|edge| edge.from_namespace != "core" || edge.to_namespace != "core")
+}
+
+fn fmt_ref_parts(namespace: &str, id: &str, force_namespace: bool) -> String {
+    if !force_namespace && namespace == "core" {
+        id.to_string()
+    } else {
+        format!("{namespace}/{id}")
+    }
 }
 
 pub(crate) fn fmt_labels(labels: &[String]) -> String {

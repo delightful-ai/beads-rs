@@ -1,12 +1,13 @@
 use clap::{Args, Subcommand};
 use serde::Serialize;
 
-use super::common::fmt_issue_ref;
+use super::common::fmt_issue_ref_scoped;
 use super::{CommandResult, print_ok};
 use crate::render::{print_json, print_line};
 use crate::runtime::{CliRuntimeCtx, send};
 use crate::validation::normalize_bead_id;
 use beads_api::{EpicStatus, QueryResult};
+use beads_core::NamespaceId;
 use beads_surface::ipc::{ClosePayload, EpicStatusPayload, Request, ResponsePayload};
 
 #[derive(Subcommand, Debug)]
@@ -135,6 +136,9 @@ pub fn render_epic_statuses(statuses: &[EpicStatus]) -> String {
     }
 
     let mut out = String::new();
+    let force_namespace = statuses
+        .iter()
+        .any(|status| status.epic.namespace != NamespaceId::core());
     for status in statuses {
         let pct = status
             .closed_children
@@ -148,7 +152,7 @@ pub fn render_epic_statuses(statuses: &[EpicStatus]) -> String {
         };
         out.push_str(&format!(
             "{icon} {} {}\n",
-            fmt_issue_ref(&status.epic.namespace, &status.epic.id),
+            fmt_issue_ref_scoped(&status.epic.namespace, &status.epic.id, force_namespace),
             status.epic.title
         ));
         out.push_str(&format!(
@@ -166,10 +170,13 @@ pub fn render_epic_statuses(statuses: &[EpicStatus]) -> String {
 
 pub fn render_epic_close_dry_run(statuses: &[EpicStatus]) -> String {
     let mut out = format!("Would close {} epic(s):\n", statuses.len());
+    let force_namespace = statuses
+        .iter()
+        .any(|status| status.epic.namespace != NamespaceId::core());
     for status in statuses {
         out.push_str(&format!(
             "  - {}: {}\n",
-            fmt_issue_ref(&status.epic.namespace, &status.epic.id),
+            fmt_issue_ref_scoped(&status.epic.namespace, &status.epic.id, force_namespace),
             status.epic.title
         ));
     }

@@ -1,6 +1,6 @@
 use beads_surface::ipc::{EmptyPayload, Request};
 
-use super::common::fmt_issue_ref;
+use super::common::fmt_issue_ref_scoped;
 use super::{CommandResult, print_ok};
 use crate::runtime::{CliRuntimeCtx, send};
 
@@ -19,11 +19,18 @@ pub fn render_blocked(blocked: &[beads_api::BlockedIssue]) -> String {
     }
 
     let mut out = format!("\n🚫 Blocked issues ({}):\n\n", blocked.len());
+    let force_namespace = blocked
+        .iter()
+        .any(|blocked_issue| blocked_issue.issue.namespace != beads_core::NamespaceId::core());
     for blocked_issue in blocked {
         out.push_str(&format!(
             "[P{}] {}: {}\n",
             blocked_issue.issue.priority,
-            fmt_issue_ref(&blocked_issue.issue.namespace, &blocked_issue.issue.id),
+            fmt_issue_ref_scoped(
+                &blocked_issue.issue.namespace,
+                &blocked_issue.issue.id,
+                force_namespace
+            ),
             blocked_issue.issue.title
         ));
         out.push_str(&format!(

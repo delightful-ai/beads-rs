@@ -513,3 +513,56 @@ pub fn dep_kind_to_go_wire(kind: &str) -> String {
         other => other.replace('_', "-"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use beads_core::{BeadType, NamespaceId, WorkflowStatus};
+
+    fn summary(namespace: &str, id: &str) -> IssueSummary {
+        IssueSummary {
+            id: id.to_string(),
+            namespace: NamespaceId::parse(namespace).expect("namespace"),
+            title: "Title".to_string(),
+            description: String::new(),
+            design: None,
+            acceptance_criteria: None,
+            status: WorkflowStatus::Open,
+            priority: 1,
+            issue_type: BeadType::Task,
+            labels: Vec::new(),
+            assignee: None,
+            assignee_expires: None,
+            created_at: WriteStamp::new(0, 0),
+            created_by: "tester".to_string(),
+            updated_at: WriteStamp::new(0, 0),
+            updated_by: "tester".to_string(),
+            estimated_minutes: None,
+            content_hash: "hash".to_string(),
+            note_count: 0,
+        }
+    }
+
+    #[test]
+    fn issue_summary_json_keeps_namespace_for_core_and_non_core() {
+        let core = issue_summary_json_value(&summary("core", "bd-core"));
+        let wf = issue_summary_json_value(&summary("wf", "bd-wf"));
+
+        assert_eq!(core["namespace"], "core");
+        assert_eq!(wf["namespace"], "wf");
+    }
+
+    #[test]
+    fn dep_record_json_keeps_endpoint_namespaces() {
+        let value = dep_record_json_value(&DepEdge {
+            from_namespace: "sessions".to_string(),
+            from: "bd-session".to_string(),
+            to_namespace: "core".to_string(),
+            to: "bd-core".to_string(),
+            kind: "blocks".to_string(),
+        });
+
+        assert_eq!(value["from_namespace"], "sessions");
+        assert_eq!(value["to_namespace"], "core");
+    }
+}

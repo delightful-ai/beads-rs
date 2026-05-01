@@ -2,7 +2,7 @@ use beads_api::QueryResult;
 use beads_surface::ipc::{ReadyPayload, Request, ResponsePayload};
 use clap::Args;
 
-use super::common::fmt_issue_ref;
+use super::common::{fmt_issue_ref_scoped, issue_summaries_need_namespace};
 use super::{CommandResult, print_ok};
 use crate::runtime::{CliRuntimeCtx, send};
 
@@ -48,6 +48,7 @@ pub fn render_ready(
     if views.is_empty() {
         out.push_str("\n✨ No ready work found\n");
     } else {
+        let force_namespace = issue_summaries_need_namespace(views);
         out.push_str(&format!(
             "\n📋 Ready work ({} issues with no blockers):\n\n",
             views.len()
@@ -57,7 +58,7 @@ pub fn render_ready(
                 "{}. [P{}] {}: {}\n",
                 i + 1,
                 view.priority,
-                fmt_issue_ref(&view.namespace, &view.id),
+                fmt_issue_ref_scoped(&view.namespace, &view.id, force_namespace),
                 view.title
             ));
             if let Some(minutes) = view.estimated_minutes {
@@ -109,7 +110,20 @@ mod tests {
     }
 
     #[test]
-    fn render_ready_includes_namespace() {
+    fn render_ready_omits_core_namespace() {
+        let summary = sample_summary("core", "bd-123");
+        let output = render_ready(&[summary], 0, 0);
+        let expected = concat!(
+            "\n📋 Ready work (1 issues with no blockers):\n\n",
+            "1. [P1] bd-123: Title\n",
+            "\n",
+            "0 blocked, 0 closed — run `bd blocked` to see what's stuck\n",
+        );
+        assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn render_ready_includes_non_core_namespace() {
         let summary = sample_summary("wf", "bd-123");
         let output = render_ready(&[summary], 0, 0);
         let expected = concat!(
@@ -119,5 +133,14 @@ mod tests {
             "0 blocked, 0 closed — run `bd blocked` to see what's stuck\n",
         );
         assert_eq!(output, expected);
+    }
+
+    #[test]
+    fn render_ready_qualifies_core_refs_in_mixed_output() {
+        let core = sample_summary("core", "bd-core");
+        let wf = sample_summary("wf", "bd-wf");
+        let output = render_ready(&[core, wf], 0, 0);
+        assert!(output.contains("1. [P1] core/bd-core: Title"));
+        assert!(output.contains("2. [P1] wf/bd-wf: Title"));
     }
 }

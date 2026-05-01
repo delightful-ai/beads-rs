@@ -1,6 +1,7 @@
 use clap::{Args, Subcommand};
 
 use super::{CommandResult, print_ok};
+use crate::commands::common::{dep_edges_need_namespace, fmt_dep_endpoint};
 use crate::parsers::parse_dep_kind;
 use crate::render::{dep_record_json_value, dependency_summary_json_value_for_edge, print_json};
 use crate::runtime::{CliRuntimeCtx, send};
@@ -334,26 +335,33 @@ pub fn render_dep_tree(root: &str, edges: &[DepEdge]) -> String {
     if edges.is_empty() {
         return format!("\n{root} has no dependencies\n");
     }
+    let force_namespace = dep_edges_need_namespace(edges.iter());
+    let root = fmt_dep_tree_root(root, edges, force_namespace);
     let mut out = format!("\n🌲 Dependency tree for {root}:\n\n");
     for e in edges {
-        out.push_str(&format!("{} → {} ({})\n", e.from, e.to, e.kind));
+        let from = fmt_dep_endpoint(&e.from_namespace, &e.from, force_namespace);
+        let to = fmt_dep_endpoint(&e.to_namespace, &e.to, force_namespace);
+        out.push_str(&format!("{from} → {to} ({})\n", e.kind));
     }
     out.push('\n');
     out
 }
 
 pub fn render_deps(incoming: &[DepEdge], outgoing: &[DepEdge]) -> String {
+    let force_namespace = dep_edges_need_namespace(incoming.iter().chain(outgoing.iter()));
     let mut out = String::new();
     if !outgoing.is_empty() {
         out.push_str(&format!("\nDepends on ({}):\n", outgoing.len()));
         for e in outgoing {
-            out.push_str(&format!("  → {} ({})\n", e.to, e.kind));
+            let to = fmt_dep_endpoint(&e.to_namespace, &e.to, force_namespace);
+            out.push_str(&format!("  → {to} ({})\n", e.kind));
         }
     }
     if !incoming.is_empty() {
         out.push_str(&format!("\nBlocks ({}):\n", incoming.len()));
         for e in incoming {
-            out.push_str(&format!("  ← {} ({})\n", e.from, e.kind));
+            let from = fmt_dep_endpoint(&e.from_namespace, &e.from, force_namespace);
+            out.push_str(&format!("  ← {from} ({})\n", e.kind));
         }
     }
     if out.is_empty() {
@@ -361,6 +369,23 @@ pub fn render_deps(incoming: &[DepEdge], outgoing: &[DepEdge]) -> String {
     } else {
         out.trim_end().into()
     }
+}
+
+fn fmt_dep_tree_root(root: &str, edges: &[DepEdge], force_namespace: bool) -> String {
+    if !force_namespace {
+        return root.to_string();
+    }
+
+    for edge in edges {
+        if edge.from == root {
+            return fmt_dep_endpoint(&edge.from_namespace, &edge.from, true);
+        }
+        if edge.to == root {
+            return fmt_dep_endpoint(&edge.to_namespace, &edge.to, true);
+        }
+    }
+
+    fmt_dep_endpoint("core", root, true)
 }
 
 pub fn render_dep_cycles(out: &DepCycles) -> String {
@@ -401,6 +426,45 @@ mod tests {
             wait_timeout_ms: None,
             actor_id: None,
         }
+    }
+
+    fn edge(from_namespace: &str, from: &str, to_namespace: &str, to: &str) -> DepEdge {
+        DepEdge {
+            from_namespace: from_namespace.to_string(),
+            from: from.to_string(),
+            to_namespace: to_namespace.to_string(),
+            to: to.to_string(),
+            kind: "blocks".to_string(),
+        }
+    }
+
+    #[test]
+    fn render_deps_omits_core_namespace_for_all_core_edges() {
+        let output = render_deps(&[], &[edge("core", "bd-a", "core", "bd-b")]);
+
+        assert_eq!(output, "\nDepends on (1):\n  → bd-b (blocks)");
+    }
+
+    #[test]
+    fn render_deps_qualifies_refs_for_mixed_namespace_edges() {
+        let output = render_deps(
+            &[edge("sessions", "bd-session", "core", "bd-core")],
+            &[edge("core", "bd-core", "extmsg", "bd-ext")],
+        );
+
+        assert!(output.contains("→ extmsg/bd-ext (blocks)"));
+        assert!(output.contains("← sessions/bd-session (blocks)"));
+    }
+
+    #[test]
+    fn render_dep_tree_qualifies_root_and_edges_for_non_core_output() {
+        let output = render_dep_tree(
+            "bd-session",
+            &[edge("sessions", "bd-session", "core", "bd-core")],
+        );
+
+        assert!(output.contains("Dependency tree for sessions/bd-session"));
+        assert!(output.contains("sessions/bd-session → core/bd-core (blocks)"));
     }
 
     #[test]
