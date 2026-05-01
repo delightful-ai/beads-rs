@@ -13,7 +13,9 @@ use super::ipc::{ReadConsistency, Response, ResponseExt, ResponsePayload};
 use super::ops::{MapLiveError, OpError};
 use super::query::{Filters, QueryResult};
 use super::store::runtime::StoreRuntime;
-use crate::core::{BeadId, BeadRef, CanonicalState, NamespaceId, StoreState, WallClock};
+use crate::core::{
+    BeadId, BeadRef, CanonicalState, NamespaceId, NamespacePolicy, StoreState, WallClock,
+};
 use crate::git_lane::GitLaneState;
 use crate::remote::RemoteUrl;
 use beads_api::{
@@ -151,6 +153,118 @@ fn dep_tree_for_store(
     }
 
     Ok(edges)
+}
+
+fn format_bead_ref_for_namespace(read_namespace: &NamespaceId, bead_ref: &BeadRef) -> String {
+    if bead_ref.namespace() == read_namespace {
+        bead_ref.id().as_str().to_string()
+    } else {
+        bead_ref.to_string()
+    }
+}
+
+fn namespace_ready_eligible(
+    namespace: &NamespaceId,
+    policies: &std::collections::BTreeMap<NamespaceId, NamespacePolicy>,
+) -> bool {
+    policies
+        .get(namespace)
+        .map(|policy| policy.ready_eligible)
+        .unwrap_or(false)
+}
+
+fn ready_for_namespace(
+    namespace: &NamespaceId,
+    state: &CanonicalState,
+    store_state: &StoreState,
+    policies: &std::collections::BTreeMap<NamespaceId, NamespacePolicy>,
+    limit: Option<usize>,
+) -> ReadyResult {
+    if !namespace_ready_eligible(namespace, policies) {
+        return ReadyResult {
+            issues: Vec::new(),
+            blocked_count: 0,
+            closed_count: 0,
+        };
+    }
+
+    let blocked_by = compute_blocked_by_store(store_state);
+    let mut blocked_count = 0usize;
+    let mut closed_count = 0usize;
+
+    let mut views: Vec<IssueSummary> = Vec::new();
+    for (id, bead) in state.iter_live() {
+        if bead.fields.workflow.value.is_closed() {
+            closed_count += 1;
+            continue;
+        }
+
+        let bead_ref = BeadRef::new(namespace.clone(), id.clone());
+        if blocked_by.contains_key(&bead_ref) {
+            blocked_count += 1;
+            continue;
+        }
+        if let Some(view) = state.bead_view(id) {
+            views.push(IssueSummary::from_view(namespace, &view));
+        }
+    }
+
+    sort_ready_issues(&mut views);
+
+    if let Some(limit) = limit {
+        views.truncate(limit);
+    }
+
+    ReadyResult {
+        issues: views,
+        blocked_count,
+        closed_count,
+    }
+}
+
+fn blocked_for_namespace(
+    namespace: &NamespaceId,
+    state: &CanonicalState,
+    store_state: &StoreState,
+) -> Vec<BlockedIssue> {
+    let blocked_by = compute_blocked_by_store(store_state);
+    let mut out: Vec<BlockedIssue> = Vec::new();
+
+    for (from_ref, deps) in blocked_by {
+        if from_ref.namespace() != namespace {
+            continue;
+        }
+
+        let view = match state.bead_view(from_ref.id()) {
+            Some(view) => view,
+            None => continue,
+        };
+        if view.bead.fields.workflow.value.is_closed() {
+            continue;
+        }
+
+        let mut blocked_by_ids: Vec<String> = deps
+            .into_iter()
+            .map(|bead_ref| format_bead_ref_for_namespace(namespace, &bead_ref))
+            .collect();
+        blocked_by_ids.sort();
+        blocked_by_ids.dedup();
+
+        out.push(BlockedIssue {
+            issue: IssueSummary::from_view(namespace, &view),
+            blocked_by_count: blocked_by_ids.len(),
+            blocked_by: blocked_by_ids,
+        });
+    }
+
+    out.sort_by(|a, b| {
+        b.issue
+            .priority
+            .cmp(&a.issue.priority)
+            .then_with(|| b.issue.updated_at.cmp(&a.issue.updated_at))
+    });
+
+    out
 }
 
 impl Daemon {
@@ -407,43 +521,13 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
-            let state = ctx.state;
-
-            let blocked_by = compute_blocked_by(state);
-
-            // Count blocked and closed issues for summary.
-            let mut blocked_count = 0usize;
-            let mut closed_count = 0usize;
-
-            let mut views: Vec<IssueSummary> = Vec::new();
-            for (id, bead) in state.iter_live() {
-                if bead.fields.workflow.value.is_closed() {
-                    closed_count += 1;
-                    continue;
-                }
-                if blocked_by.contains_key(id) {
-                    blocked_count += 1;
-                    continue;
-                }
-                if let Some(view) = state.bead_view(id) {
-                    views.push(IssueSummary::from_view(ctx.read.namespace(), &view));
-                }
-            }
-
-            // Sort by priority (low to high), then created_at (oldest first).
-            sort_ready_issues(&mut views);
-
-            // Apply limit
-            if let Some(limit) = limit {
-                views.truncate(limit);
-            }
-
-            let result = ReadyResult {
-                issues: views,
-                blocked_count,
-                closed_count,
-            };
-
+            let result = ready_for_namespace(
+                ctx.read.namespace(),
+                ctx.state,
+                ctx.store_state,
+                &ctx.store.policies,
+                limit,
+            );
             Ok(ResponsePayload::query(QueryResult::Ready(result)))
         })
     }
@@ -517,14 +601,14 @@ impl Daemon {
                 remote,
                 read,
                 store,
-                store_state: _,
+                store_state,
                 state,
                 repo_state,
             } = ctx;
             let repo_state = repo_state.expect("repo state requested");
 
-            let blocked_by = compute_blocked_by(state);
-            let blocked_set: std::collections::HashSet<&BeadId> = blocked_by.keys().collect();
+            let blocked_by = compute_blocked_by_store(store_state);
+            let ready_eligible = namespace_ready_eligible(read.namespace(), &store.policies);
 
             let mut open_issues = 0usize;
             let mut in_progress_issues = 0usize;
@@ -544,9 +628,10 @@ impl Daemon {
                     _ => {}
                 }
 
-                if blocked_set.contains(id) {
+                let id_ref = BeadRef::new(read.namespace().clone(), id.clone());
+                if blocked_by.contains_key(&id_ref) {
                     blocked_issues += 1;
-                } else {
+                } else if ready_eligible {
                     ready_issues += 1;
                 }
             }
@@ -653,39 +738,7 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
-            let state = ctx.state;
-            let blocked_by = compute_blocked_by(state);
-            let mut out: Vec<BlockedIssue> = Vec::new();
-
-            for (from, deps) in blocked_by {
-                let view = match state.bead_view(&from) {
-                    Some(view) => view,
-                    None => continue,
-                };
-                if view.bead.fields.workflow.value.is_closed() {
-                    continue;
-                }
-
-                let mut blocked_by_ids: Vec<String> =
-                    deps.into_iter().map(|id| id.as_str().to_string()).collect();
-                blocked_by_ids.sort();
-                blocked_by_ids.dedup();
-
-                out.push(BlockedIssue {
-                    issue: IssueSummary::from_view(ctx.read.namespace(), &view),
-                    blocked_by_count: blocked_by_ids.len(),
-                    blocked_by: blocked_by_ids,
-                });
-            }
-
-            // Sort by priority (high to low), then updated_at (newest first).
-            out.sort_by(|a, b| {
-                b.issue
-                    .priority
-                    .cmp(&a.issue.priority)
-                    .then_with(|| b.issue.updated_at.cmp(&a.issue.updated_at))
-            });
-
+            let out = blocked_for_namespace(ctx.read.namespace(), ctx.state, ctx.store_state);
             Ok(ResponsePayload::query(QueryResult::Blocked(out)))
         })
     }
@@ -718,7 +771,7 @@ impl Daemon {
             }
 
             let state = ctx.state;
-            let blocked_by = compute_blocked_by(state);
+            let blocked_by = compute_blocked_by_store(ctx.store_state);
 
             let mut out: Vec<IssueSummary> = Vec::new();
 
@@ -748,7 +801,8 @@ impl Daemon {
                             }
                         }
                         "blocked" => {
-                            if !blocked_by.contains_key(id) {
+                            let id_ref = BeadRef::new(ctx.read.namespace().clone(), id.clone());
+                            if !blocked_by.contains_key(&id_ref) {
                                 continue;
                             }
                         }
@@ -781,7 +835,7 @@ impl Daemon {
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
             let state = ctx.state;
-            let blocked_by = compute_blocked_by(state);
+            let blocked_by = compute_blocked_by_store(ctx.store_state);
 
             let status_filter = filters
                 .status
@@ -824,8 +878,9 @@ impl Daemon {
                             }
                         }
                         "blocked" => {
+                            let id_ref = BeadRef::new(ctx.read.namespace().clone(), id.clone());
                             if bead.fields.workflow.value.is_closed()
-                                || !blocked_by.contains_key(id)
+                                || !blocked_by.contains_key(&id_ref)
                             {
                                 continue;
                             }
@@ -858,9 +913,10 @@ impl Daemon {
                 let id = bead.id();
                 match group_by {
                     "status" => {
+                        let id_ref = BeadRef::new(ctx.read.namespace().clone(), id.clone());
                         let group = if bead.fields.workflow.value.is_closed() {
                             "closed".to_string()
-                        } else if blocked_by.contains_key(id) {
+                        } else if blocked_by.contains_key(&id_ref) {
                             "blocked".to_string()
                         } else {
                             bead.fields.workflow.value.status().to_string()
@@ -1042,13 +1098,19 @@ impl Daemon {
 
 #[cfg(test)]
 mod tests {
-    use super::{Issue, IssueSummary, dep_tree_for_store, deps_for_store, show_details_for_store};
-    use super::{compute_blocked_by, dep_cycles_from_state, sort_ready_issues};
+    use super::{
+        Issue, IssueSummary, blocked_for_namespace, dep_tree_for_store, deps_for_store,
+        ready_for_namespace, show_details_for_store,
+    };
+    use super::{
+        compute_blocked_by, compute_blocked_by_store, dep_cycles_from_state, sort_ready_issues,
+    };
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadRef, BeadType, CanonicalState, Claim,
-        DepKey, DepKind, Dot, Lww, NamespaceId, Priority, ReplicaId, Stamp, StoreState, Workflow,
-        WorkflowStatus, WriteStamp,
+        Closure, DepKey, DepKind, Dot, Lww, NamespaceId, NamespacePolicy, Priority, ReplicaId,
+        Stamp, StoreState, Workflow, WorkflowStatus, WriteStamp,
     };
+    use std::collections::BTreeMap;
     use uuid::Uuid;
 
     fn issue_summary(id: &str, priority: u8, created_at_ms: u64) -> IssueSummary {
@@ -1178,12 +1240,30 @@ mod tests {
         to: &str,
         counter: u64,
     ) {
-        let key = DepKey::new(
-            ref_in(from_namespace, from),
-            ref_in(to_namespace, to),
+        add_store_dep_kind(
+            store,
+            owner_namespace,
+            from_namespace,
+            from,
+            to_namespace,
+            to,
             DepKind::Blocks,
-        )
-        .expect("dep key");
+            counter,
+        );
+    }
+
+    fn add_store_dep_kind(
+        store: &mut StoreState,
+        owner_namespace: &NamespaceId,
+        from_namespace: &NamespaceId,
+        from: &str,
+        to_namespace: &NamespaceId,
+        to: &str,
+        kind: DepKind,
+        counter: u64,
+    ) {
+        let key = DepKey::new(ref_in(from_namespace, from), ref_in(to_namespace, to), kind)
+            .expect("dep key");
         let dep_key = store.check_dep_add_key(key).expect("checked dep key");
         let dot = Dot {
             replica: ReplicaId::new(Uuid::from_u128(counter as u128 + 1)),
@@ -1229,6 +1309,28 @@ mod tests {
         (store, sessions, core, extmsg)
     }
 
+    fn close_bead(store: &mut StoreState, namespace: &NamespaceId, id: &str, stamp: Stamp) {
+        let bead = store
+            .get_mut(namespace)
+            .and_then(|state| state.get_mut(&BeadId::parse(id).expect("bead id")))
+            .expect("live bead");
+        bead.fields.workflow = Lww::new(
+            Workflow::Closed(Closure::new(Some("done".to_string()), None)),
+            stamp,
+        );
+    }
+
+    fn policies_for(namespaces: &[NamespaceId]) -> BTreeMap<NamespaceId, NamespacePolicy> {
+        let mut policies = BTreeMap::new();
+        policies.insert(NamespaceId::core(), NamespacePolicy::core_default());
+        for namespace in namespaces {
+            policies
+                .entry(namespace.clone())
+                .or_insert_with(NamespacePolicy::core_default);
+        }
+        policies
+    }
+
     #[test]
     fn blocked_by_uses_live_ready_work_dep_kinds() {
         let actor = ActorId::new("tester").unwrap();
@@ -1272,6 +1374,154 @@ mod tests {
             !blocked_by.contains_key(&BeadId::parse("bd-track").unwrap()),
             "tracks must remain non-blocking"
         );
+    }
+
+    #[test]
+    fn blocked_by_store_uses_cross_namespace_ready_work_dep_kinds() {
+        let actor = ActorId::new("tester").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(3_500, 0), actor);
+        let sessions = NamespaceId::parse("sessions").unwrap();
+        let core = NamespaceId::core();
+        let mut store = StoreState::new();
+
+        for id in ["bd-cond", "bd-waits", "bd-parent", "bd-track"] {
+            store
+                .ensure_namespace(sessions.clone())
+                .insert(make_bead(id, &stamp))
+                .expect("session bead");
+        }
+        store
+            .core_mut()
+            .insert(make_bead("bd-blocker", &stamp))
+            .expect("core blocker");
+
+        add_store_dep_kind(
+            &mut store,
+            &sessions,
+            &sessions,
+            "bd-cond",
+            &core,
+            "bd-blocker",
+            DepKind::ConditionalBlocks,
+            1,
+        );
+        add_store_dep_kind(
+            &mut store,
+            &sessions,
+            &sessions,
+            "bd-waits",
+            &core,
+            "bd-blocker",
+            DepKind::WaitsFor,
+            2,
+        );
+        add_store_dep_kind(
+            &mut store,
+            &sessions,
+            &sessions,
+            "bd-parent",
+            &core,
+            "bd-blocker",
+            DepKind::Parent,
+            3,
+        );
+        add_store_dep_kind(
+            &mut store,
+            &sessions,
+            &sessions,
+            "bd-track",
+            &core,
+            "bd-blocker",
+            DepKind::Tracks,
+            4,
+        );
+
+        let blocked_by = compute_blocked_by_store(&store);
+
+        assert_eq!(
+            blocked_by
+                .get(&ref_in(&sessions, "bd-cond"))
+                .map(Vec::as_slice),
+            Some(&[ref_in(&core, "bd-blocker")][..])
+        );
+        assert_eq!(
+            blocked_by
+                .get(&ref_in(&sessions, "bd-waits"))
+                .map(Vec::as_slice),
+            Some(&[ref_in(&core, "bd-blocker")][..])
+        );
+        assert!(
+            !blocked_by.contains_key(&ref_in(&sessions, "bd-parent")),
+            "parent-child is structural and must not block ready work"
+        );
+        assert!(
+            !blocked_by.contains_key(&ref_in(&sessions, "bd-track")),
+            "tracks must remain non-blocking"
+        );
+    }
+
+    #[test]
+    fn ready_for_namespace_respects_cross_namespace_open_and_closed_blockers() {
+        let (mut store, sessions, core, extmsg) = cross_namespace_store();
+        let policies = policies_for(&[sessions.clone(), core.clone(), extmsg]);
+        let session_state = store.get(&sessions).expect("sessions state");
+
+        let blocked_ready = ready_for_namespace(&sessions, session_state, &store, &policies, None);
+
+        assert!(blocked_ready.issues.is_empty());
+        assert_eq!(blocked_ready.blocked_count, 1);
+        assert_eq!(blocked_ready.closed_count, 0);
+
+        let close_stamp = Stamp::new(
+            WriteStamp::new(5_000, 0),
+            ActorId::new("closer").expect("actor"),
+        );
+        close_bead(&mut store, &core, "bd-core", close_stamp);
+        let session_state = store.get(&sessions).expect("sessions state");
+
+        let unblocked_ready =
+            ready_for_namespace(&sessions, session_state, &store, &policies, None);
+
+        assert_eq!(unblocked_ready.blocked_count, 0);
+        assert_eq!(unblocked_ready.closed_count, 0);
+        assert_eq!(
+            unblocked_ready
+                .issues
+                .iter()
+                .map(|issue| issue.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["bd-session"]
+        );
+    }
+
+    #[test]
+    fn ready_for_namespace_suppresses_non_ready_namespaces() {
+        let (store, sessions, core, extmsg) = cross_namespace_store();
+        let mut policies = policies_for(&[sessions.clone(), core, extmsg]);
+        policies
+            .get_mut(&sessions)
+            .expect("sessions policy")
+            .ready_eligible = false;
+        let session_state = store.get(&sessions).expect("sessions state");
+
+        let ready = ready_for_namespace(&sessions, session_state, &store, &policies, None);
+
+        assert!(ready.issues.is_empty());
+        assert_eq!(ready.blocked_count, 0);
+        assert_eq!(ready.closed_count, 0);
+    }
+
+    #[test]
+    fn blocked_for_namespace_formats_cross_namespace_blockers_compactly() {
+        let (store, sessions, _, _) = cross_namespace_store();
+        let session_state = store.get(&sessions).expect("sessions state");
+
+        let blocked = blocked_for_namespace(&sessions, session_state, &store);
+
+        assert_eq!(blocked.len(), 1);
+        assert_eq!(blocked[0].issue.namespace, sessions);
+        assert_eq!(blocked[0].issue.id, "bd-session");
+        assert_eq!(blocked[0].blocked_by, vec!["core/bd-core"]);
     }
 
     #[test]

@@ -1,5 +1,6 @@
 use super::*;
 
+#[cfg(test)]
 pub(super) fn compute_blocked_by(
     state: &CanonicalState,
 ) -> std::collections::BTreeMap<BeadId, Vec<BeadId>> {
@@ -24,6 +25,38 @@ pub(super) fn compute_blocked_by(
             .entry(key.from().clone())
             .or_default()
             .push(key.to().clone());
+    }
+
+    blocked
+}
+
+pub(super) fn compute_blocked_by_store(
+    store_state: &StoreState,
+) -> std::collections::BTreeMap<BeadRef, Vec<BeadRef>> {
+    let mut blocked: std::collections::BTreeMap<BeadRef, Vec<BeadRef>> =
+        std::collections::BTreeMap::new();
+
+    for (_, state) in store_state.namespaces() {
+        for key in state.dep_store().values() {
+            if !key.kind().affects_readiness() {
+                continue;
+            }
+            if store_state.resolve_ref(key.from_ref()).is_none() {
+                continue;
+            }
+
+            let Some(to_bead) = store_state.resolve_ref(key.to_ref()) else {
+                continue;
+            };
+            if to_bead.fields.workflow.value.is_closed() {
+                continue;
+            }
+
+            blocked
+                .entry(key.from_ref().clone())
+                .or_default()
+                .push(key.to_ref().clone());
+        }
     }
 
     blocked
