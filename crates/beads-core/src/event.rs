@@ -4202,6 +4202,103 @@ mod tests {
     }
 
     #[test]
+    fn cbor_dep_add_canonical_order_includes_endpoint_namespaces() {
+        let from_namespace = NamespaceId::parse("sessions").unwrap();
+        let to_namespace = NamespaceId::parse("extmsg").unwrap();
+        let op = WireDepAddV1 {
+            key: DepKey::new(
+                BeadRef::new(from_namespace.clone(), BeadId::parse("bd-a").unwrap()),
+                BeadRef::new(to_namespace.clone(), BeadId::parse("bd-b").unwrap()),
+                DepKind::Blocks,
+            )
+            .unwrap(),
+            dot: WireDotV1 {
+                replica: ReplicaId::new(Uuid::from_bytes([8u8; 16])),
+                counter: 1,
+            },
+        };
+
+        let mut buf = Vec::new();
+        let mut enc = Encoder::new(&mut buf);
+        encode_wire_dep_add(&mut enc, &op).unwrap();
+
+        let mut dec = Decoder::new(buf.as_slice());
+        assert_eq!(decode_map_len(&mut dec, &Limits::default(), 0).unwrap(), 6);
+        assert_eq!(
+            decode_text(&mut dec, &Limits::default()).unwrap(),
+            "from_namespace"
+        );
+        assert_eq!(
+            decode_text(&mut dec, &Limits::default()).unwrap(),
+            from_namespace.as_str()
+        );
+        assert_eq!(decode_text(&mut dec, &Limits::default()).unwrap(), "from");
+        assert_eq!(decode_text(&mut dec, &Limits::default()).unwrap(), "bd-a");
+        assert_eq!(
+            decode_text(&mut dec, &Limits::default()).unwrap(),
+            "to_namespace"
+        );
+        assert_eq!(
+            decode_text(&mut dec, &Limits::default()).unwrap(),
+            to_namespace.as_str()
+        );
+        assert_eq!(decode_text(&mut dec, &Limits::default()).unwrap(), "to");
+        assert_eq!(decode_text(&mut dec, &Limits::default()).unwrap(), "bd-b");
+        assert_eq!(decode_text(&mut dec, &Limits::default()).unwrap(), "kind");
+        assert_eq!(decode_text(&mut dec, &Limits::default()).unwrap(), "blocks");
+        assert_eq!(decode_text(&mut dec, &Limits::default()).unwrap(), "dot");
+    }
+
+    #[test]
+    fn cbor_dep_ops_reject_legacy_bare_endpoints() {
+        let mut add = Vec::new();
+        let mut enc = Encoder::new(&mut add);
+        enc.map(4).unwrap();
+        enc.str("from").unwrap();
+        enc.str("bd-a").unwrap();
+        enc.str("to").unwrap();
+        enc.str("bd-b").unwrap();
+        enc.str("kind").unwrap();
+        enc.str("blocks").unwrap();
+        enc.str("dot").unwrap();
+        encode_wire_dot(
+            &mut enc,
+            &WireDotV1 {
+                replica: ReplicaId::new(Uuid::from_bytes([8u8; 16])),
+                counter: 1,
+            },
+        )
+        .unwrap();
+
+        let mut dec = Decoder::new(add.as_slice());
+        let err = decode_wire_dep_add(&mut dec, &Limits::default(), 0).unwrap_err();
+        assert!(matches!(err, DecodeError::MissingField("from_namespace")));
+
+        let mut remove = Vec::new();
+        let mut enc = Encoder::new(&mut remove);
+        enc.map(4).unwrap();
+        enc.str("from").unwrap();
+        enc.str("bd-a").unwrap();
+        enc.str("to").unwrap();
+        enc.str("bd-b").unwrap();
+        enc.str("kind").unwrap();
+        enc.str("blocks").unwrap();
+        enc.str("ctx").unwrap();
+        encode_wire_dvv(
+            &mut enc,
+            &WireDvvV1 {
+                max: BTreeMap::new(),
+                dots: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let mut dec = Decoder::new(remove.as_slice());
+        let err = decode_wire_dep_remove(&mut dec, &Limits::default(), 0).unwrap_err();
+        assert!(matches!(err, DecodeError::MissingField("from_namespace")));
+    }
+
+    #[test]
     fn validate_rejects_keep_workflow_patch_fields() {
         let mut body = sample_body();
         let mut patch = WireBeadPatch::new(BeadId::parse("bd-test1").unwrap());

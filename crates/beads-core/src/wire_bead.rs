@@ -2289,6 +2289,25 @@ mod tests {
     }
 
     #[test]
+    fn wire_dep_entry_json_includes_endpoint_namespaces() {
+        let entry = WireDepEntryV1 {
+            key: DepKey::new(
+                BeadRef::new(NamespaceId::parse("sessions").unwrap(), bead_id("bd-a")),
+                BeadRef::new(NamespaceId::parse("extmsg").unwrap(), bead_id("bd-b")),
+                DepKind::Blocks,
+            )
+            .unwrap(),
+            dots: Vec::new(),
+        };
+
+        let json = serde_json::to_value(&entry).unwrap();
+        assert_eq!(json["key"]["from"]["namespace"], "sessions");
+        assert_eq!(json["key"]["from"]["id"], "bd-a");
+        assert_eq!(json["key"]["to"]["namespace"], "extmsg");
+        assert_eq!(json["key"]["to"]["id"], "bd-b");
+    }
+
+    #[test]
     fn snapshot_codec_rejects_out_of_order_beads() {
         let base = make_stamp(5, 0, "alice");
         let mut state = CanonicalState::new();
