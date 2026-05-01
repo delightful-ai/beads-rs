@@ -2780,7 +2780,10 @@ fn test_migrate_preserves_repo_slug_and_new_ids_use_it() {
         .stdout
         .clone();
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let id = json["data"]["id"].as_str().unwrap().to_string();
+    let id = json.get("data").unwrap_or(&json)["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     assert!(
         id.starts_with("beads-rs-"),
         "expected new id to use repo slug, got {id}"

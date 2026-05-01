@@ -22,11 +22,6 @@ use crate::fixtures::wait;
 use beads_api::UnlockAction;
 use predicates::prelude::*;
 
-#[cfg(feature = "slow-tests")]
-fn parse_response_payload(bytes: &[u8]) -> beads_surface::ipc::ResponsePayload {
-    serde_json::from_slice(bytes).expect("parse response payload")
-}
-
 fn cli_issue_id_from_output(bytes: &[u8]) -> String {
     let value: serde_json::Value = serde_json::from_slice(bytes).expect("parse CLI JSON");
     cli_single_issue_json(&value)["id"]
@@ -46,6 +41,25 @@ fn cli_single_issue_json(value: &serde_json::Value) -> &serde_json::Value {
         .as_array()
         .and_then(|items| items.first())
         .unwrap_or(value)
+}
+
+fn cli_issue_array_json(value: &serde_json::Value) -> &[serde_json::Value] {
+    if let Some(data) = value.get("data") {
+        return data.as_array().expect("CLI JSON data array");
+    }
+    value.as_array().expect("CLI JSON issue array")
+}
+
+#[cfg(feature = "slow-tests")]
+fn cli_wall_ms_json(value: &serde_json::Value) -> i128 {
+    if let Some(ms) = value.as_u64() {
+        return ms as i128;
+    }
+    let raw = value.as_str().expect("CLI wall clock RFC3339 string");
+    time::OffsetDateTime::parse(raw, &time::format_description::well_known::Rfc3339)
+        .expect("parse CLI RFC3339 wall clock")
+        .unix_timestamp_nanos()
+        / 1_000_000
 }
 
 #[cfg(feature = "slow-tests")]
@@ -221,7 +235,7 @@ fn test_claim_and_unclaim() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let id = json["data"]["id"].as_str().unwrap();
+    let id = cli_single_issue_json(&json)["id"].as_str().unwrap();
 
     repo.bd().args(["claim", id, "--json"]).assert().success();
 
@@ -307,10 +321,7 @@ fn test_discovered_from_workflow() {
         .get_output()
         .stdout
         .clone();
-    let parent_id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let parent_id = cli_issue_id_from_output(&output);
 
     let dep_arg = format!("discovered_from:{}", parent_id);
     repo.bd()
@@ -347,10 +358,7 @@ fn test_epic_with_subtasks() {
         .get_output()
         .stdout
         .clone();
-    let epic_id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let epic_id = cli_issue_id_from_output(&output);
 
     repo.bd()
         .args([
@@ -400,10 +408,7 @@ fn test_epic_show_progress_display() {
         .get_output()
         .stdout
         .clone();
-    let epic_id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let epic_id = cli_issue_id_from_output(&output);
 
     // Create subtasks with different priorities
     let output1 = repo
@@ -422,10 +427,7 @@ fn test_epic_show_progress_display() {
         .get_output()
         .stdout
         .clone();
-    let task1_id = serde_json::from_slice::<serde_json::Value>(&output1).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let task1_id = cli_issue_id_from_output(&output1);
 
     let output2 = repo
         .bd()
@@ -443,10 +445,7 @@ fn test_epic_show_progress_display() {
         .get_output()
         .stdout
         .clone();
-    let _task2_id = serde_json::from_slice::<serde_json::Value>(&output2).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let _task2_id = cli_issue_id_from_output(&output2);
 
     repo.bd()
         .args([
@@ -489,10 +488,7 @@ fn test_update_parent_and_unparent() {
         .get_output()
         .stdout
         .clone();
-    let epic_id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let epic_id = cli_issue_id_from_output(&output);
 
     let output = repo
         .bd()
@@ -502,10 +498,7 @@ fn test_update_parent_and_unparent() {
         .get_output()
         .stdout
         .clone();
-    let child_id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let child_id = cli_issue_id_from_output(&output);
 
     // Reparent.
     repo.bd()
@@ -564,10 +557,7 @@ fn test_labels() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     repo.bd()
         .args(["label", "add", &id, "tech-debt"])
@@ -697,7 +687,7 @@ fn test_update_bead() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let id = json["data"]["id"].as_str().unwrap();
+    let id = cli_single_issue_json(&json)["id"].as_str().unwrap();
 
     // Update title
     repo.bd()
@@ -721,7 +711,7 @@ fn test_update_bead() {
         .args(["show", id, "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"type\": \"epic\""));
+        .stdout(predicate::str::contains("\"issue_type\": \"epic\""));
 
     // Invalid type should fail.
     repo.bd()
@@ -768,7 +758,10 @@ fn test_update_bead() {
         .stdout
         .clone();
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    assert_eq!(json["data"]["closed_reason"].as_str(), Some("Done"));
+    assert_eq!(
+        cli_single_issue_json(&json)["close_reason"].as_str(),
+        Some("Done")
+    );
 }
 
 #[cfg(feature = "slow-tests")]
@@ -787,7 +780,7 @@ fn test_delete_and_undelete() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let id = json["data"]["id"].as_str().unwrap();
+    let id = cli_single_issue_json(&json)["id"].as_str().unwrap();
 
     // Delete the bead
     repo.bd()
@@ -833,7 +826,7 @@ fn test_reopen_closed() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let id = json["data"]["id"].as_str().unwrap();
+    let id = cli_single_issue_json(&json)["id"].as_str().unwrap();
 
     // Close it
     repo.bd()
@@ -873,7 +866,7 @@ fn test_comments() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let id = json["data"]["id"].as_str().unwrap();
+    let id = cli_single_issue_json(&json)["id"].as_str().unwrap();
 
     // Add comments (content is positional arg, not --content flag)
     repo.bd()
@@ -899,7 +892,7 @@ fn test_comments() {
         .args(["show", id, "--json"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("\"notes\""));
+        .stdout(predicate::str::contains("\"comments\""));
 }
 
 #[cfg(feature = "slow-tests")]
@@ -1103,7 +1096,7 @@ fn test_comment_compat_alias() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let id = json["data"]["id"].as_str().unwrap();
+    let id = cli_single_issue_json(&json)["id"].as_str().unwrap();
 
     // Use the compat 'comment' alias (singular)
     repo.bd()
@@ -1133,10 +1126,7 @@ fn test_dep_rm() {
         .get_output()
         .stdout
         .clone();
-    let id_a = serde_json::from_slice::<serde_json::Value>(&output1).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_a = cli_issue_id_from_output(&output1);
 
     let output2 = repo
         .bd()
@@ -1146,10 +1136,7 @@ fn test_dep_rm() {
         .get_output()
         .stdout
         .clone();
-    let id_b = serde_json::from_slice::<serde_json::Value>(&output2).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_b = cli_issue_id_from_output(&output2);
 
     // Add dependency: B depends on A
     repo.bd()
@@ -1199,10 +1186,7 @@ fn test_dep_tree() {
         .get_output()
         .stdout
         .clone();
-    let root_id = serde_json::from_slice::<serde_json::Value>(&output1).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let root_id = cli_issue_id_from_output(&output1);
 
     let output2 = repo
         .bd()
@@ -1212,10 +1196,7 @@ fn test_dep_tree() {
         .get_output()
         .stdout
         .clone();
-    let child_id = serde_json::from_slice::<serde_json::Value>(&output2).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let child_id = cli_issue_id_from_output(&output2);
 
     // Child depends on root
     repo.bd()
@@ -1252,10 +1233,7 @@ fn test_label_list_and_list_all() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     // Add multiple labels
     repo.bd()
@@ -1284,10 +1262,7 @@ fn test_label_list_and_list_all() {
         .get_output()
         .stdout
         .clone();
-    let id2 = serde_json::from_slice::<serde_json::Value>(&output2).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id2 = cli_issue_id_from_output(&output2);
 
     repo.bd()
         .args(["label", "add", &id2, "frontend"])
@@ -1319,10 +1294,7 @@ fn test_epic_close_eligible() {
         .get_output()
         .stdout
         .clone();
-    let epic_id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let epic_id = cli_issue_id_from_output(&output);
 
     // Create subtasks
     let sub1_out = repo
@@ -1340,10 +1312,7 @@ fn test_epic_close_eligible() {
         .get_output()
         .stdout
         .clone();
-    let sub1_id = serde_json::from_slice::<serde_json::Value>(&sub1_out).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let sub1_id = cli_issue_id_from_output(&sub1_out);
 
     let sub2_out = repo
         .bd()
@@ -1360,10 +1329,7 @@ fn test_epic_close_eligible() {
         .get_output()
         .stdout
         .clone();
-    let sub2_id = serde_json::from_slice::<serde_json::Value>(&sub2_out).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let sub2_id = cli_issue_id_from_output(&sub2_out);
 
     // Epic should not be eligible (subtasks open)
     repo.bd()
@@ -1427,10 +1393,7 @@ fn test_deleted_id_lookup() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     repo.bd()
         .args(["delete", &id, "--reason=Testing"])
@@ -1495,7 +1458,7 @@ fn test_list_sorting() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let issues = json["data"].as_array().unwrap();
+    let issues = cli_issue_array_json(&json);
     assert!(issues.len() >= 3);
     // First issue should be high priority (0)
     assert_eq!(issues[0]["priority"].as_u64().unwrap(), 0);
@@ -1511,7 +1474,7 @@ fn test_list_sorting() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let issues = json["data"].as_array().unwrap();
+    let issues = cli_issue_array_json(&json);
     // First issue should be low priority (4)
     assert_eq!(issues[0]["priority"].as_u64().unwrap(), 4);
 }
@@ -1541,7 +1504,7 @@ fn test_list_limit() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let issues = json["data"].as_array().unwrap();
+    let issues = cli_issue_array_json(&json);
     assert_eq!(issues.len(), 2);
 }
 
@@ -1574,7 +1537,7 @@ fn test_create_design_and_acceptance() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let id = json["data"][0]["id"].as_str().unwrap();
+    let id = cli_issue_array_json(&json)[0]["id"].as_str().unwrap();
 
     repo.bd()
         .args(["show", id, "--json"])
@@ -1607,7 +1570,7 @@ fn test_create_with_assignee() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let id = json["data"]["id"].as_str().unwrap();
+    let id = cli_single_issue_json(&json)["id"].as_str().unwrap();
 
     // Should be in_progress since it has an assignee
     repo.bd()
@@ -1665,7 +1628,7 @@ fn test_error_handling_invalid_transitions() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let id = json["data"]["id"].as_str().unwrap();
+    let id = cli_single_issue_json(&json)["id"].as_str().unwrap();
 
     // Can't reopen an already open issue
     repo.bd()
@@ -1701,7 +1664,7 @@ fn test_reclaim_extends_lease() {
         .clone();
 
     let json: serde_json::Value = serde_json::from_slice(&output).unwrap();
-    let id = json["data"]["id"].as_str().unwrap();
+    let id = cli_single_issue_json(&json)["id"].as_str().unwrap();
 
     // Claim it first with short lease
     repo.bd()
@@ -1720,7 +1683,7 @@ fn test_reclaim_extends_lease() {
         .clone();
 
     let show_json: serde_json::Value = serde_json::from_slice(&show_out).unwrap();
-    let initial_expires = show_json["data"]["assignee_expires"].as_u64().unwrap();
+    let initial_expires = cli_wall_ms_json(&cli_single_issue_json(&show_json)["assignee_expires"]);
 
     // Re-claim with longer lease (same actor can re-claim)
     repo.bd()
@@ -1739,7 +1702,7 @@ fn test_reclaim_extends_lease() {
         .clone();
 
     let show_json2: serde_json::Value = serde_json::from_slice(&show_out2).unwrap();
-    let new_expires = show_json2["data"]["assignee_expires"].as_u64().unwrap();
+    let new_expires = cli_wall_ms_json(&cli_single_issue_json(&show_json2)["assignee_expires"]);
 
     assert!(new_expires > initial_expires);
 }
@@ -1759,10 +1722,7 @@ fn test_bulk_label_operations() {
         .get_output()
         .stdout
         .clone();
-    let id1 = serde_json::from_slice::<serde_json::Value>(&output1).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id1 = cli_issue_id_from_output(&output1);
 
     let output2 = repo
         .bd()
@@ -1772,10 +1732,7 @@ fn test_bulk_label_operations() {
         .get_output()
         .stdout
         .clone();
-    let id2 = serde_json::from_slice::<serde_json::Value>(&output2).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id2 = cli_issue_id_from_output(&output2);
 
     // Add same label to both issues at once
     repo.bd()
@@ -1936,10 +1893,7 @@ fn test_circular_dependency_prevention() {
         .get_output()
         .stdout
         .clone();
-    let id_a = serde_json::from_slice::<serde_json::Value>(&out1).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_a = cli_issue_id_from_output(&out1);
 
     let out2 = repo
         .bd()
@@ -1949,10 +1903,7 @@ fn test_circular_dependency_prevention() {
         .get_output()
         .stdout
         .clone();
-    let id_b = serde_json::from_slice::<serde_json::Value>(&out2).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_b = cli_issue_id_from_output(&out2);
 
     // A blocks B
     repo.bd()
@@ -1983,10 +1934,7 @@ fn test_self_dependency_prevention() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     // Try to make issue depend on itself
     repo.bd()
@@ -2015,10 +1963,7 @@ fn test_related_deps_allow_cycles() {
         .get_output()
         .stdout
         .clone();
-    let id_a = serde_json::from_slice::<serde_json::Value>(&out1).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_a = cli_issue_id_from_output(&out1);
 
     let out2 = repo
         .bd()
@@ -2028,10 +1973,7 @@ fn test_related_deps_allow_cycles() {
         .get_output()
         .stdout
         .clone();
-    let id_b = serde_json::from_slice::<serde_json::Value>(&out2).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_b = cli_issue_id_from_output(&out2);
 
     // A related to B
     repo.bd()
@@ -2062,10 +2004,7 @@ fn test_discovered_from_deps_allow_cycles() {
         .get_output()
         .stdout
         .clone();
-    let id_a = serde_json::from_slice::<serde_json::Value>(&out1).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_a = cli_issue_id_from_output(&out1);
 
     let out2 = repo
         .bd()
@@ -2075,10 +2014,7 @@ fn test_discovered_from_deps_allow_cycles() {
         .get_output()
         .stdout
         .clone();
-    let id_b = serde_json::from_slice::<serde_json::Value>(&out2).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_b = cli_issue_id_from_output(&out2);
 
     // A discovered from B
     repo.bd()
@@ -2109,10 +2045,7 @@ fn test_parent_deps_reject_cycles() {
         .get_output()
         .stdout
         .clone();
-    let id_a = serde_json::from_slice::<serde_json::Value>(&out1).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_a = cli_issue_id_from_output(&out1);
 
     let out2 = repo
         .bd()
@@ -2122,10 +2055,7 @@ fn test_parent_deps_reject_cycles() {
         .get_output()
         .stdout
         .clone();
-    let id_b = serde_json::from_slice::<serde_json::Value>(&out2).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_b = cli_issue_id_from_output(&out2);
 
     // A's parent is B.
     repo.bd()
@@ -2155,10 +2085,7 @@ fn test_operations_on_deleted_issue() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     // Delete it
     repo.bd().args(["delete", &id]).assert().success();
@@ -2191,10 +2118,7 @@ fn test_claim_already_claimed_issue() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     // First claim with actor alice
     repo.bd()
@@ -2228,10 +2152,7 @@ fn test_delete_issue_that_blocks_others() {
         .get_output()
         .stdout
         .clone();
-    let blocker_id = serde_json::from_slice::<serde_json::Value>(&out1).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let blocker_id = cli_issue_id_from_output(&out1);
 
     let out2 = repo
         .bd()
@@ -2241,10 +2162,7 @@ fn test_delete_issue_that_blocks_others() {
         .get_output()
         .stdout
         .clone();
-    let blocked_id = serde_json::from_slice::<serde_json::Value>(&out2).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let blocked_id = cli_issue_id_from_output(&out2);
 
     // Set up dependency
     repo.bd()
@@ -2282,10 +2200,7 @@ fn test_close_blocked_issue() {
         .get_output()
         .stdout
         .clone();
-    let blocker_id = serde_json::from_slice::<serde_json::Value>(&out1).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let blocker_id = cli_issue_id_from_output(&out1);
 
     let out2 = repo
         .bd()
@@ -2295,10 +2210,7 @@ fn test_close_blocked_issue() {
         .get_output()
         .stdout
         .clone();
-    let blocked_id = serde_json::from_slice::<serde_json::Value>(&out2).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let blocked_id = cli_issue_id_from_output(&out2);
 
     // Set up dependency
     repo.bd()
@@ -2330,10 +2242,7 @@ fn test_epic_close_with_open_children() {
         .get_output()
         .stdout
         .clone();
-    let epic_id = serde_json::from_slice::<serde_json::Value>(&epic_out).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let epic_id = cli_issue_id_from_output(&epic_out);
 
     // Create open subtask
     repo.bd()
@@ -2421,10 +2330,7 @@ fn test_unicode_and_special_characters() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     // Try label with hyphen and underscore (should work)
     // Note: label add takes label LAST, one at a time
@@ -2479,10 +2385,7 @@ fn test_duplicate_dependency() {
         .get_output()
         .stdout
         .clone();
-    let id_a = serde_json::from_slice::<serde_json::Value>(&out1).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_a = cli_issue_id_from_output(&out1);
 
     let out2 = repo
         .bd()
@@ -2492,10 +2395,7 @@ fn test_duplicate_dependency() {
         .get_output()
         .stdout
         .clone();
-    let id_b = serde_json::from_slice::<serde_json::Value>(&out2).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_b = cli_issue_id_from_output(&out2);
 
     // Add dependency
     repo.bd()
@@ -2525,10 +2425,7 @@ fn test_duplicate_label() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     // Add label
     repo.bd()
@@ -2564,10 +2461,7 @@ fn test_remove_nonexistent_dependency() {
         .get_output()
         .stdout
         .clone();
-    let id_a = serde_json::from_slice::<serde_json::Value>(&out1).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_a = cli_issue_id_from_output(&out1);
 
     let out2 = repo
         .bd()
@@ -2577,10 +2471,7 @@ fn test_remove_nonexistent_dependency() {
         .get_output()
         .stdout
         .clone();
-    let id_b = serde_json::from_slice::<serde_json::Value>(&out2).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_b = cli_issue_id_from_output(&out2);
 
     // Remove dependency that doesn't exist - should be idempotent or fail gracefully
     let result = repo.bd().args(["dep", "rm", &id_b, &id_a]).assert();
@@ -2604,10 +2495,7 @@ fn test_remove_nonexistent_label() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     // Remove label that doesn't exist - should be idempotent
     repo.bd()
@@ -2871,10 +2759,7 @@ fn test_partial_id_matching() {
         .get_output()
         .stdout
         .clone();
-    let full_id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let full_id = cli_issue_id_from_output(&output);
 
     // Try with partial ID (first 5 chars after "bd-")
     let partial = &full_id[..6]; // "bd-xx"
@@ -2914,10 +2799,7 @@ fn test_double_close() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     // First close
     repo.bd().args(["close", &id]).assert().success();
@@ -2950,10 +2832,7 @@ fn test_double_reopen() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     // Try to reopen an issue that was never closed
     let result = repo.bd().args(["reopen", &id]).assert();
@@ -3066,10 +2945,7 @@ fn test_create_with_deleted_parent() {
         .get_output()
         .stdout
         .clone();
-    let parent_id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let parent_id = cli_issue_id_from_output(&output);
 
     repo.bd().args(["delete", &parent_id]).assert().success();
 
@@ -3107,10 +2983,7 @@ fn test_dep_add_nonexistent_blocker() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     // Try to add dependency on non-existent issue
     repo.bd()
@@ -3135,10 +3008,7 @@ fn test_dep_add_deleted_blocker() {
         .get_output()
         .stdout
         .clone();
-    let deleted_id = serde_json::from_slice::<serde_json::Value>(&out1).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let deleted_id = cli_issue_id_from_output(&out1);
 
     let out2 = repo
         .bd()
@@ -3148,10 +3018,7 @@ fn test_dep_add_deleted_blocker() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&out2).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&out2);
 
     // Delete the first issue
     repo.bd().args(["delete", &deleted_id]).assert().success();
@@ -3188,10 +3055,7 @@ fn test_long_dependency_chain() {
             .get_output()
             .stdout
             .clone();
-        let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let id = cli_issue_id_from_output(&output);
         ids.push(id);
     }
 
@@ -3241,10 +3105,7 @@ fn test_delete_middle_of_dependency_chain() {
             .get_output()
             .stdout
             .clone();
-        let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-            .as_str()
-            .unwrap()
-            .to_string();
+        let id = cli_issue_id_from_output(&output);
         ids.push(id);
     }
 
@@ -3291,10 +3152,7 @@ fn test_empty_comment() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     // Try to add empty comment
     let result = repo.bd().args(["comments", "add", &id, ""]).assert();
@@ -3337,7 +3195,7 @@ fn test_very_long_title() {
     if output.status.success() {
         // Verify it's stored correctly
         let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        let stored_title = json["data"]["title"].as_str().unwrap();
+        let stored_title = cli_single_issue_json(&json)["title"].as_str().unwrap();
         assert_eq!(stored_title.len(), 1000, "Title should be preserved fully");
     } else {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -3392,10 +3250,7 @@ fn test_many_labels() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     // Add 50 labels
     for i in 0..50 {
@@ -3439,10 +3294,7 @@ fn test_unclaim_not_claimed() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     // Try to unclaim something never claimed
     let result = repo.bd().args(["unclaim", &id]).assert();
@@ -3466,10 +3318,7 @@ fn test_claim_closed_issue() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     repo.bd().args(["close", &id]).assert().success();
 
@@ -3504,10 +3353,7 @@ fn test_update_multiple_fields_at_once() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     // Update multiple fields at once (skip assignee - can only assign self)
     repo.bd()
@@ -3545,10 +3391,7 @@ fn test_update_deps() {
         .get_output()
         .stdout
         .clone();
-    let id_a = serde_json::from_slice::<serde_json::Value>(&output1).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_a = cli_issue_id_from_output(&output1);
 
     let output2 = repo
         .bd()
@@ -3558,10 +3401,7 @@ fn test_update_deps() {
         .get_output()
         .stdout
         .clone();
-    let id_b = serde_json::from_slice::<serde_json::Value>(&output2).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_b = cli_issue_id_from_output(&output2);
 
     let output3 = repo
         .bd()
@@ -3571,10 +3411,7 @@ fn test_update_deps() {
         .get_output()
         .stdout
         .clone();
-    let id_c = serde_json::from_slice::<serde_json::Value>(&output3).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_c = cli_issue_id_from_output(&output3);
 
     // Use update --deps to add dependencies: A depends on B and C
     repo.bd()
@@ -3624,10 +3461,7 @@ fn test_update_deps_with_kind() {
         .get_output()
         .stdout
         .clone();
-    let id_main = serde_json::from_slice::<serde_json::Value>(&output1).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_main = cli_issue_id_from_output(&output1);
 
     let output2 = repo
         .bd()
@@ -3637,10 +3471,7 @@ fn test_update_deps_with_kind() {
         .get_output()
         .stdout
         .clone();
-    let id_bug = serde_json::from_slice::<serde_json::Value>(&output2).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id_bug = cli_issue_id_from_output(&output2);
 
     // Use update --deps with discovered_from kind
     let dep_spec = format!("discovered_from:{}", id_main);
@@ -3649,7 +3480,8 @@ fn test_update_deps_with_kind() {
         .assert()
         .success();
 
-    // Verify the bug shows the discovered_from relationship in deps_outgoing
+    // Verify the bug shows the discovered_from relationship in the Go-compatible
+    // hydrated dependency projection.
     let show_output = repo
         .bd()
         .args(["show", &id_bug, "--json"])
@@ -3659,13 +3491,15 @@ fn test_update_deps_with_kind() {
         .stdout
         .clone();
     let json: serde_json::Value = serde_json::from_slice(&show_output).unwrap();
-    let deps_outgoing = json["data"]["deps_outgoing"].as_array().unwrap();
-    assert_eq!(deps_outgoing.len(), 1);
+    let dependencies = cli_single_issue_json(&json)["dependencies"]
+        .as_array()
+        .unwrap();
+    assert_eq!(dependencies.len(), 1);
     assert_eq!(
-        deps_outgoing[0]["kind"].as_str().unwrap(),
-        "discovered_from"
+        dependencies[0]["dependency_type"].as_str().unwrap(),
+        "discovered-from"
     );
-    assert_eq!(deps_outgoing[0]["to"].as_str().unwrap(), id_main);
+    assert_eq!(dependencies[0]["id"].as_str().unwrap(), id_main);
 }
 
 #[cfg(feature = "slow-tests")]
@@ -3738,10 +3572,7 @@ fn test_show_with_all_optional_fields() {
         .get_output()
         .stdout
         .clone();
-    let id = serde_json::from_slice::<serde_json::Value>(&output).unwrap()["data"]["id"]
-        .as_str()
-        .unwrap()
-        .to_string();
+    let id = cli_issue_id_from_output(&output);
 
     // Add labels and comments
     repo.bd()
@@ -3768,10 +3599,7 @@ fn test_show_with_all_optional_fields() {
 #[cfg(feature = "slow-tests")]
 #[test]
 fn test_crash_recovery_replays_wal() {
-    use beads_api::QueryResult;
     use beads_git::sync::read_state_at_oid;
-    use beads_surface::ipc::ResponsePayload;
-    use beads_surface::ops::OpResult;
     use git2::Repository;
 
     let repo = TestRepo::new();
@@ -3782,16 +3610,8 @@ fn test_crash_recovery_replays_wal() {
         .output()
         .expect("run bd create");
     assert!(output.status.success());
-    let payload = parse_response_payload(&output.stdout);
-    let id = match payload {
-        ResponsePayload::Op(op) => match op.result {
-            OpResult::Created { id } => id,
-            other => panic!("unexpected create op result: {other:?}"),
-        },
-        ResponsePayload::Query(QueryResult::Issue(issue)) => beads_core::BeadId::parse(&issue.id)
-            .unwrap_or_else(|e| panic!("invalid issue id in create response: {e}")),
-        other => panic!("unexpected create payload: {other:?}"),
-    };
+    let id = beads_core::BeadId::parse(&cli_issue_id_from_output(&output.stdout))
+        .unwrap_or_else(|e| panic!("invalid issue id in create response: {e}"));
 
     let store_id = runtime_wait_for_store_id(repo.data_dir(), Duration::from_secs(2))
         .expect("store id should be discovered");
@@ -3820,12 +3640,12 @@ fn test_crash_recovery_replays_wal() {
         .output()
         .expect("run bd list");
     assert!(list_out.status.success());
-    let list_payload = parse_response_payload(&list_out.stdout);
-    let ResponsePayload::Query(QueryResult::Issues(issues)) = list_payload else {
-        panic!("unexpected list payload: {list_payload:?}");
-    };
+    let issues: serde_json::Value =
+        serde_json::from_slice(&list_out.stdout).expect("parse list response");
     assert!(
-        issues.iter().any(|issue| issue.id == id.as_str()),
+        cli_issue_array_json(&issues)
+            .iter()
+            .any(|issue| issue["id"].as_str() == Some(id.as_str())),
         "expected recovered issue to appear after restart"
     );
 

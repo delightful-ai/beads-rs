@@ -19,7 +19,6 @@ use crate::fixtures::wait;
 
 const MAX_RECONNECTS: usize = 3;
 const MAX_WAIT: Duration = Duration::from_secs(30);
-const STREAM_READ_TIMEOUT: Duration = Duration::from_millis(200);
 const RECONNECT_INITIAL_BACKOFF: Duration = Duration::from_millis(50);
 const RECONNECT_MAX_BACKOFF: Duration = Duration::from_millis(200);
 
@@ -239,12 +238,12 @@ fn collect_origin_seqs(
     let deadline = Instant::now() + MAX_WAIT;
 
     client
-        .set_read_timeout(Some(STREAM_READ_TIMEOUT))
-        .expect("set subscribe timeout");
+        .set_nonblocking(true)
+        .expect("set subscribe nonblocking");
 
     while seqs.len() < total {
         if Instant::now() > deadline {
-            let _ = client.set_read_timeout(None);
+            let _ = client.set_nonblocking(false);
             panic!(
                 "subscribe stream timed out after {:?} (got {} of {})",
                 MAX_WAIT,
@@ -278,17 +277,17 @@ fn collect_origin_seqs(
                 if err.retryable && err.code == CliErrorCode::Disconnected.into() {
                     reconnect_stream(client, &mut reconnects, repo, read, ipc_client, deadline);
                 } else {
-                    let _ = client.set_read_timeout(None);
+                    let _ = client.set_nonblocking(false);
                     panic!("stream event: {err:?}");
                 }
             }
             Err(err) => {
-                let _ = client.set_read_timeout(None);
+                let _ = client.set_nonblocking(false);
                 panic!("stream event: {err:?}");
             }
         }
     }
-    let _ = client.set_read_timeout(None);
+    let _ = client.set_nonblocking(false);
     seqs
 }
 
@@ -302,7 +301,7 @@ fn reconnect_stream(
 ) {
     *reconnects += 1;
     if *reconnects > MAX_RECONNECTS {
-        let _ = client.set_read_timeout(None);
+        let _ = client.set_nonblocking(false);
         panic!("subscribe stream disconnected {} times", reconnects);
     }
     let timeout = deadline.saturating_duration_since(Instant::now());
@@ -316,13 +315,13 @@ fn reconnect_stream(
         retryable_reconnect_error,
     )
     .unwrap_or_else(|err| {
-        let _ = client.set_read_timeout(None);
+        let _ = client.set_nonblocking(false);
         panic!("subscribe reconnect failed after {reconnects} disconnects: {err:?}");
     });
     *client = replacement;
     client
-        .set_read_timeout(Some(STREAM_READ_TIMEOUT))
-        .expect("reset subscribe timeout");
+        .set_nonblocking(true)
+        .expect("reset subscribe nonblocking");
 }
 
 fn retryable_reconnect_error(err: &StreamClientError) -> bool {

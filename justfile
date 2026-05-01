@@ -36,17 +36,9 @@ lint: dylint
         -D clippy::match_wildcard_for_single_variants \
         -D clippy::wildcard_in_or_patterns
 
-# Run the canonical fast test tier (default)
+# Run the canonical test suite
 test:
     cargo xtest
-
-# Run the canonical fast test tier explicitly
-test-fast:
-    cargo xtest
-
-# Run the slow nextest profile explicitly
-test-slow:
-    cargo nextest run --profile slow --workspace --all-features --features slow-tests
 
 # Run the raw libtest surface when runner-specific behavior matters.
 test-libtest:

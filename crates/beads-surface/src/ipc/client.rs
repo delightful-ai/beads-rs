@@ -912,6 +912,11 @@ impl SubscriptionStream {
         self.reader.get_ref().set_read_timeout(timeout)?;
         Ok(())
     }
+
+    pub fn set_nonblocking(&self, nonblocking: bool) -> Result<(), IpcError> {
+        self.reader.get_ref().set_nonblocking(nonblocking)?;
+        Ok(())
+    }
 }
 
 /// Send a subscribe request and return a stream of responses.

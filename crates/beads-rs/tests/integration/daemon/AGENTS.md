@@ -4,7 +4,7 @@ NEVER: keep a case here once it only proves daemon-owned runtime behavior, WAL i
 
 ## Routing
 - Copy `admin.rs` for fast typed admin IPC, maintenance, and fingerprint assertions that stay in the default suite.
-- Copy `admin_status.rs` or `subscribe.rs` for slow/time-based status and streaming proofs; both are `slow-tests`, so `cargo xtest` is not enough.
+- Copy `admin_status.rs` or `subscribe.rs` for slow/time-based status and streaming proofs; both are `slow-tests`, so use an exact feature-gated filter while iterating.
 - Copy `lifecycle.rs`, `crash_recovery.rs`, or `store_lock.rs` for daemon ownership, stale socket/meta, restart, and operator-facing store-lock behavior.
 - Copy `logging.rs` or `realtime_smoke.rs` for runtime/log-dir/realtime wiring at the product seam.
 - Copy `repl_e2e.rs` only for multi-daemon external-process replication smoke, tailnet-proxy product coverage, or checkpoint/WAL behavior that truly needs the assembly harness.
@@ -19,5 +19,5 @@ NEVER: keep a case here once it only proves daemon-owned runtime behavior, WAL i
 - Treat `repl_e2e.rs` as the constrained external-process slow zone, not the default template for ordinary daemon tests or deterministic fault semantics.
 
 ## Verification
-- Use `cargo xtest` for default-suite files such as `admin.rs`.
-- For any `slow-tests` file here, or any tailnet/proxy change, append `cargo nextest run --profile slow --workspace --all-features --features slow-tests`.
+- Use exact feature-gated filters while iterating on one `slow-tests` case or tailnet/proxy change.
+- Finish with `cargo xtest`; it includes this subtree's `slow-tests` coverage.

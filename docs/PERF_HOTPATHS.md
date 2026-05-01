@@ -106,18 +106,17 @@ Thresholds are configurable:
 The repo now has a first-class test-suite profiling harness:
 
 - script: `scripts/profile-tests.sh`
-- fast entrypoint: `cargo xtest` (`nextest` fast profile plus `beads-rs/e2e-tests`, excluding `slow-tests`)
-- slow entrypoint: `cargo nextest run --profile slow --workspace --all-features --features slow-tests`
+- entrypoint: `cargo xtest` (`nextest` fast profile, workspace all-features, no separate slow tier)
 
 ### What It Captures
 
-- `fast-list.txt`, `slow-list.txt`: enumerated test inventory
-- `fast-raw.log`, `slow-raw.log`: full nextest output
-- `fast-messages.jsonl`, `slow-messages.jsonl`: structured nextest timing events
-- `fast-top-tests.tsv`, `slow-top-tests.tsv`: slowest individual tests
-- `fast-top-suites.tsv`, `slow-top-suites.tsv`: slowest binaries / suites
-- `fast-phase-summary.tsv`, `slow-phase-summary.tsv`: env-gated fixture timing aggregated by phase
-- `fast-phases/`, `slow-phases/`: raw per-process timing JSONL emitted by shared test fixtures
+- `all-list.txt`: enumerated test inventory
+- `all-raw.log`: full nextest output
+- `all-messages.jsonl`: structured nextest timing events
+- `all-top-tests.tsv`: slowest individual tests
+- `all-top-suites.tsv`: slowest binaries / suites
+- `all-phase-summary.tsv`: env-gated fixture timing aggregated by phase
+- `all-phases/`: raw per-process timing JSONL emitted by shared test fixtures
 - `SUMMARY.txt`: condensed run digest
 
 ### Fixture Timing
@@ -179,9 +178,9 @@ Warm runner burn-in receipts:
 
 Stability notes behind the current receipts:
 
-- `.config/nextest.toml` now caps the shared runner at `test-threads = 4`
+- `.config/nextest.toml` now caps the shared runner at `test-threads = 9`
 - tailnet fault-injection tests are fenced into the `tailnet-fault-injection` nextest group so proxy-heavy `repl_e2e` cases do not oversubscribe the fast tier
-- `scripts/profile-tests.sh` runs with `PROFILE_TEST_THREADS=2` by default for reproducible timing artifacts
+- `scripts/profile-tests.sh` runs with `PROFILE_TEST_THREADS=9` by default to match the canonical runner
 - restart-tailnet readiness now requires fresh post-restart handshakes instead of trusting persisted pre-crash liveness rows
 - test fixtures now share common wait/runtime helpers instead of repeating ad-hoc socket/meta/store polling
 - git-sync crash-recovery coverage now reuses `BdRuntimeRepo` instead of ad hoc runtime tempdirs, so restarted daemons are owned by shared fixture cleanup instead of leaking past process-per-test teardown
@@ -217,7 +216,7 @@ Root-cause notes behind the latest receipts:
 - explicit daemon ownership initially regressed the fast tier because teardown still polled PID liveness for owned children; exited-but-unreaped children stayed visible as alive, so `fixture.wait.process_exit` burned the full timeout on almost every REPL daemon shutdown
 - that teardown tax was removed by reaping owned daemon children with `Child::try_wait()` instead of PID-only polling
 - `ReplRig::assert_converged()` was also too heavy under concurrent REPL tests because it polled full `AdminStatus` payloads, including WAL/reporting work, on every retry; switching convergence polling to `AdminFingerprint` removed that hot-path contention
-- after the convergence fix, fast/default profiles no longer need tailnet tests to monopolize the whole runner; the slow profile still reserves full runner ownership for tailnet fault-injection tests because the broader slow suite can otherwise starve `repl_daemon_pathological_tailnet_roundtrip`
+- historical note: after the convergence fix, fast/default profiles no longer needed tailnet tests to monopolize the whole runner; the old slow profile still reserved full runner ownership for tailnet fault-injection tests because the broader slow suite could otherwise starve `repl_daemon_pathological_tailnet_roundtrip`
 
 Latest March 14 closeout receipts:
 
@@ -250,9 +249,16 @@ Latest March 14 review-loop receipts:
 
 Root-cause note for the review-loop receipts:
 
-- `cargo xtest` now stays on the intended fast surface by enabling `beads-rs/e2e-tests` explicitly instead of `--all-features`, so `slow-tests` do not silently leak back into the fast tier during review fixes
+- April 30 update: `cargo xtest` now runs the full workspace all-features surface under the fast profile; the separate slow profile was removed after the unified run stayed under the 45-second warm-run target.
+- Historical March 19 note: `cargo xtest` previously stayed on the intended fast surface by enabling `beads-rs/e2e-tests` explicitly instead of `--all-features`, so `slow-tests` did not silently leak back into the fast tier during review fixes.
 - `ReplRig` teardown still had one leak path after the earlier ownership work: once the socket/meta files disappeared, generic daemon discovery could miss split `runtime/` + sibling `data/` fixtures, leaving the owned child alive long enough for nextest to flag a leaky test
 - the shared wait helper now force-kills and reaps owned daemon children through the `Child` handle when graceful shutdown misses its deadline, which closes that teardown hole without relying on late PID/lock-file discovery
+
+Latest April 30 unified-suite receipts:
+
+- old separate slow profile baseline: `cargo nextest run --profile slow --workspace --all-features --features slow-tests --no-fail-fast --status-level none --final-status-level slow` -> `64.953s` nextest / `65.37s` wall-clock, `1342 passed`
+- unified suite before raising the shared runner cap: `cargo xtest --no-fail-fast --status-level none --final-status-level slow` -> `55.740s` nextest / `56.17s` wall-clock, `1342 passed`
+- unified suite with `.config/nextest.toml` `test-threads = 9`: `cargo xtest --no-fail-fast --status-level none --final-status-level slow` -> `35.537s` nextest / `35.90s` wall-clock, `1342 passed`
 
 Latest March 19 deterministic-harness migration receipts:
 

@@ -18,6 +18,6 @@ NEVER: dump generic core/daemon behavior here just because invoking `bd` is conv
 ## Verification
 - Start with `cargo test -p beads-rs --test integration cli::critical_path` for default-suite command-surface changes only.
 - Use `cargo test -p beads-rs --test integration cli::migration` for default-suite migration work only.
-- `critical_path.rs` and `migration.rs` both contain substantial `#[cfg(feature = "slow-tests")]` coverage. If the touched seam is exercised there, the real proof loop is `cargo nextest run --profile slow --workspace --all-features --features slow-tests`, not the default `cargo test` filter alone.
+- `critical_path.rs` and `migration.rs` both contain substantial `#[cfg(feature = "slow-tests")]` coverage. If the touched seam is exercised there, use an exact `--features slow-tests` filter while iterating.
 - Use `cargo test -p beads-rs --test integration cli::upgrade` for upgrade/install behavior.
-- Append `cargo xtest` once the narrow loop passes.
+- Append `cargo xtest` once the narrow loop passes; it includes the slow-gated CLI coverage.

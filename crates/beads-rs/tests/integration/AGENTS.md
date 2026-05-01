@@ -15,4 +15,4 @@ NEVER: use this tree as overflow for core/git/daemon owner coverage or for a sec
 
 ## Verification
 - Start with `cargo xtest` for changes in this subtree.
-- If the changed file is guarded by `#[cfg(feature = "slow-tests")]` or depends on tailnet/load timing, append `cargo nextest run --profile slow --workspace --all-features --features slow-tests`.
+- For a single `#[cfg(feature = "slow-tests")]` case, use an exact `cargo test -p beads-rs --test integration --features slow-tests ... -- --exact` filter while iterating, then finish with `cargo xtest`.

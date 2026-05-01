@@ -59,13 +59,12 @@ cargo check                      # typecheck (run compulsively)
 cargo fmt --all                  # format
 just dylint                      # required boundary gate (includes crate DAG policy test)
 cargo clippy --all-features -- -D warnings  # lint (CI uses --all-features)
-cargo xtest                      # canonical fast tier (nextest fast profile + beads-rs/e2e-tests)
-cargo nextest run --profile slow --workspace --all-features --features slow-tests
+cargo xtest                      # canonical full test suite (all features)
 ```
 
 Logging: `LOG=debug` or `LOG=beads_rs=trace`, or `-v/-vv` on `bd`.
 
-The default workspace verification does **not** automatically cover every specialty surface.
+The default workspace verification covers the ordinary full all-features test suite, but does **not** automatically cover every specialty surface.
 
 - If you touch `crates/beads_stateright_models`, run `cargo check -p beads_stateright_models` and at least one relevant model/example check.
 - If you touch `lints/`, run `cargo test -p beads_lints --manifest-path lints/Cargo.toml` in addition to `just dylint`.
@@ -75,9 +74,9 @@ The default workspace verification does **not** automatically cover every specia
 
 Root keeps only the cross-subtree assembly-test rules. The child files under `crates/beads-rs/tests/**` own the local harness tactics and helper-level lore.
 
-- Default to `cargo xtest` for the warm fast tier. It intentionally runs the workspace fast profile plus `beads-rs/e2e-tests`, not `--all-features`, so anything behind `slow-tests` still needs the slow tier.
-- Use `cargo nextest run --profile slow --workspace --all-features --features slow-tests` when you touch time-based daemon/load/tailnet paths. `cargo xtest` will not prove those.
-- The shared nextest runner is intentionally capped in `.config/nextest.toml` (`test-threads = 4`). Treat changes there as performance/flake work, not housekeeping.
+- Default to `cargo xtest` for the canonical suite. It runs the workspace with all features under the fast nextest profile.
+- Use exact `cargo test -p ... --features slow-tests ... --exact` filters while iterating on one feature-gated case, then finish with `cargo xtest`.
+- The shared nextest runner is intentionally capped in `.config/nextest.toml` (`test-threads = 9`). Treat changes there as performance/flake work, not housekeeping.
 - Tailnet fault-injection `daemon::repl_e2e` tests run in the `tailnet-fault-injection` nextest group (`max-threads = 1`). If you add another tailnet/proxy stress test, fence it into the same group instead of letting it silently contend with the rest of the suite.
 - Profile the suite with `./scripts/profile-tests.sh`. It records per-test nextest timing plus env-gated fixture timing under `tmp/perf/tests-*`; override its default thread count only when you are deliberately measuring a different concurrency level.
 - Reuse shared helpers under `crates/beads-rs/tests/integration/fixtures/`. If a test needs new repo/runtime/daemon setup behavior, add or extend a shared fixture instead of creating another one-off local harness.

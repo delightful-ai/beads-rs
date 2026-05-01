@@ -20,6 +20,19 @@ use crate::fixtures::store_lock::unlock_store;
 use crate::fixtures::wait;
 use assert_cmd::Command;
 
+fn cli_single_issue_json(value: &serde_json::Value) -> &serde_json::Value {
+    if let Some(data) = value.get("data") {
+        return data
+            .as_array()
+            .and_then(|items| items.first())
+            .unwrap_or(data);
+    }
+    value
+        .as_array()
+        .and_then(|items| items.first())
+        .unwrap_or(value)
+}
+
 // =============================================================================
 // Test Fixture
 // =============================================================================
@@ -430,11 +443,12 @@ fn test_graceful_shutdown_preserves_mutations() {
         .clone();
     let created: serde_json::Value =
         serde_json::from_slice(&create_output).expect("parse create response");
-    let id = created["data"]["id"]
+    let created_issue = cli_single_issue_json(&created);
+    let id = created_issue["id"]
         .as_str()
         .expect("created id")
         .to_string();
-    let title = created["data"]["title"]
+    let title = created_issue["title"]
         .as_str()
         .expect("created title")
         .to_string();
@@ -457,6 +471,7 @@ fn test_graceful_shutdown_preserves_mutations() {
         .clone();
     let shown: serde_json::Value =
         serde_json::from_slice(&show_output).expect("parse show response");
-    assert_eq!(shown["data"]["id"].as_str(), Some(id.as_str()));
-    assert_eq!(shown["data"]["title"].as_str(), Some(title.as_str()));
+    let shown_issue = cli_single_issue_json(&shown);
+    assert_eq!(shown_issue["id"].as_str(), Some(id.as_str()));
+    assert_eq!(shown_issue["title"].as_str(), Some(title.as_str()));
 }

@@ -14,7 +14,6 @@ use crate::fixtures::ipc_client::runtime_bound_client_no_autostart;
 use crate::fixtures::realtime::RealtimeFixture;
 use crate::fixtures::store_lock::unlock_store;
 use crate::fixtures::wait;
-use beads_api::QueryResult;
 use beads_core::{BeadId, BeadType, EventId, NamespaceId, Priority, Seq1};
 use beads_daemon::testkit::wal::{IndexDurabilityMode, SqliteWalIndex, WalIndex};
 use beads_surface::ipc::{
@@ -235,14 +234,12 @@ fn crash_recovery_rebuilds_index_after_fsync_before_commit() {
         .output()
         .expect("show output");
     assert!(output.status.success(), "show failed: {:?}", output);
-    let payload: ResponsePayload =
-        serde_json::from_slice(&output.stdout).expect("parse show payload");
-    match payload {
-        ResponsePayload::Query(QueryResult::Issue(issue)) => {
-            assert_eq!(issue.id, "bd-crash-index");
-        }
-        other => panic!("unexpected show payload: {other:?}"),
-    }
+    let shown: serde_json::Value = serde_json::from_slice(&output.stdout).expect("parse show JSON");
+    let issue = shown
+        .as_array()
+        .and_then(|items| items.first())
+        .unwrap_or(&shown);
+    assert_eq!(issue["id"].as_str(), Some("bd-crash-index"));
 
     let index = SqliteWalIndex::open(&store_dir, &store_meta, IndexDurabilityMode::Cache)
         .expect("open wal index after recovery");

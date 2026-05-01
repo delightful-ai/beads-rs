@@ -23,5 +23,5 @@ NEVER: hide owner-crate logic or one-off test behavior here. If a helper stops b
 
 ## Verification
 - After fixture changes, run the narrowest dependent integration test first.
-- If you touched `repl_rig.rs`, `tailnet_proxy.rs`, or another slow-only harness surface, append `cargo nextest run --profile slow --workspace --all-features --features slow-tests`.
-- Then run `cargo xtest`.
+- If you touched `repl_rig.rs`, `tailnet_proxy.rs`, or another slow-only harness surface, use an exact `--features slow-tests` filter for the narrow loop.
+- Then run `cargo xtest`; it includes slow-only harness coverage.

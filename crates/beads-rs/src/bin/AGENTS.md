@@ -12,4 +12,4 @@ NEVER: route ordinary CLI behavior, daemon runtime logic, or test harness setup 
 
 ## Verification
 - For `main.rs` changes, run `cargo run --bin bd -- --help` to prove parse/bootstrap handoff still works.
-- For `tailnet_proxy.rs` changes, run the affected slow `daemon::repl_e2e` coverage. `cargo xtest` will not prove that binary.
+- For `tailnet_proxy.rs` changes, run the affected `daemon::repl_e2e` filter with `--features slow-tests`, then finish with `cargo xtest`.

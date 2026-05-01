@@ -91,6 +91,11 @@ impl StreamingClient {
         Ok(())
     }
 
+    pub fn set_nonblocking(&self, nonblocking: bool) -> Result<(), StreamClientError> {
+        self.stream.set_nonblocking(nonblocking)?;
+        Ok(())
+    }
+
     pub fn next_message(&mut self) -> Result<Option<StreamMessage>, StreamClientError> {
         Self::read_message_from_stream(&mut self.stream)
     }

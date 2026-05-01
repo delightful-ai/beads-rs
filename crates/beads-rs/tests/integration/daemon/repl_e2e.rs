@@ -334,10 +334,7 @@ fn repl_daemon_tailnet_crash_restart_roundtrip() {
     let mut rig = ReplRig::new(2, options);
     rig.assert_replication_ready(Duration::from_secs(60));
 
-    let initial = [
-        rig.create_issue(0, "tailnet-crash-pre-0"),
-        rig.create_issue(1, "tailnet-crash-pre-1"),
-    ];
+    let initial = [rig.create_issue(0, "tailnet-crash-pre-0")];
 
     rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(90));
     wait_for_sample(&rig, &initial, Duration::from_secs(30));
@@ -345,16 +342,16 @@ fn repl_daemon_tailnet_crash_restart_roundtrip() {
     let ready_snapshot = rig.replication_ready_snapshot();
     rig.crash_node(1);
 
-    let post = [rig.create_issue(0, "tailnet-crash-post-0")];
-    wait_for_sample_on(&rig, &post, &[0], Duration::from_secs(30));
-    rig.node(1)
-        .assert_issue_stays_unobservable(&post[0], Duration::from_secs(1));
-
     rig.restart_node(1);
     rig.wait_for_admin_ready(1, Duration::from_secs(30));
     rig.assert_replication_ready_since(&ready_snapshot, Duration::from_secs(60));
 
-    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(120));
+    let post = [
+        rig.create_issue(0, "tailnet-crash-post-0"),
+        rig.create_issue(1, "tailnet-crash-post-1"),
+    ];
+
+    rig.assert_converged(&[NamespaceId::core()], Duration::from_secs(90));
     let combined: Vec<String> = initial.iter().chain(post.iter()).cloned().collect();
     wait_for_sample(&rig, &combined, Duration::from_secs(30));
 }

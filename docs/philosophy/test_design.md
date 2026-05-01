@@ -113,20 +113,21 @@ We don’t distinguish “unit/integration/e2e” by ceremony; those are just sc
 If you can’t tag a test as Law / Example / Scenario / Regression, change it until you can.
 
 ---
-## 2.1 Slow tests are opt-in
+## 2.1 The default suite is the real suite
 
 Some property tests exercise expensive setup (git repos, IPC daemons, large payloads). These are
-valuable but **must not** run by default.
+valuable and must stay covered by the canonical local and CI verification path.
 
 Guidelines:
-- Gate heavy suites behind `--features slow-tests`.
-- Default `cargo test` should stay fast and predictable.
-- CI should include at least one job that runs slow suites (scheduled or manual).
+- `cargo xtest` is the default proof loop for the full workspace surface.
+- Heavy tests may keep feature gates for narrow local iteration, but those gates must be enabled by the canonical suite.
+- Do not add a second slow lane. If a test is too slow for the default suite, improve the fixture, clock, data shape, or assertion layer until it fits.
 
-Run locally when needed:
+Use exact filters while iterating, then finish with the full suite:
 
 ```bash
-cargo test --features slow-tests
+cargo test -p <crate> --features slow-tests <exact_test> -- --exact
+cargo xtest
 ```
 
 Totally fair. That section *was* a bit hand‑wavy for how central contracts are in your world.

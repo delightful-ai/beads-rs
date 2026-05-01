@@ -4,11 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 OUT_DIR="${OUT_DIR:-$ROOT/tmp/perf/tests-$STAMP}"
-FAST_PROFILE="${FAST_PROFILE:-fast}"
-SLOW_PROFILE="${SLOW_PROFILE:-slow}"
-PROFILE_TEST_THREADS="${PROFILE_TEST_THREADS:-2}"
-RUN_FAST="${RUN_FAST:-1}"
-RUN_SLOW="${RUN_SLOW:-1}"
+PROFILE_TEST_THREADS="${PROFILE_TEST_THREADS:-9}"
+RUN_TESTS="${RUN_TESTS:-1}"
 FAIL_ON_RUN_ERROR="${FAIL_ON_RUN_ERROR:-0}"
 
 mkdir -p "$OUT_DIR"
@@ -29,11 +26,8 @@ cat >"$OUT_DIR/run_meta.txt" <<META
 timestamp_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 repo=$ROOT
 out_dir=$OUT_DIR
-fast_profile=$FAST_PROFILE
-slow_profile=$SLOW_PROFILE
 profile_test_threads=$PROFILE_TEST_THREADS
-run_fast=$RUN_FAST
-run_slow=$RUN_SLOW
+run_tests=$RUN_TESTS
 META
 
 list_tests() {
@@ -131,55 +125,31 @@ render_phase_summary() {
   ' "${phase_files[@]}" >"$output"
 }
 
-if [[ "$RUN_FAST" == "1" ]]; then
-  list_tests fast --workspace --all-features
-  run_profile fast cargo xtest -j "$PROFILE_TEST_THREADS" --no-fail-fast --status-level all --final-status-level all --message-format libtest-json-plus
-  render_top_tests "$OUT_DIR/fast-messages.jsonl" "$OUT_DIR/fast-top-tests.tsv"
-  render_top_suites "$OUT_DIR/fast-messages.jsonl" "$OUT_DIR/fast-top-suites.tsv"
-  render_phase_summary "$OUT_DIR/fast-phases" "$OUT_DIR/fast-phase-summary.tsv"
-fi
-
-if [[ "$RUN_SLOW" == "1" ]]; then
-  list_tests slow --workspace --all-features --features slow-tests
-  run_profile slow cargo nextest run --profile "$SLOW_PROFILE" -j "$PROFILE_TEST_THREADS" --workspace --all-features --features slow-tests --no-fail-fast --status-level all --final-status-level all --message-format libtest-json-plus
-  render_top_tests "$OUT_DIR/slow-messages.jsonl" "$OUT_DIR/slow-top-tests.tsv"
-  render_top_suites "$OUT_DIR/slow-messages.jsonl" "$OUT_DIR/slow-top-suites.tsv"
-  render_phase_summary "$OUT_DIR/slow-phases" "$OUT_DIR/slow-phase-summary.tsv"
+if [[ "$RUN_TESTS" == "1" ]]; then
+  list_tests all --profile fast --workspace --all-features
+  run_profile all cargo xtest -j "$PROFILE_TEST_THREADS" --no-fail-fast --status-level all --final-status-level all --message-format libtest-json-plus
+  render_top_tests "$OUT_DIR/all-messages.jsonl" "$OUT_DIR/all-top-tests.tsv"
+  render_top_suites "$OUT_DIR/all-messages.jsonl" "$OUT_DIR/all-top-suites.tsv"
+  render_phase_summary "$OUT_DIR/all-phases" "$OUT_DIR/all-phase-summary.tsv"
 fi
 
 {
   echo "test profiling artifacts: $OUT_DIR"
-  if [[ "$RUN_FAST" == "1" ]]; then
-    echo "fast_exit_code=$(cat "$OUT_DIR/fast-exit-code.txt")"
-  fi
-  if [[ "$RUN_SLOW" == "1" ]]; then
-    echo "slow_exit_code=$(cat "$OUT_DIR/slow-exit-code.txt")"
-  fi
-  if [[ "$RUN_FAST" == "1" ]]; then
+  if [[ "$RUN_TESTS" == "1" ]]; then
+    echo "all_exit_code=$(cat "$OUT_DIR/all-exit-code.txt")"
     echo
-    echo "fast top suites:"
-    sed -n '1,15p' "$OUT_DIR/fast-top-suites.tsv"
+    echo "top suites:"
+    sed -n '1,15p' "$OUT_DIR/all-top-suites.tsv"
     echo
-    echo "fast top phases:"
-    sed -n '1,15p' "$OUT_DIR/fast-phase-summary.tsv"
-  fi
-  if [[ "$RUN_SLOW" == "1" ]]; then
-    echo
-    echo "slow top suites:"
-    sed -n '1,15p' "$OUT_DIR/slow-top-suites.tsv"
-    echo
-    echo "slow top phases:"
-    sed -n '1,15p' "$OUT_DIR/slow-phase-summary.tsv"
+    echo "top phases:"
+    sed -n '1,15p' "$OUT_DIR/all-phase-summary.tsv"
   fi
 } >"$OUT_DIR/SUMMARY.txt"
 
 cat "$OUT_DIR/SUMMARY.txt"
 
 if [[ "$FAIL_ON_RUN_ERROR" == "1" ]]; then
-  if [[ "$RUN_FAST" == "1" ]] && [[ "$(cat "$OUT_DIR/fast-exit-code.txt")" != "0" ]]; then
-    exit 1
-  fi
-  if [[ "$RUN_SLOW" == "1" ]] && [[ "$(cat "$OUT_DIR/slow-exit-code.txt")" != "0" ]]; then
+  if [[ "$RUN_TESTS" == "1" ]] && [[ "$(cat "$OUT_DIR/all-exit-code.txt")" != "0" ]]; then
     exit 1
   fi
 fi
