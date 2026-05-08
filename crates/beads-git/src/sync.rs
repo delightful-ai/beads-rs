@@ -786,7 +786,7 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
         .find_object(deps_entry.id(), Some(ObjectType::Blob))?
         .peel_to_blob()?;
 
-    // Read notes.jsonl (optional in legacy format)
+    // Read notes.jsonl.
     let notes_bytes = if let Some(notes_entry) = tree.get_name("notes.jsonl") {
         let notes_blob = repo
             .find_object(notes_entry.id(), Some(ObjectType::Blob))?
@@ -796,15 +796,14 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
         Vec::new()
     };
 
-    // Read meta.json for root_slug + last_write_stamp + checksums
-    let meta = if let Some(meta_entry) = tree.get_name("meta.json") {
-        let meta_blob = repo
-            .find_object(meta_entry.id(), Some(ObjectType::Blob))?
-            .peel_to_blob()?;
-        wire::parse_supported_meta(meta_blob.content())?
-    } else {
-        wire::SupportedStoreMeta::legacy()
-    };
+    // Read current meta.json for root_slug + last_write_stamp + checksums.
+    let meta_entry = tree
+        .get_name("meta.json")
+        .ok_or(SyncError::MissingFile("meta.json".into()))?;
+    let meta_blob = repo
+        .find_object(meta_entry.id(), Some(ObjectType::Blob))?
+        .peel_to_blob()?;
+    let meta = wire::parse_current_meta(meta_blob.content())?;
     let checksums = meta.checksums();
 
     if let Some(expected) = checksums {
@@ -817,7 +816,7 @@ pub fn read_state_at_oid(repo: &Repository, oid: Oid) -> Result<LoadedStore, Syn
         )?;
     }
 
-    let state = wire::parse_legacy_state(
+    let state = wire::parse_current_state(
         state_blob.content(),
         tombs_blob.content(),
         deps_blob.content(),
@@ -1012,7 +1011,7 @@ fn detect_changed_fields(
     if old.fields.estimated_minutes.stamp != new.fields.estimated_minutes.stamp {
         changed.push("estimate");
     }
-    if old.fields.workflow.stamp != new.fields.workflow.stamp {
+    if old.fields.status.stamp != new.fields.status.stamp {
         changed.push("status");
     }
     if old.fields.claim.stamp != new.fields.claim.stamp {
@@ -1112,7 +1111,7 @@ pub enum MigratePushDisposition {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MigrateStoreToV1Outcome {
+pub struct MigrateStoreToV2Outcome {
     pub from_effective_version: u32,
     pub deps_format_before: wire::DepsFormat,
     pub converted_deps: bool,
@@ -1144,18 +1143,18 @@ struct ResolvedMigrationInputs {
 ///
 /// This is migration-only and may parse legacy deps. Runtime strict load paths
 /// remain unchanged.
-pub fn migrate_store_ref_to_v1(
+pub fn migrate_store_ref_to_v2(
     repo: &Repository,
     repo_path: &Path,
     dry_run: bool,
     force: bool,
     no_push: bool,
     max_retries: usize,
-) -> Result<MigrateStoreToV1Outcome, SyncError> {
+) -> Result<MigrateStoreToV2Outcome, SyncError> {
     if dry_run {
-        return preview_migrate_store_ref_to_v1(repo, force);
+        return preview_migrate_store_ref_to_v2(repo, force);
     }
-    migrate_store_ref_to_v1_with_before_push(
+    migrate_store_ref_to_v2_with_before_push(
         repo,
         repo_path,
         dry_run,
@@ -1167,7 +1166,7 @@ pub fn migrate_store_ref_to_v1(
 }
 
 #[doc(hidden)]
-pub fn migrate_store_ref_to_v1_with_before_push_for_testing<F>(
+pub fn migrate_store_ref_to_v2_with_before_push_for_testing<F>(
     repo: &Repository,
     repo_path: &Path,
     dry_run: bool,
@@ -1175,11 +1174,11 @@ pub fn migrate_store_ref_to_v1_with_before_push_for_testing<F>(
     no_push: bool,
     max_retries: usize,
     before_push: F,
-) -> Result<MigrateStoreToV1Outcome, SyncError>
+) -> Result<MigrateStoreToV2Outcome, SyncError>
 where
     F: FnMut(usize, Oid) -> Result<(), SyncError>,
 {
-    migrate_store_ref_to_v1_with_before_push(
+    migrate_store_ref_to_v2_with_before_push(
         repo,
         repo_path,
         dry_run,
@@ -1190,7 +1189,7 @@ where
     )
 }
 
-fn migrate_store_ref_to_v1_with_before_push<F>(
+fn migrate_store_ref_to_v2_with_before_push<F>(
     repo: &Repository,
     _repo_path: &Path,
     dry_run: bool,
@@ -1198,7 +1197,7 @@ fn migrate_store_ref_to_v1_with_before_push<F>(
     no_push: bool,
     max_retries: usize,
     mut before_push: F,
-) -> Result<MigrateStoreToV1Outcome, SyncError>
+) -> Result<MigrateStoreToV2Outcome, SyncError>
 where
     F: FnMut(usize, Oid) -> Result<(), SyncError>,
 {
@@ -1420,10 +1419,10 @@ fn parse_test_before_push_winner_spec(spec: OsString) -> Result<(bool, String), 
     Ok((true, spec))
 }
 
-fn preview_migrate_store_ref_to_v1(
+fn preview_migrate_store_ref_to_v2(
     repo: &Repository,
     force: bool,
-) -> Result<MigrateStoreToV1Outcome, SyncError> {
+) -> Result<MigrateStoreToV2Outcome, SyncError> {
     let local_oid_opt = refname_to_id_optional(repo, "refs/heads/beads/store")?;
     let live_remote_preview = open_remote_store_preview(repo)?;
     let remote_oid_opt = live_remote_preview.as_ref().map(RemoteStorePreview::oid);
@@ -1574,8 +1573,8 @@ fn migration_outcome(
     summary: &MigrationSourceSummary,
     commit_oid: Option<Oid>,
     push: MigratePushDisposition,
-) -> MigrateStoreToV1Outcome {
-    MigrateStoreToV1Outcome {
+) -> MigrateStoreToV2Outcome {
+    MigrateStoreToV2Outcome {
         from_effective_version: summary.from_effective_version,
         deps_format_before: summary.deps_format_before,
         converted_deps: summary.converted_deps,
@@ -1629,7 +1628,7 @@ fn effective_format_version_before(
     let meta_is_v1 = local_loaded
         .into_iter()
         .chain(remote_loaded)
-        .all(|loaded| matches!(loaded.meta.meta(), wire::StoreMeta::V1 { .. }));
+        .all(|loaded| loaded.meta.meta().format_version() == Some(latest));
     if meta_is_v1
         && matches!(deps_format_before, wire::DepsFormat::OrSetV1)
         && notes_present_before
@@ -2616,8 +2615,8 @@ mod tests {
     use super::*;
     use crate::WireError;
     use crate::core::{
-        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot, Lww,
-        Priority, ReplicaId, Stamp, StateJsonlSha256, Tombstone, Workflow,
+        ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot,
+        IssueStatus, Lww, Priority, ReplicaId, Stamp, StateJsonlSha256, Tombstone,
     };
     use git2::Time;
     #[cfg(feature = "slow-tests")]
@@ -2645,7 +2644,8 @@ mod tests {
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
-            workflow: Lww::new(Workflow::Open, stamp.clone()),
+            status: Lww::new(IssueStatus::Todo, stamp.clone()),
+            closed_on_branch: Lww::new(None, stamp.clone()),
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         Bead::new(core, fields)
@@ -3112,13 +3112,15 @@ mod tests {
     }
 
     #[test]
-    fn read_state_at_oid_allows_missing_meta() {
+    fn read_state_at_oid_rejects_missing_meta() {
         let tmp = TempDir::new().unwrap();
         let repo = Repository::init(tmp.path()).unwrap();
         let oid = write_store_commit_without_meta(&repo, None, "no-meta");
 
-        let loaded = read_state_at_oid(&repo, oid).unwrap();
-        assert!(loaded.meta.is_legacy());
+        let err = read_state_at_oid(&repo, oid)
+            .err()
+            .expect("expected missing meta error");
+        assert!(matches!(err, SyncError::MissingFile(name) if name == "meta.json"));
     }
 
     #[test]
@@ -3153,7 +3155,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_store_ref_to_v1_rewrites_legacy_deps_to_strict_snapshot() {
+    fn migrate_store_ref_to_v2_rewrites_legacy_deps_to_strict_snapshot() {
         let tmp = TempDir::new().unwrap();
         let repo = Repository::init(tmp.path()).unwrap();
         write_store_commit_with_custom_deps(
@@ -3166,7 +3168,7 @@ mod tests {
             false,
         );
 
-        let outcome = migrate_store_ref_to_v1(&repo, tmp.path(), false, false, true, 0).unwrap();
+        let outcome = migrate_store_ref_to_v2(&repo, tmp.path(), false, false, true, 0).unwrap();
         assert!(outcome.converted_deps);
         assert!(outcome.added_notes_file);
         assert!(outcome.wrote_checksums);
@@ -3175,7 +3177,7 @@ mod tests {
         let loaded = read_state_at_oid(&repo, commit_oid).expect("strict load after migration");
         assert!(matches!(
             loaded.meta.meta(),
-            wire::StoreMeta::V1 {
+            wire::StoreMeta::V2 {
                 checksums: Some(_),
                 ..
             }
@@ -3195,7 +3197,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_store_ref_to_v1_aborts_on_legacy_parse_warnings_without_force() {
+    fn migrate_store_ref_to_v2_aborts_on_legacy_parse_warnings_without_force() {
         let tmp = TempDir::new().unwrap();
         let repo = Repository::init(tmp.path()).unwrap();
         let original_oid = write_store_commit_with_custom_deps(
@@ -3209,7 +3211,7 @@ mod tests {
             false,
         );
 
-        let err = migrate_store_ref_to_v1(&repo, tmp.path(), false, false, true, 0)
+        let err = migrate_store_ref_to_v2(&repo, tmp.path(), false, false, true, 0)
             .expect_err("migration should fail without --force when warnings are present");
         match err {
             SyncError::MigrationWarnings(warnings) => {
@@ -3232,7 +3234,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_store_ref_to_v1_dry_run_peeks_remote_without_mutating_tracking_ref() {
+    fn migrate_store_ref_to_v2_dry_run_peeks_remote_without_mutating_tracking_ref() {
         let tmp = TempDir::new().unwrap();
         let remote_dir = tmp.path().join("remote");
         let local_dir = tmp.path().join("local");
@@ -3271,7 +3273,7 @@ mod tests {
         assert_ne!(remote_v1, remote_v2);
 
         let outcome =
-            migrate_store_ref_to_v1(&local_repo, &local_dir, true, false, true, 0).unwrap();
+            migrate_store_ref_to_v2(&local_repo, &local_dir, true, false, true, 0).unwrap();
         assert!(outcome.commit_oid.is_none(), "dry-run must not commit");
         assert_eq!(outcome.deps_format_before, wire::DepsFormat::LegacyEdges);
         assert_eq!(outcome.from_effective_version, 0);
@@ -3286,7 +3288,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_store_ref_to_v1_noop_realigns_same_tree_local_and_creates_backup_ref() {
+    fn migrate_store_ref_to_v2_noop_realigns_same_tree_local_and_creates_backup_ref() {
         let tmp = TempDir::new().unwrap();
         let remote_dir = tmp.path().join("remote");
         let local_dir = tmp.path().join("local");
@@ -3315,7 +3317,7 @@ mod tests {
         let local_ahead_oid = write_store_commit(&local_repo, Some(remote_oid), "local-ahead");
 
         let outcome =
-            migrate_store_ref_to_v1(&local_repo, &local_dir, false, false, true, 0).unwrap();
+            migrate_store_ref_to_v2(&local_repo, &local_dir, false, false, true, 0).unwrap();
         assert!(
             outcome.commit_oid.is_none(),
             "canonical store should remain no-op"
@@ -3330,7 +3332,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_store_ref_to_v1_rewrite_creates_backup_ref_for_existing_local_store() {
+    fn migrate_store_ref_to_v2_rewrite_creates_backup_ref_for_existing_local_store() {
         let tmp = TempDir::new().unwrap();
         let repo = Repository::init(tmp.path()).unwrap();
 
@@ -3344,7 +3346,7 @@ mod tests {
             false,
         );
 
-        let outcome = migrate_store_ref_to_v1(&repo, tmp.path(), false, false, true, 0).unwrap();
+        let outcome = migrate_store_ref_to_v2(&repo, tmp.path(), false, false, true, 0).unwrap();
         assert!(
             outcome.commit_oid.is_some(),
             "legacy local store should be rewritten"
@@ -3363,12 +3365,12 @@ mod tests {
     }
 
     #[test]
-    fn migrate_store_ref_to_v1_force_keeps_canonical_store_noop() {
+    fn migrate_store_ref_to_v2_force_keeps_canonical_store_noop() {
         let tmp = TempDir::new().unwrap();
         let repo = Repository::init(tmp.path()).unwrap();
         let original_oid = write_store_commit(&repo, None, "canonical");
 
-        let outcome = migrate_store_ref_to_v1(&repo, tmp.path(), false, true, true, 0).unwrap();
+        let outcome = migrate_store_ref_to_v2(&repo, tmp.path(), false, true, true, 0).unwrap();
         assert!(
             outcome.commit_oid.is_none(),
             "force should not create a marker commit when bytes already match"
@@ -3378,12 +3380,12 @@ mod tests {
     }
 
     #[test]
-    fn migrate_store_ref_to_v1_no_origin_noop_reports_skipped_no_remote() {
+    fn migrate_store_ref_to_v2_no_origin_noop_reports_skipped_no_remote() {
         let tmp = TempDir::new().unwrap();
         let repo = Repository::init(tmp.path()).unwrap();
         let original_oid = write_store_commit(&repo, None, "canonical");
 
-        let outcome = migrate_store_ref_to_v1(&repo, tmp.path(), false, false, false, 0).unwrap();
+        let outcome = migrate_store_ref_to_v2(&repo, tmp.path(), false, false, false, 0).unwrap();
         assert!(
             outcome.commit_oid.is_none(),
             "canonical store should remain no-op"
@@ -3396,7 +3398,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_store_ref_to_v1_no_push_rewrites_stale_local_without_fetching_remote_winner() {
+    fn migrate_store_ref_to_v2_no_push_rewrites_stale_local_without_fetching_remote_winner() {
         let tmp = TempDir::new().unwrap();
         let remote_dir = tmp.path().join("remote");
         let local_dir = tmp.path().join("local");
@@ -3431,13 +3433,13 @@ mod tests {
             )
             .unwrap();
 
-        let winner_oid = migrate_store_ref_to_v1(&remote_repo, &remote_dir, false, false, true, 0)
+        let winner_oid = migrate_store_ref_to_v2(&remote_repo, &remote_dir, false, false, true, 0)
             .unwrap()
             .commit_oid
             .expect("winner migration commit");
 
         let outcome =
-            migrate_store_ref_to_v1(&local_repo, &local_dir, false, false, true, 0).unwrap();
+            migrate_store_ref_to_v2(&local_repo, &local_dir, false, false, true, 0).unwrap();
         let local_commit_oid = outcome
             .commit_oid
             .expect("no-push stale clone should still rewrite the local store");
@@ -3482,7 +3484,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_store_ref_to_v1_refuses_unrelated_divergence_without_force() {
+    fn migrate_store_ref_to_v2_refuses_unrelated_divergence_without_force() {
         let tmp = TempDir::new().unwrap();
         let remote_dir = tmp.path().join("remote");
         let local_dir = tmp.path().join("local");
@@ -3513,7 +3515,7 @@ mod tests {
         assert_ne!(local_legacy_oid, remote_oid);
 
         let err =
-            migrate_store_ref_to_v1(&local_repo, &local_dir, false, false, true, 0).unwrap_err();
+            migrate_store_ref_to_v2(&local_repo, &local_dir, false, false, true, 0).unwrap_err();
         assert!(matches!(err, SyncError::NoCommonAncestor));
         let head_after = local_repo.refname_to_id("refs/heads/beads/store").unwrap();
         assert_eq!(
@@ -3523,7 +3525,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_store_ref_to_v1_retry_still_refuses_unrelated_divergence_without_force() {
+    fn migrate_store_ref_to_v2_retry_still_refuses_unrelated_divergence_without_force() {
         let tmp = TempDir::new().unwrap();
         let remote_dir = tmp.path().join("remote");
         let local_dir = tmp.path().join("local");
@@ -3567,7 +3569,7 @@ mod tests {
         )
         .unwrap();
 
-        let err = migrate_store_ref_to_v1_with_before_push(
+        let err = migrate_store_ref_to_v2_with_before_push(
             &local_repo,
             &local_dir,
             false,
@@ -3597,7 +3599,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_store_ref_to_v1_force_divergence_rewrites_local_missing_invariants() {
+    fn migrate_store_ref_to_v2_force_divergence_rewrites_local_missing_invariants() {
         let tmp = TempDir::new().unwrap();
         let remote_dir = tmp.path().join("remote");
         let local_dir = tmp.path().join("local");
@@ -3629,7 +3631,7 @@ mod tests {
         assert_ne!(local_legacy_oid, remote_oid);
 
         let outcome =
-            migrate_store_ref_to_v1(&local_repo, &local_dir, false, true, true, 0).unwrap();
+            migrate_store_ref_to_v2(&local_repo, &local_dir, false, true, true, 0).unwrap();
         assert!(
             outcome.commit_oid.is_some(),
             "migration should rewrite even when remote side is already canonical"
@@ -3641,7 +3643,7 @@ mod tests {
         let loaded = read_state_at_oid(&local_repo, local_head).expect("strict load");
         assert!(matches!(
             loaded.meta.meta(),
-            wire::StoreMeta::V1 {
+            wire::StoreMeta::V2 {
                 checksums: Some(_),
                 ..
             }
@@ -3653,7 +3655,7 @@ mod tests {
     }
 
     #[test]
-    fn migrate_store_ref_to_v1_retries_true_push_race_and_realigns_local_ref() {
+    fn migrate_store_ref_to_v2_retries_true_push_race_and_realigns_local_ref() {
         let tmp = TempDir::new().unwrap();
         let remote_dir = tmp.path().join("remote");
         let local_dir = tmp.path().join("local");
@@ -3673,7 +3675,7 @@ mod tests {
             false,
             false,
         );
-        let winner_oid = migrate_store_ref_to_v1(&remote_repo, &remote_dir, false, false, true, 0)
+        let winner_oid = migrate_store_ref_to_v2(&remote_repo, &remote_dir, false, false, true, 0)
             .unwrap()
             .commit_oid
             .expect("winner migration commit");
@@ -3729,7 +3731,7 @@ mod tests {
             )
             .unwrap();
 
-        let outcome = migrate_store_ref_to_v1_with_before_push(
+        let outcome = migrate_store_ref_to_v2_with_before_push(
             &local_repo,
             &local_dir,
             false,

@@ -1065,7 +1065,7 @@ mod tests {
 
     fn make_bead(id: &BeadId, stamp: &Stamp) -> Bead {
         use crate::bead::{BeadCore, BeadFields};
-        use crate::composite::{Claim, Workflow};
+        use crate::composite::{Claim, IssueStatus};
         use crate::crdt::Lww;
         use crate::domain::{BeadType, Priority};
 
@@ -1080,7 +1080,8 @@ mod tests {
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
-            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            status: Lww::new(IssueStatus::Todo, stamp.clone()),
+            closed_on_branch: Lww::new(None, stamp.clone()),
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         Bead::new(core, fields)
@@ -1159,7 +1160,7 @@ mod tests {
     #[test]
     fn invariant_insert_removes_tombstone() {
         use crate::bead::{BeadCore, BeadFields};
-        use crate::composite::{Claim, Workflow};
+        use crate::composite::{Claim, IssueStatus};
         use crate::crdt::Lww;
         use crate::domain::{BeadType, Priority};
 
@@ -1185,7 +1186,8 @@ mod tests {
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
-            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            status: Lww::new(IssueStatus::Todo, stamp.clone()),
+            closed_on_branch: Lww::new(None, stamp.clone()),
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         let bead = Bead::new(core, fields);
@@ -1266,7 +1268,7 @@ mod tests {
     #[test]
     fn invariant_delete_removes_live() {
         use crate::bead::{BeadCore, BeadFields};
-        use crate::composite::{Claim, Workflow};
+        use crate::composite::{Claim, IssueStatus};
         use crate::crdt::Lww;
         use crate::domain::{BeadType, Priority};
 
@@ -1286,7 +1288,8 @@ mod tests {
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
-            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            status: Lww::new(IssueStatus::Todo, stamp.clone()),
+            closed_on_branch: Lww::new(None, stamp.clone()),
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         let bead = Bead::new(core, fields);
@@ -1305,7 +1308,7 @@ mod tests {
     #[test]
     fn resurrection_newer_bead_wins() {
         use crate::bead::{BeadCore, BeadFields};
-        use crate::composite::{Claim, Workflow};
+        use crate::composite::{Claim, IssueStatus};
         use crate::crdt::Lww;
         use crate::domain::{BeadType, Priority};
 
@@ -1330,7 +1333,8 @@ mod tests {
             external_ref: Lww::new(None, new_stamp.clone()),
             source_repo: Lww::new(None, new_stamp.clone()),
             estimated_minutes: Lww::new(None, new_stamp.clone()),
-            workflow: Lww::new(Workflow::default(), new_stamp.clone()),
+            status: Lww::new(IssueStatus::Todo, new_stamp.clone()),
+            closed_on_branch: Lww::new(None, new_stamp.clone()),
             claim: Lww::new(Claim::default(), new_stamp.clone()),
         };
         state_b.insert(Bead::new(core, fields)).unwrap();
@@ -1347,7 +1351,7 @@ mod tests {
     #[test]
     fn deletion_wins_when_newer() {
         use crate::bead::{BeadCore, BeadFields};
-        use crate::composite::{Claim, Workflow};
+        use crate::composite::{Claim, IssueStatus};
         use crate::crdt::Lww;
         use crate::domain::{BeadType, Priority};
 
@@ -1368,7 +1372,8 @@ mod tests {
             external_ref: Lww::new(None, old_stamp.clone()),
             source_repo: Lww::new(None, old_stamp.clone()),
             estimated_minutes: Lww::new(None, old_stamp.clone()),
-            workflow: Lww::new(Workflow::default(), old_stamp.clone()),
+            status: Lww::new(IssueStatus::Todo, old_stamp.clone()),
+            closed_on_branch: Lww::new(None, old_stamp.clone()),
             claim: Lww::new(Claim::default(), old_stamp.clone()),
         };
         state_a.insert(Bead::new(core, fields)).unwrap();
@@ -1389,7 +1394,7 @@ mod tests {
     #[test]
     fn require_live_returns_bead_when_exists() {
         use crate::bead::{BeadCore, BeadFields};
-        use crate::composite::{Claim, Workflow};
+        use crate::composite::{Claim, IssueStatus};
         use crate::crdt::Lww;
         use crate::domain::{BeadType, Priority};
 
@@ -1408,7 +1413,8 @@ mod tests {
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
-            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            status: Lww::new(IssueStatus::Todo, stamp.clone()),
+            closed_on_branch: Lww::new(None, stamp.clone()),
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         state.insert(Bead::new(core, fields)).unwrap();
@@ -1675,7 +1681,7 @@ mod tests {
     #[test]
     fn require_live_mut_returns_mutable_bead() {
         use crate::bead::{BeadCore, BeadFields};
-        use crate::composite::{Claim, Workflow};
+        use crate::composite::{Claim, IssueStatus};
         use crate::crdt::Lww;
         use crate::domain::{BeadType, Priority};
 
@@ -1694,7 +1700,8 @@ mod tests {
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
-            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            status: Lww::new(IssueStatus::Todo, stamp.clone()),
+            closed_on_branch: Lww::new(None, stamp.clone()),
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         state.insert(Bead::new(core, fields)).unwrap();

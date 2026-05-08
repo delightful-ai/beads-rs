@@ -74,8 +74,10 @@ assert_cmd = "2"
 pathdiff = "0.2.3"
 predicates = "3"
 proptest = "1"
+beads-http = { path = "../beads-http" }
 beads-daemon = { path = "../beads-daemon", features = ["test-harness"] }
 beads-daemon-core = { path = "../beads-daemon-core", features = ["test-harness", "wal-sqlite", "wal-fs"] }
+tokio = { version = "1", features = ["rt", "net"] }
 
 [lints]
 workspace = true

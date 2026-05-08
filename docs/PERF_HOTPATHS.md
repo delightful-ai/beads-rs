@@ -75,7 +75,7 @@ just bench-guard tmp/perf/hotpaths-<baseline> tmp/perf/hotpaths-<candidate>
 ```
 
 This enforces threshold checks and exits non-zero on regression:
-- Critical read paths (`ready`, `list --status open`, `show`, `show --json`, `status`): max +25% mean latency
+- Critical read paths (`ready`, `list --status todo`, `show`, `show --json`, `status`): max +25% mean latency
 - Write workflows (create/claim-close/comment/label/dep/scenario): max +35% mean latency
 - Critical read paths: max +50% `p95` latency
 - Write workflows: max +65% `p95` latency

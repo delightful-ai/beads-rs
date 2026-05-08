@@ -1,7 +1,8 @@
 use super::{CommandError, CommandResult};
 use crate::runtime::{CliRuntimeCtx, send};
+use crate::validation::validation_error;
 use beads_api::{Issue, QueryResult};
-use beads_core::{BeadId, NamespaceId};
+use beads_core::{BeadId, IssueStatus, NamespaceId};
 use beads_surface::ipc::{IdPayload, IpcError, Request, ResponsePayload};
 use std::sync::LazyLock;
 
@@ -63,4 +64,29 @@ pub(crate) fn fetch_issue(ctx: &CliRuntimeCtx, id: &BeadId) -> CommandResult<Iss
             "unexpected response for show: {other:?}"
         )))),
     }
+}
+
+pub(crate) fn normalize_close_reason(reason: Option<String>) -> CommandResult<Option<String>> {
+    let Some(raw) = reason else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty()
+        || trimmed == "-"
+        || trimmed.eq_ignore_ascii_case("none")
+        || trimmed.eq_ignore_ascii_case("null")
+    {
+        return Ok(None);
+    }
+
+    let status = IssueStatus::from_close_reason(Some(trimmed)).ok_or_else(|| {
+        validation_error(
+            "reason",
+            format!(
+                "valid close reasons: {}",
+                IssueStatus::VALID_CLOSE_REASON_HELP
+            ),
+        )
+    })?;
+    Ok(status.closed_reason().map(str::to_string))
 }

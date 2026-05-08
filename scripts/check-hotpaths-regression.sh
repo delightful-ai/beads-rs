@@ -47,7 +47,7 @@ jq -r '
   | awk -F'\t' '
       function key(cmd) {
         if (cmd ~ / ready$/) return "ready";
-        if (cmd ~ / list --status open$/) return "list_open";
+        if (cmd ~ / list --status todo$/) return "list_todo";
         if (cmd ~ / epic status$/) return "";
         if (cmd ~ / show .* --json$/) return "show_json";
         if (cmd ~ / show .*$/) return "show";
@@ -75,7 +75,7 @@ jq -r '
   | awk -F'\t' '
       function key(cmd) {
         if (cmd ~ / ready$/) return "ready";
-        if (cmd ~ / list --status open$/) return "list_open";
+        if (cmd ~ / list --status todo$/) return "list_todo";
         if (cmd ~ / epic status$/) return "";
         if (cmd ~ / show .* --json$/) return "show_json";
         if (cmd ~ / show .*$/) return "show";

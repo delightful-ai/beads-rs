@@ -50,7 +50,7 @@ pub mod wire_bead;
 pub use apply::{ApplyError, ApplyOutcome, NoteKey, apply_event};
 pub use bead::{Bead, BeadCore, BeadFields, BeadProjection, BeadView};
 pub use collections::{Label, Labels};
-pub use composite::{Claim, Closure, Note, Workflow};
+pub use composite::{Claim, IssueStatus, Note};
 pub use crdt::Lww;
 pub use dep::{
     AcyclicDepKey, DepAddKey, DepKey, DepSpec, DepSpecSet, FreeDepKey, NoCycleProof, ParentEdge,
@@ -117,5 +117,5 @@ pub use wire_bead::{
     WireBeadPatch, WireClaimSnapshot, WireDepAddV1, WireDepEntryV1, WireDepRemoveV1,
     WireDepStoreV1, WireDotV1, WireDvvV1, WireFieldStamp, WireLabelAddV1, WireLabelRemoveV1,
     WireLabelStateV1, WireLineageStamp, WireNoteV1, WireParentAddV1, WireParentRemoveV1, WirePatch,
-    WireStamp, WireTombstoneV1, WireWorkflowSnapshot, WorkflowStatus,
+    WireStamp, WireTombstoneV1,
 };

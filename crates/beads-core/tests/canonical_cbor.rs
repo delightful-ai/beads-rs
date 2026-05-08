@@ -4,14 +4,14 @@ mod support;
 
 use beads_core::{DecodeError, Limits, decode_event_body, encode_event_body_canonical};
 use support::cbor::{
-    GOLDEN_EVENT_BODY_CBOR, GOLDEN_EVENT_BODY_SHA256_HEX, golden_event_body, sha256_hex,
+    GOLDEN_EVENT_BODY_SHA256_HEX, golden_event_body, golden_event_body_cbor, sha256_hex,
 };
 
 #[test]
 fn canonical_cbor_bytes_match_fixture() {
     let body = golden_event_body();
     let bytes = encode_event_body_canonical(&body).expect("encode canonical");
-    assert_eq!(bytes.as_bytes(), GOLDEN_EVENT_BODY_CBOR);
+    assert_eq!(bytes.as_bytes(), golden_event_body_cbor());
 }
 
 #[test]

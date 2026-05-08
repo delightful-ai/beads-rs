@@ -107,7 +107,7 @@ pub fn handle(ctx: &CliRuntimeCtx, cmd: EpicCmd) -> CommandResult<()> {
                     ctx: ctx.mutation_ctx(),
                     payload: ClosePayload {
                         id: epic_id.clone(),
-                        reason: Some("All children completed".into()),
+                        reason: None,
                         on_branch: None,
                     },
                 };

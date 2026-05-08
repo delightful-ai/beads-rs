@@ -1,6 +1,6 @@
 use clap::Args;
 
-use super::common::fetch_issue;
+use super::common::{fetch_issue, normalize_close_reason};
 use super::input::{FileTextArg, InlineTextArg, resolve_text_input, text_input_uses_stdin};
 use super::{CommandError, CommandResult, print_ok};
 use crate::parsers::{parse_bead_type, parse_priority};
@@ -10,12 +10,12 @@ use crate::validation::{
     normalize_bead_id, normalize_bead_id_for, normalize_dep_specs, validation_error,
 };
 use beads_api::QueryResult;
-use beads_core::{BeadType, DepKind, Priority, WorkflowStatus};
+use beads_core::{BeadType, DepKind, IssueStatus, Priority};
 use beads_surface::ipc::{
     AddNotePayload, ClaimPayload, ClosePayload, DepPayload, IdPayload, LabelsPayload,
     ParentPayload, Request, ResponsePayload, UpdatePayload,
 };
-use beads_surface::ops::{BeadPatch, BeadPatchValidationError, OpenInProgress, Patch};
+use beads_surface::ops::{BeadPatch, BeadPatchValidationError, Patch};
 
 #[derive(Args, Debug)]
 pub struct UpdateArgs {
@@ -83,7 +83,7 @@ pub struct UpdateArgs {
     #[arg(short = 's', long, value_parser = parse_status_arg)]
     pub status: Option<String>,
 
-    /// Close reason (only valid with --status=closed).
+    /// Close reason / terminal state (done, cancelled, duplicate).
     #[arg(long, allow_hyphen_values = true)]
     pub reason: Option<String>,
 
@@ -117,17 +117,17 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
     let id = normalize_bead_id(&args.id)?;
     let id_str = id.as_str().to_string();
     let mut patch = BeadPatch::default();
-    let close_reason = normalize_reason(args.reason);
+    let close_reason = normalize_close_reason(args.reason)?;
     let status = match args.status.as_deref() {
         Some(raw) => Some(parse_status(raw)?),
         None => None,
     };
-    let status_closed = matches!(status, Some(WorkflowStatus::Closed));
+    let status_closed = status.is_some_and(IssueStatus::is_terminal);
     let add_labels = std::mem::take(&mut args.add_label);
     let remove_labels = std::mem::take(&mut args.remove_label);
 
     if close_reason.is_some() && !status_closed {
-        return Err(validation_error("reason", "--reason requires --status=closed").into());
+        return Err(validation_error("reason", "--reason requires a terminal --status").into());
     }
 
     let parent_action = if args.no_parent {
@@ -233,18 +233,10 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
     if let Some(bead_type) = args.bead_type {
         patch.bead_type = Patch::Set(bead_type);
     }
-    if let Some(status) = status {
-        match status {
-            WorkflowStatus::Closed => {
-                // Close via explicit close op to preserve reason/branch semantics.
-            }
-            WorkflowStatus::Open => {
-                patch.status = Patch::Set(OpenInProgress::Open);
-            }
-            WorkflowStatus::InProgress => {
-                patch.status = Patch::Set(OpenInProgress::InProgress);
-            }
-        }
+    if let Some(status) = status
+        && !status.is_terminal()
+    {
+        patch.status = Patch::Set(status);
     }
 
     if !patch.is_empty() {
@@ -359,6 +351,21 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
     }
 
     if status_closed {
+        let close_reason = close_reason
+            .or_else(|| status.and_then(|status| status.closed_reason().map(str::to_string)));
+        if let (Some(status), Some(reason)) = (status, close_reason.as_deref())
+            && status.is_terminal()
+            && status.closed_reason() != Some(reason)
+        {
+            return Err(validation_error(
+                "reason",
+                format!(
+                    "--reason {reason:?} conflicts with terminal --status {}",
+                    status.as_str()
+                ),
+            )
+            .into());
+        }
         let req = Request::Close {
             ctx: ctx.mutation_ctx(),
             payload: ClosePayload {
@@ -383,22 +390,6 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
 pub fn render_updated(id: &str) -> String {
     format!("✓ Updated issue: {id}")
 }
-
-fn normalize_reason(reason: Option<String>) -> Option<String> {
-    reason.and_then(|raw| {
-        let trimmed = raw.trim();
-        if trimmed.is_empty()
-            || trimmed == "-"
-            || trimmed.eq_ignore_ascii_case("none")
-            || trimmed.eq_ignore_ascii_case("null")
-        {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
-
 fn map_patch_validation_error(err: BeadPatchValidationError) -> CommandError {
     match err {
         BeadPatchValidationError::RequiredFieldCleared { field } => {
@@ -410,14 +401,16 @@ fn map_patch_validation_error(err: BeadPatchValidationError) -> CommandError {
     }
 }
 
-fn parse_status(raw: &str) -> CommandResult<WorkflowStatus> {
-    WorkflowStatus::parse(raw)
+fn parse_status(raw: &str) -> CommandResult<IssueStatus> {
+    IssueStatus::parse(raw)
         .ok_or_else(|| validation_error("status", format!("unknown status {raw:?}")))
         .map_err(Into::into)
 }
 
 fn parse_status_arg(raw: &str) -> std::result::Result<String, String> {
-    Ok(crate::parsers::parse_status(raw))
+    crate::parsers::parse_status(raw)
+        .map(|status| status.as_str().to_string())
+        .map_err(|err| err.to_string())
 }
 
 #[cfg(test)]
@@ -477,5 +470,42 @@ mod tests {
             err.to_string()
                 .contains("description and design cannot both read from stdin")
         );
+    }
+
+    #[test]
+    fn update_rejects_invalid_close_reason() {
+        let err = handle(
+            &sample_ctx(),
+            UpdateArgs {
+                id: "beads-rs-k8u3".to_string(),
+                parent: None,
+                no_parent: false,
+                title: None,
+                description: None,
+                body: None,
+                message: None,
+                body_file: None,
+                description_file: None,
+                stdin: false,
+                design: None,
+                design_file: None,
+                acceptance: None,
+                external_ref: None,
+                estimate: None,
+                status: Some("done".to_string()),
+                reason: Some("fixed it".to_string()),
+                priority: None,
+                bead_type: None,
+                assignee: None,
+                add_label: Vec::new(),
+                remove_label: Vec::new(),
+                notes: None,
+                deps: Vec::new(),
+            },
+        )
+        .expect_err("invalid close reason must fail");
+
+        assert!(matches!(err, CommandError::Validation(_)));
+        assert!(err.to_string().contains("valid close reasons"));
     }
 }

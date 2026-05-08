@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 use super::bead::{BeadCore, BeadFields};
 use super::collections::Label;
-use super::composite::{Claim, Closure, Note, Workflow};
+use super::composite::{Claim, IssueStatus, Note};
 use super::crdt::Lww;
 use super::dep::{DepKey, ParentEdge};
 use super::domain::{BeadType, DepKind, Priority};
@@ -240,93 +240,6 @@ impl From<&WireDvvV1> for Dvv {
     }
 }
 
-/// Wire workflow status (matches legacy wire values).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum WorkflowStatus {
-    Open,
-    InProgress,
-    Closed,
-}
-
-crate::enum_str! {
-    impl WorkflowStatus {
-        pub fn as_str(&self) -> &'static str;
-        fn parse_str(raw: &str) -> Option<Self>;
-        variants {
-            Open => ["open"],
-            InProgress => ["in_progress"],
-            Closed => ["closed"],
-        }
-    }
-}
-
-impl WorkflowStatus {
-    pub fn from_workflow(workflow: &Workflow) -> Self {
-        match workflow {
-            Workflow::Open => WorkflowStatus::Open,
-            Workflow::InProgress => WorkflowStatus::InProgress,
-            Workflow::Closed(_) => WorkflowStatus::Closed,
-        }
-    }
-
-    pub fn parse(raw: &str) -> Option<Self> {
-        Self::parse_str(raw)
-    }
-
-    pub fn into_workflow(
-        self,
-        closed_reason: Option<String>,
-        closed_on_branch: Option<BranchName>,
-    ) -> Workflow {
-        match self {
-            WorkflowStatus::Open => Workflow::Open,
-            WorkflowStatus::InProgress => Workflow::InProgress,
-            WorkflowStatus::Closed => {
-                Workflow::Closed(Closure::new(closed_reason, closed_on_branch))
-            }
-        }
-    }
-}
-
-/// Workflow snapshot for checkpoints (canonical, no redundant timestamps).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-pub enum WireWorkflowSnapshot {
-    Open,
-    InProgress,
-    Closed {
-        #[serde(skip_serializing_if = "Option::is_none")]
-        closed_reason: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        closed_on_branch: Option<BranchName>,
-    },
-}
-
-impl WireWorkflowSnapshot {
-    pub fn from_workflow(workflow: &Workflow) -> Self {
-        match workflow {
-            Workflow::Open => WireWorkflowSnapshot::Open,
-            Workflow::InProgress => WireWorkflowSnapshot::InProgress,
-            Workflow::Closed(closure) => WireWorkflowSnapshot::Closed {
-                closed_reason: closure.reason.clone(),
-                closed_on_branch: closure.on_branch.clone(),
-            },
-        }
-    }
-
-    pub fn into_workflow(self) -> Workflow {
-        match self {
-            WireWorkflowSnapshot::Open => Workflow::Open,
-            WireWorkflowSnapshot::InProgress => Workflow::InProgress,
-            WireWorkflowSnapshot::Closed {
-                closed_reason,
-                closed_on_branch,
-            } => Workflow::Closed(Closure::new(closed_reason, closed_on_branch)),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireClaimEmpty {}
 
@@ -459,9 +372,10 @@ pub struct WireBeadFull {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub estimated_minutes: Option<u32>,
 
-    // Workflow state
-    #[serde(flatten)]
-    pub workflow: WireWorkflowSnapshot,
+    // Canonical issue status
+    pub status: IssueStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_on_branch: Option<BranchName>,
 
     // Claim
     #[serde(flatten)]
@@ -1039,10 +953,10 @@ impl WireBeadFull {
         check_field!(bead.fields.external_ref, "external_ref");
         check_field!(bead.fields.source_repo, "source_repo");
         check_field!(bead.fields.estimated_minutes, "estimated_minutes");
-        check_field!(bead.fields.workflow, "workflow");
+        check_field!(bead.fields.status, "status");
+        check_field!(bead.fields.closed_on_branch, "closed_on_branch");
         check_field!(bead.fields.claim, "claim");
 
-        let workflow = WireWorkflowSnapshot::from_workflow(&bead.fields.workflow.value);
         let claim = WireClaimSnapshot::from_claim(&bead.fields.claim.value);
 
         let mut notes = projection.notes.clone();
@@ -1066,7 +980,8 @@ impl WireBeadFull {
             external_ref: bead.fields.external_ref.value.clone(),
             source_repo: bead.fields.source_repo.value.clone(),
             estimated_minutes: bead.fields.estimated_minutes.value,
-            workflow,
+            status: bead.fields.status.value,
+            closed_on_branch: bead.fields.closed_on_branch.value.clone(),
             claim,
             notes,
             at: WireStamp::from(&bead_stamp.at),
@@ -1111,7 +1026,6 @@ impl From<WireBeadFull> for Bead {
             wire.created_on_branch,
         );
 
-        let workflow_value = wire.workflow.into_workflow();
         let claim_value = wire.claim.into_claim();
 
         let fields = BeadFields {
@@ -1127,7 +1041,8 @@ impl From<WireBeadFull> for Bead {
             external_ref: Lww::new(wire.external_ref, field_stamp("external_ref")),
             source_repo: Lww::new(wire.source_repo, field_stamp("source_repo")),
             estimated_minutes: Lww::new(wire.estimated_minutes, field_stamp("estimated_minutes")),
-            workflow: Lww::new(workflow_value, field_stamp("workflow")),
+            status: Lww::new(wire.status, field_stamp("status")),
+            closed_on_branch: Lww::new(wire.closed_on_branch, field_stamp("closed_on_branch")),
             claim: Lww::new(claim_value, field_stamp("claim")),
         };
         Bead::new(core, fields)
@@ -1165,9 +1080,7 @@ pub struct WireBeadPatch {
     pub estimated_minutes: WirePatch<u32>,
 
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<WorkflowStatus>,
-    #[serde(default, skip_serializing_if = "WirePatch::is_keep")]
-    pub closed_reason: WirePatch<String>,
+    pub status: Option<IssueStatus>,
     #[serde(default, skip_serializing_if = "WirePatch::is_keep")]
     pub closed_on_branch: WirePatch<BranchName>,
 
@@ -1197,7 +1110,6 @@ impl WireBeadPatch {
             source_repo: WirePatch::Keep,
             estimated_minutes: WirePatch::Keep,
             status: None,
-            closed_reason: WirePatch::Keep,
             closed_on_branch: WirePatch::Keep,
             assignee: WirePatch::Keep,
             assignee_expires: WirePatch::Keep,
@@ -1763,7 +1675,8 @@ mod tests {
             external_ref: Lww::new(None, stamp.clone()),
             source_repo: Lww::new(None, stamp.clone()),
             estimated_minutes: Lww::new(None, stamp.clone()),
-            workflow: Lww::new(Workflow::default(), stamp.clone()),
+            status: Lww::new(IssueStatus::Todo, stamp.clone()),
+            closed_on_branch: Lww::new(None, stamp.clone()),
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         Bead::new(core, fields)
@@ -1903,7 +1816,8 @@ mod tests {
             external_ref: Lww::new(None, base.clone()),
             source_repo: Lww::new(None, base.clone()),
             estimated_minutes: Lww::new(None, base.clone()),
-            workflow: Lww::new(Workflow::Open, base.clone()),
+            status: Lww::new(IssueStatus::Todo, base.clone()),
+            closed_on_branch: Lww::new(None, base.clone()),
             claim: Lww::new(Claim::Unclaimed, base.clone()),
         };
         let bead = Bead::new(core, fields);
@@ -1936,7 +1850,7 @@ mod tests {
     #[test]
     fn wire_bead_full_normalizes_legacy_timestamps() {
         let base = Stamp::new(WriteStamp::new(10, 0), actor_id("alice"));
-        let workflow_stamp = Stamp::new(WriteStamp::new(15, 0), actor_id("bob"));
+        let status_stamp = Stamp::new(WriteStamp::new(15, 0), actor_id("bob"));
         let claim_stamp = Stamp::new(WriteStamp::new(18, 0), actor_id("carol"));
 
         let core = BeadCore::new(bead_id("bd-legacy1"), base.clone(), None);
@@ -1950,12 +1864,10 @@ mod tests {
             external_ref: Lww::new(None, base.clone()),
             source_repo: Lww::new(None, base.clone()),
             estimated_minutes: Lww::new(None, base.clone()),
-            workflow: Lww::new(
-                Workflow::Closed(Closure::new(
-                    Some("done".to_string()),
-                    Some(BranchName::parse("main").expect("valid branch name")),
-                )),
-                workflow_stamp,
+            status: Lww::new(IssueStatus::Done, status_stamp),
+            closed_on_branch: Lww::new(
+                Some(BranchName::parse("main").expect("valid branch name")),
+                base.clone(),
             ),
             claim: Lww::new(Claim::claimed(actor_id("dave"), None), claim_stamp),
         };
@@ -1994,7 +1906,8 @@ mod tests {
             external_ref: Lww::new(None, base.clone()),
             source_repo: Lww::new(None, base.clone()),
             estimated_minutes: Lww::new(None, base.clone()),
-            workflow: Lww::new(Workflow::Open, base.clone()),
+            status: Lww::new(IssueStatus::Todo, base.clone()),
+            closed_on_branch: Lww::new(None, base.clone()),
             claim: Lww::new(Claim::Unclaimed, base.clone()),
         };
         let bead = Bead::new(core, fields);

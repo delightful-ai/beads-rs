@@ -291,6 +291,22 @@ pub enum Request {
         payload: AddNotePayload,
     },
 
+    /// Transition a bead through the tracker-facing board state model.
+    TrackerTransition {
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: TrackerTransitionPayload,
+    },
+
+    /// Add a tracker-facing comment/workpad note.
+    TrackerComment {
+        #[serde(flatten)]
+        ctx: MutationCtx,
+        #[serde(flatten)]
+        payload: TrackerCommentPayload,
+    },
+
     /// Claim a bead.
     Claim {
         #[serde(flatten)]
@@ -346,6 +362,14 @@ pub enum Request {
         ctx: ReadCtx,
         #[serde(flatten)]
         payload: ListPayload,
+    },
+
+    /// List tracker-facing issues for board/Symphony consumers.
+    TrackerList {
+        #[serde(flatten)]
+        ctx: ReadCtx,
+        #[serde(flatten)]
+        payload: TrackerListPayload,
     },
 
     /// Get ready beads.
@@ -520,6 +544,8 @@ impl Request {
             Request::AddDep { ctx, .. } => info_from_mutation("add_dep", ctx),
             Request::RemoveDep { ctx, .. } => info_from_mutation("remove_dep", ctx),
             Request::AddNote { ctx, .. } => info_from_mutation("add_note", ctx),
+            Request::TrackerTransition { ctx, .. } => info_from_mutation("tracker_transition", ctx),
+            Request::TrackerComment { ctx, .. } => info_from_mutation("tracker_comment", ctx),
             Request::Claim { ctx, .. } => info_from_mutation("claim", ctx),
             Request::Unclaim { ctx, .. } => info_from_mutation("unclaim", ctx),
             Request::ExtendClaim { ctx, .. } => info_from_mutation("extend_claim", ctx),
@@ -527,6 +553,7 @@ impl Request {
             Request::ShowMultiple { ctx, .. } => info_from_read("show_multiple", ctx),
             Request::ShowDetails { ctx, .. } => info_from_read("show_details", ctx),
             Request::List { ctx, .. } => info_from_read("list", ctx),
+            Request::TrackerList { ctx, .. } => info_from_read("tracker_list", ctx),
             Request::Ready { ctx, .. } => info_from_read("ready", ctx),
             Request::DepTree { ctx, .. } => info_from_read("dep_tree", ctx),
             Request::DepCycles { ctx, .. } => info_from_read("dep_cycles", ctx),

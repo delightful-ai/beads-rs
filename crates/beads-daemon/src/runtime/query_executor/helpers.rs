@@ -11,9 +11,9 @@ pub(super) fn compute_blocked_by(
             continue;
         }
 
-        // Only count blockers that are currently open (not closed).
+        // Only count blockers that are currently open (not terminal).
         if let Some(to_bead) = state.get_live(key.to()) {
-            if to_bead.fields.workflow.value.is_closed() {
+            if to_bead.fields.status.value.is_terminal() {
                 continue;
             }
         } else {
@@ -63,7 +63,7 @@ pub(super) fn compute_epic_statuses(
         if bead.fields.bead_type.value != crate::core::BeadType::Epic {
             continue;
         }
-        if bead.fields.workflow.value.is_closed() {
+        if bead.fields.status.value.is_terminal() {
             continue;
         }
 
@@ -78,7 +78,7 @@ pub(super) fn compute_epic_statuses(
             .filter(|cid| {
                 state
                     .get_live(cid)
-                    .map(|b| b.fields.workflow.value.is_closed())
+                    .map(|b| b.fields.status.value.is_terminal())
                     .unwrap_or(false)
             })
             .count();

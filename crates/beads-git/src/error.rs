@@ -81,12 +81,12 @@ impl SyncError {
             SyncError::Wire(WireError::InvalidValue(msg))
                 if is_legacy_deps_missing_cc_message(msg) =>
             {
-                Some("Run `bd migrate to 1`")
+                Some("Run `bd migrate to 2`")
             }
             SyncError::Wire(WireError::Json(err))
                 if is_legacy_deps_missing_cc_message(&err.to_string()) =>
             {
-                Some("Run `bd migrate to 1`")
+                Some("Run `bd migrate to 2`")
             }
             _ => None,
         }
@@ -238,7 +238,7 @@ mod tests {
 
         assert_eq!(
             legacy.legacy_deps_runtime_hint(),
-            Some("Run `bd migrate to 1`")
+            Some("Run `bd migrate to 2`")
         );
         assert_eq!(unrelated.legacy_deps_runtime_hint(), None);
         assert_eq!(other_file.legacy_deps_runtime_hint(), None);
@@ -253,7 +253,7 @@ mod tests {
 
         assert_eq!(payload.code, CliErrorCode::ValidationFailed.into());
         assert!(
-            payload.message.contains("Run `bd migrate to 1`"),
+            payload.message.contains("Run `bd migrate to 2`"),
             "{}",
             payload.message
         );
