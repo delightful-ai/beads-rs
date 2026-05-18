@@ -4189,18 +4189,25 @@ mod tests {
     }
 
     #[test]
-    fn detect_clock_skew_flags_large_delta() {
+    fn detect_clock_skew_flags_future_reference() {
         let now = 1_700_000_000_000u64;
-        let reference = now - (CLOCK_SKEW_WARN_MS + 1);
+        let reference = now + CLOCK_SKEW_WARN_MS;
         let skew = detect_clock_skew(now, reference).unwrap();
-        assert!(skew.delta_ms > 0);
+        assert!(skew.delta_ms < 0);
         assert_eq!(skew.wall_ms, now);
     }
 
     #[test]
-    fn detect_clock_skew_ignores_small_delta() {
+    fn detect_clock_skew_ignores_old_reference() {
         let now = 1_700_000_000_000u64;
-        let reference = now - (CLOCK_SKEW_WARN_MS - 1);
+        let reference = now - (CLOCK_SKEW_WARN_MS + 1);
+        assert!(detect_clock_skew(now, reference).is_none());
+    }
+
+    #[test]
+    fn detect_clock_skew_ignores_small_future_reference() {
+        let now = 1_700_000_000_000u64;
+        let reference = now + (CLOCK_SKEW_WARN_MS - 1);
         assert!(detect_clock_skew(now, reference).is_none());
     }
 }

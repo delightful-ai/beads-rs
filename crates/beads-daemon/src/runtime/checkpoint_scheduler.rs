@@ -9,6 +9,7 @@ use crate::core::{NamespaceId, ReplicaId, StoreId};
 const DEFAULT_DEBOUNCE_MS: u64 = 200;
 const DEFAULT_MAX_INTERVAL_MS: u64 = 1000;
 const DEFAULT_MAX_EVENTS: u64 = 2000;
+const DEFAULT_FAILURE_BACKOFF_MS: u64 = 30_000;
 
 #[derive(Clone, Debug)]
 pub struct CheckpointGroupConfig {
@@ -380,6 +381,7 @@ struct GroupState {
     pending_events: u64,
     in_flight: bool,
     last_checkpoint_wall_ms: Option<u64>,
+    failure_backoff_until: Option<Instant>,
 }
 
 impl GroupState {
@@ -392,6 +394,7 @@ impl GroupState {
             pending_events: 0,
             in_flight: false,
             last_checkpoint_wall_ms: None,
+            failure_backoff_until: None,
         }
     }
 
@@ -415,6 +418,7 @@ impl GroupState {
     fn complete_in_flight(&mut self, wall_ms: u64) {
         self.in_flight = false;
         self.last_checkpoint_wall_ms = Some(wall_ms);
+        self.failure_backoff_until = None;
     }
 
     fn fail_in_flight(&mut self, now: Instant) {
@@ -424,6 +428,7 @@ impl GroupState {
             self.dirty_since = Some(now);
         }
         self.last_event_at = Some(now);
+        self.failure_backoff_until = Some(now + Duration::from_millis(DEFAULT_FAILURE_BACKOFF_MS));
     }
 
     fn deadline(&self, now: Instant) -> Option<Instant> {
@@ -438,6 +443,9 @@ impl GroupState {
         let mut deadline = debounce_deadline.min(max_deadline);
         if self.pending_events >= self.config.max_events {
             deadline = now;
+        }
+        if let Some(backoff_until) = self.failure_backoff_until {
+            deadline = deadline.max(backoff_until);
         }
         Some(deadline)
     }
@@ -548,6 +556,34 @@ mod tests {
         assert_eq!(
             scheduler.next_deadline(),
             Some(base + Duration::from_millis(22))
+        );
+    }
+
+    #[test]
+    fn failed_checkpoint_uses_retry_backoff() {
+        let store_id = StoreId::new(Uuid::from_bytes([16u8; 16]));
+        let replica_id = ReplicaId::new(Uuid::from_bytes([17u8; 16]));
+        let mut scheduler = CheckpointScheduler::new();
+        let key = scheduler.register_group(config_with_limits(store_id, replica_id));
+
+        let base = Instant::now();
+        scheduler.mark_dirty_for_namespace_at(store_id, &NamespaceId::core(), 3, base);
+        assert_eq!(scheduler.drain_due(base), vec![key.clone()]);
+
+        scheduler.complete_failure(&key, base);
+        assert_eq!(
+            scheduler.next_deadline(),
+            Some(base + Duration::from_millis(DEFAULT_FAILURE_BACKOFF_MS))
+        );
+        assert!(
+            scheduler
+                .drain_due(base + Duration::from_millis(DEFAULT_FAILURE_BACKOFF_MS - 1))
+                .is_empty(),
+            "failed checkpoint must not immediately refire"
+        );
+        assert_eq!(
+            scheduler.drain_due(base + Duration::from_millis(DEFAULT_FAILURE_BACKOFF_MS)),
+            vec![key]
         );
     }
 

@@ -12,7 +12,7 @@ pub(super) const CLOCK_SKEW_WARN_MS: u64 = 5 * 60 * 1000;
 
 pub(crate) fn detect_clock_skew(now_ms: u64, reference_ms: u64) -> Option<ClockSkewRecord> {
     let delta_ms = now_ms as i64 - reference_ms as i64;
-    if delta_ms.unsigned_abs() >= CLOCK_SKEW_WARN_MS {
+    if delta_ms <= -(CLOCK_SKEW_WARN_MS as i64) {
         Some(ClockSkewRecord {
             delta_ms,
             wall_ms: now_ms,
