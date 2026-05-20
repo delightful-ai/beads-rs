@@ -11,7 +11,7 @@ use crate::crdt::Crdt;
 use crate::dep::{AcyclicDepKey, DepAddKey, DepKey, FreeDepKey, NoCycleProof, ParentEdge};
 use crate::domain::DepKind;
 use crate::error::{CoreError, InvalidDependency};
-use crate::identity::{ActorId, BeadId, ContentHash, NoteId};
+use crate::identity::{ActorId, BeadId, BeadRef, ContentHash, NoteId};
 use crate::orset::{Dot, Dvv, OrSetChange};
 use crate::time::{Stamp, WallClock, WriteStamp};
 use crate::tombstone::{Tombstone, TombstoneKey};
@@ -490,11 +490,12 @@ impl CanonicalState {
         }
         if !change.is_empty() {
             for added in &change.added {
-                self.dep_indexes.add(added.from(), added.to(), added.kind());
+                self.dep_indexes
+                    .add(added.from_ref(), added.to_ref(), added.kind());
             }
             for removed in &change.removed {
                 self.dep_indexes
-                    .remove(removed.from(), removed.to(), removed.kind());
+                    .remove(removed.from_ref(), removed.to_ref(), removed.kind());
             }
         }
         change
@@ -503,8 +504,8 @@ impl CanonicalState {
     /// Check that adding a DAG-only edge would not introduce a cycle.
     pub fn check_no_cycle(
         &self,
-        from: &BeadId,
-        to: &BeadId,
+        from: &BeadRef,
+        to: &BeadRef,
         kind: DepKind,
     ) -> Result<NoCycleProof, InvalidDependency> {
         if !kind.requires_dag() {
@@ -526,9 +527,9 @@ impl CanonicalState {
             if !visited.insert(current.clone()) {
                 continue;
             }
-            for key in self.deps_from(&current) {
-                if key.kind().requires_dag() && !visited.contains(key.to()) {
-                    queue.push(key.to().clone());
+            for (to, kind) in self.dep_indexes.out_edges(&current) {
+                if kind.requires_dag() && !visited.contains(to) {
+                    queue.push(to.clone());
                 }
             }
         }
@@ -539,7 +540,7 @@ impl CanonicalState {
     /// Convert a raw dep key into a typed key, enforcing DAG proofs for ordering deps.
     pub fn check_dep_add_key(&self, key: DepKey) -> Result<DepAddKey, InvalidDependency> {
         if key.kind().requires_dag() {
-            let proof = self.check_no_cycle(key.from(), key.to(), key.kind())?;
+            let proof = self.check_no_cycle(key.from_ref(), key.to_ref(), key.kind())?;
             let key = AcyclicDepKey::from_dep_key(key, proof)?;
             Ok(DepAddKey::Acyclic(key))
         } else {
@@ -561,7 +562,7 @@ impl CanonicalState {
         if !change.is_empty() {
             for removed in &change.removed {
                 self.dep_indexes
-                    .remove(removed.from(), removed.to(), removed.kind());
+                    .remove(removed.from_ref(), removed.to_ref(), removed.kind());
             }
         }
         change
@@ -782,12 +783,10 @@ impl CanonicalState {
             return Vec::new();
         }
         self.dep_indexes
-            .out_edges(id)
-            .iter()
-            .filter(|(to, _)| self.get_live(to).is_some())
-            .filter_map(|(to, kind): &(BeadId, DepKind)| {
-                DepKey::new(id.clone(), to.clone(), *kind).ok()
-            })
+            .out_edges_for_id(id)
+            .into_iter()
+            .filter(|(_, to, _)| self.get_live(to.id()).is_some())
+            .filter_map(|(from, to, kind)| DepKey::new(from, to, kind).ok())
             .collect()
     }
 
@@ -800,12 +799,10 @@ impl CanonicalState {
             return Vec::new();
         }
         self.dep_indexes
-            .in_edges(id)
-            .iter()
-            .filter(|(from, _)| self.get_live(from).is_some())
-            .filter_map(|(from, kind): &(BeadId, DepKind)| {
-                DepKey::new(from.clone(), id.clone(), *kind).ok()
-            })
+            .in_edges_for_id(id)
+            .into_iter()
+            .filter(|(from, _, _)| self.get_live(from.id()).is_some())
+            .filter_map(|(from, to, kind)| DepKey::new(from, to, kind).ok())
             .collect()
     }
 
@@ -820,12 +817,12 @@ impl CanonicalState {
     /// Get parent edges incoming to a bead (child -> parent).
     pub fn parent_edges_to(&self, parent: &BeadId) -> Vec<ParentEdge> {
         self.dep_indexes
-            .in_edges(parent)
-            .iter()
-            .filter(|(from, kind)| *kind == DepKind::Parent && self.get_live(from).is_some())
-            .filter_map(|(from, _): &(BeadId, DepKind)| {
-                ParentEdge::new(from.clone(), parent.clone()).ok()
+            .in_edges_for_id(parent)
+            .into_iter()
+            .filter(|(from, _, kind)| {
+                *kind == DepKind::Parent && self.get_live(from.id()).is_some()
             })
+            .filter_map(|(from, to, _)| ParentEdge::new(from, to).ok())
             .collect()
     }
 
@@ -843,7 +840,8 @@ impl CanonicalState {
     pub fn rebuild_dep_indexes(&mut self) {
         self.dep_indexes = DepIndexes::new();
         for key in self.dep_store.values() {
-            self.dep_indexes.add(key.from(), key.to(), key.kind());
+                self.dep_indexes
+                    .add(key.from_ref(), key.to_ref(), key.kind());
         }
     }
 

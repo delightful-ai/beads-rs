@@ -751,6 +751,63 @@ impl From<BeadId> for String {
     }
 }
 
+/// Namespace-qualified bead identifier.
+///
+/// `BeadId` is only unique inside a namespace. Use this type at graph and API
+/// boundaries that need to identify a bead without relying on ambient context.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct BeadRef {
+    pub namespace: NamespaceId,
+    pub id: BeadId,
+}
+
+impl BeadRef {
+    pub fn new(namespace: NamespaceId, id: BeadId) -> Self {
+        Self { namespace, id }
+    }
+
+    pub fn parse(raw: &str, default_namespace: &NamespaceId) -> Result<Self, CoreError> {
+        let trimmed = raw.trim();
+        if let Some((namespace, id)) = trimmed.split_once('/') {
+            Ok(Self {
+                namespace: NamespaceId::parse(namespace)?,
+                id: BeadId::parse(id)?,
+            })
+        } else {
+            Ok(Self {
+                namespace: default_namespace.clone(),
+                id: BeadId::parse(trimmed)?,
+            })
+        }
+    }
+
+    pub fn namespace(&self) -> &NamespaceId {
+        &self.namespace
+    }
+
+    pub fn id(&self) -> &BeadId {
+        &self.id
+    }
+
+    pub fn into_parts(self) -> (NamespaceId, BeadId) {
+        (self.namespace, self.id)
+    }
+}
+
+impl fmt::Display for BeadRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}/{}", self.namespace, self.id)
+    }
+}
+
+impl ContentHashable for BeadRef {
+    fn hash_content(&self, hasher: &mut impl Digest) {
+        hasher.update(self.namespace.as_str().as_bytes());
+        hasher.update([0]);
+        self.id.hash_content(hasher);
+    }
+}
+
 /// Note identifier - unique within a bead.
 ///
 /// Daemon-generated, no specific format required.

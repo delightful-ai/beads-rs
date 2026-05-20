@@ -10,7 +10,8 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use super::domain::DepKind;
 use super::error::{CoreError, InvalidDependency};
-use super::identity::BeadId;
+use super::identity::{BeadId, BeadRef};
+use super::namespace::NamespaceId;
 use super::orset::{OrSetValue, sealed::Sealed};
 use super::validated::{ValidatedBeadId, ValidatedDepKind};
 
@@ -180,28 +181,50 @@ fn canonicalize_dep_specs(specs: &mut Vec<DepSpec>) {
 /// Parent-child edge (child -> parent).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ParentEdge {
-    child: BeadId,
-    parent: BeadId,
+    child: BeadRef,
+    parent: BeadRef,
 }
 
 impl ParentEdge {
     /// Create a new parent edge.
     ///
     /// Returns an error if `child == parent`.
-    pub fn new(child: BeadId, parent: BeadId) -> Result<Self, InvalidDependency> {
+    pub fn new(child: BeadRef, parent: BeadRef) -> Result<Self, InvalidDependency> {
         if child == parent {
             return Err(InvalidDependency::SelfDependency(child.to_string()));
         }
         Ok(Self { child, parent })
     }
 
+    /// Create a parent edge whose endpoints are both in `namespace`.
+    pub fn new_local(
+        namespace: &NamespaceId,
+        child: BeadId,
+        parent: BeadId,
+    ) -> Result<Self, InvalidDependency> {
+        Self::new(
+            BeadRef::new(namespace.clone(), child),
+            BeadRef::new(namespace.clone(), parent),
+        )
+    }
+
     /// Get the child bead ID.
     pub fn child(&self) -> &BeadId {
-        &self.child
+        self.child.id()
     }
 
     /// Get the parent bead ID.
     pub fn parent(&self) -> &BeadId {
+        self.parent.id()
+    }
+
+    /// Get the namespace-qualified child endpoint.
+    pub fn child_ref(&self) -> &BeadRef {
+        &self.child
+    }
+
+    /// Get the namespace-qualified parent endpoint.
+    pub fn parent_ref(&self) -> &BeadRef {
         &self.parent
     }
 
@@ -228,8 +251,8 @@ impl TryFrom<DepKey> for ParentEdge {
 /// Serde proxy for ParentEdge that validates on deserialization.
 #[derive(Serialize, Deserialize)]
 struct ParentEdgeProxy {
-    child: BeadId,
-    parent: BeadId,
+    child: BeadRef,
+    parent: BeadRef,
 }
 
 impl Serialize for ParentEdge {
@@ -255,8 +278,8 @@ impl<'de> Deserialize<'de> for ParentEdge {
 /// impossible - the constructor validates that `from != to`.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DepKey {
-    from: BeadId,
-    to: BeadId,
+    from: BeadRef,
+    to: BeadRef,
     kind: DepKind,
 }
 
@@ -264,21 +287,55 @@ impl DepKey {
     /// Create a new dependency key.
     ///
     /// Returns an error if `from == to` (self-dependency).
-    pub fn new(from: BeadId, to: BeadId, kind: DepKind) -> Result<Self, InvalidDependency> {
+    pub fn new(from: BeadRef, to: BeadRef, kind: DepKind) -> Result<Self, InvalidDependency> {
         if from == to {
             return Err(InvalidDependency::SelfDependency(from.to_string()));
         }
         Ok(Self { from, to, kind })
     }
 
-    /// Get the source bead ID (the bead that depends on another).
+    /// Create a dependency key whose endpoints are both in `namespace`.
+    pub fn new_local(
+        namespace: &NamespaceId,
+        from: BeadId,
+        to: BeadId,
+        kind: DepKind,
+    ) -> Result<Self, InvalidDependency> {
+        Self::new(
+            BeadRef::new(namespace.clone(), from),
+            BeadRef::new(namespace.clone(), to),
+            kind,
+        )
+    }
+
+    /// Get the source bead ID without its namespace.
     pub fn from(&self) -> &BeadId {
+        self.from.id()
+    }
+
+    /// Get the target bead ID without its namespace.
+    pub fn to(&self) -> &BeadId {
+        self.to.id()
+    }
+
+    /// Get the namespace-qualified source endpoint.
+    pub fn from_ref(&self) -> &BeadRef {
         &self.from
     }
 
-    /// Get the target bead ID (the bead being depended on).
-    pub fn to(&self) -> &BeadId {
+    /// Get the namespace-qualified target endpoint.
+    pub fn to_ref(&self) -> &BeadRef {
         &self.to
+    }
+
+    /// Alias for callers that want the ID access to read explicitly.
+    pub fn from_id(&self) -> &BeadId {
+        self.from()
+    }
+
+    /// Alias for callers that want the ID access to read explicitly.
+    pub fn to_id(&self) -> &BeadId {
+        self.to()
     }
 
     /// Get the dependency kind.
@@ -292,9 +349,13 @@ impl Sealed for DepKey {}
 impl OrSetValue for DepKey {
     fn collision_bytes(&self) -> Vec<u8> {
         let mut bytes = Vec::new();
-        bytes.extend(self.from.as_str().as_bytes());
+        bytes.extend(self.from.namespace().as_str().as_bytes());
         bytes.push(0);
-        bytes.extend(self.to.as_str().as_bytes());
+        bytes.extend(self.from.id().as_str().as_bytes());
+        bytes.push(0);
+        bytes.extend(self.to.namespace().as_str().as_bytes());
+        bytes.push(0);
+        bytes.extend(self.to.id().as_str().as_bytes());
         bytes.push(0);
         bytes.extend(self.kind.as_str().as_bytes());
         bytes
@@ -323,8 +384,8 @@ pub struct AcyclicDepKey {
 
 impl AcyclicDepKey {
     pub fn new(
-        from: BeadId,
-        to: BeadId,
+        from: BeadRef,
+        to: BeadRef,
         kind: DepKind,
         _proof: NoCycleProof,
     ) -> Result<Self, InvalidDependency> {
@@ -373,7 +434,7 @@ pub struct FreeDepKey {
 }
 
 impl FreeDepKey {
-    pub fn new(from: BeadId, to: BeadId, kind: DepKind) -> Result<Self, InvalidDependency> {
+    pub fn new(from: BeadRef, to: BeadRef, kind: DepKind) -> Result<Self, InvalidDependency> {
         if kind.requires_dag() {
             return Err(InvalidDependency::KindRequiresDag(
                 kind.as_str().to_string(),
@@ -438,8 +499,8 @@ impl DepAddKey {
 /// Serde proxy for DepKey that validates on deserialization.
 #[derive(Serialize, Deserialize)]
 struct DepKeyProxy {
-    from: BeadId,
-    to: BeadId,
+    from: BeadRef,
+    to: BeadRef,
     kind: DepKind,
 }
 

@@ -13,8 +13,8 @@ use super::IssueStatus;
 use super::dep::{DepKey, ParentEdge};
 use super::domain::DepKind;
 use super::identity::{
-    ActorId, BeadId, BranchName, ClientRequestId, EventId, ReplicaId, StoreId, StoreIdentity,
-    TraceId, TxnId,
+    ActorId, BeadId, BeadRef, BranchName, ClientRequestId, EventId, ReplicaId, StoreId,
+    StoreIdentity, TraceId, TxnId,
 };
 use super::limits::{LimitViolation, Limits};
 use super::namespace::NamespaceId;
@@ -2081,9 +2081,13 @@ fn encode_wire_dep_add(
     enc: &mut Encoder<&mut Vec<u8>>,
     dep: &WireDepAddV1,
 ) -> Result<(), EncodeError> {
-    enc.map(4)?;
+    enc.map(6)?;
+    enc.str("from_namespace")?;
+    enc.str(dep.from_ref().namespace().as_str())?;
     enc.str("from")?;
     enc.str(dep.from().as_str())?;
+    enc.str("to_namespace")?;
+    enc.str(dep.to_ref().namespace().as_str())?;
     enc.str("to")?;
     enc.str(dep.to().as_str())?;
     enc.str("kind")?;
@@ -2100,7 +2104,9 @@ fn decode_wire_dep_add(
 ) -> Result<WireDepAddV1, DecodeError> {
     let map_len = decode_map_len(dec, limits, depth)?;
     let mut seen_keys = BTreeSet::new();
+    let mut from_namespace = None;
     let mut from = None;
+    let mut to_namespace = None;
     let mut to = None;
     let mut kind = None;
     let mut dot = None;
@@ -2109,9 +2115,17 @@ fn decode_wire_dep_add(
         let key = decode_text(dec, limits)?;
         ensure_unique_key(&mut seen_keys, key)?;
         match key {
+            "from_namespace" => {
+                let raw = decode_text(dec, limits)?;
+                from_namespace = Some(parse_namespace(raw)?);
+            }
             "from" => {
                 let raw = decode_text(dec, limits)?;
                 from = Some(parse_bead_id(raw)?);
+            }
+            "to_namespace" => {
+                let raw = decode_text(dec, limits)?;
+                to_namespace = Some(parse_namespace(raw)?);
             }
             "to" => {
                 let raw = decode_text(dec, limits)?;
@@ -2134,8 +2148,14 @@ fn decode_wire_dep_add(
     }
 
     let key = DepKey::new(
-        from.ok_or(DecodeError::MissingField("from"))?,
-        to.ok_or(DecodeError::MissingField("to"))?,
+        BeadRef::new(
+            from_namespace.ok_or(DecodeError::MissingField("from_namespace"))?,
+            from.ok_or(DecodeError::MissingField("from"))?,
+        ),
+        BeadRef::new(
+            to_namespace.ok_or(DecodeError::MissingField("to_namespace"))?,
+            to.ok_or(DecodeError::MissingField("to"))?,
+        ),
         kind.ok_or(DecodeError::MissingField("kind"))?,
     )
     .map_err(|err| DecodeError::InvalidField {
@@ -2153,9 +2173,13 @@ fn encode_wire_dep_remove(
     enc: &mut Encoder<&mut Vec<u8>>,
     dep: &WireDepRemoveV1,
 ) -> Result<(), EncodeError> {
-    enc.map(4)?;
+    enc.map(6)?;
+    enc.str("from_namespace")?;
+    enc.str(dep.from_ref().namespace().as_str())?;
     enc.str("from")?;
     enc.str(dep.from().as_str())?;
+    enc.str("to_namespace")?;
+    enc.str(dep.to_ref().namespace().as_str())?;
     enc.str("to")?;
     enc.str(dep.to().as_str())?;
     enc.str("kind")?;
@@ -2172,7 +2196,9 @@ fn decode_wire_dep_remove(
 ) -> Result<WireDepRemoveV1, DecodeError> {
     let map_len = decode_map_len(dec, limits, depth)?;
     let mut seen_keys = BTreeSet::new();
+    let mut from_namespace = None;
     let mut from = None;
+    let mut to_namespace = None;
     let mut to = None;
     let mut kind = None;
     let mut ctx = None;
@@ -2181,9 +2207,17 @@ fn decode_wire_dep_remove(
         let key = decode_text(dec, limits)?;
         ensure_unique_key(&mut seen_keys, key)?;
         match key {
+            "from_namespace" => {
+                let raw = decode_text(dec, limits)?;
+                from_namespace = Some(parse_namespace(raw)?);
+            }
             "from" => {
                 let raw = decode_text(dec, limits)?;
                 from = Some(parse_bead_id(raw)?);
+            }
+            "to_namespace" => {
+                let raw = decode_text(dec, limits)?;
+                to_namespace = Some(parse_namespace(raw)?);
             }
             "to" => {
                 let raw = decode_text(dec, limits)?;
@@ -2206,8 +2240,14 @@ fn decode_wire_dep_remove(
     }
 
     let key = DepKey::new(
-        from.ok_or(DecodeError::MissingField("from"))?,
-        to.ok_or(DecodeError::MissingField("to"))?,
+        BeadRef::new(
+            from_namespace.ok_or(DecodeError::MissingField("from_namespace"))?,
+            from.ok_or(DecodeError::MissingField("from"))?,
+        ),
+        BeadRef::new(
+            to_namespace.ok_or(DecodeError::MissingField("to_namespace"))?,
+            to.ok_or(DecodeError::MissingField("to"))?,
+        ),
         kind.ok_or(DecodeError::MissingField("kind"))?,
     )
     .map_err(|err| DecodeError::InvalidField {
@@ -2225,9 +2265,13 @@ fn encode_wire_parent_add(
     enc: &mut Encoder<&mut Vec<u8>>,
     op: &WireParentAddV1,
 ) -> Result<(), EncodeError> {
-    enc.map(3)?;
+    enc.map(5)?;
+    enc.str("child_namespace")?;
+    enc.str(op.edge().child_ref().namespace().as_str())?;
     enc.str("child")?;
     enc.str(op.child().as_str())?;
+    enc.str("parent_namespace")?;
+    enc.str(op.edge().parent_ref().namespace().as_str())?;
     enc.str("parent")?;
     enc.str(op.parent().as_str())?;
     enc.str("dot")?;
@@ -2242,7 +2286,9 @@ fn decode_wire_parent_add(
 ) -> Result<WireParentAddV1, DecodeError> {
     let map_len = decode_map_len(dec, limits, depth)?;
     let mut seen_keys = BTreeSet::new();
+    let mut child_namespace = None;
     let mut child = None;
+    let mut parent_namespace = None;
     let mut parent = None;
     let mut dot = None;
 
@@ -2250,9 +2296,17 @@ fn decode_wire_parent_add(
         let key = decode_text(dec, limits)?;
         ensure_unique_key(&mut seen_keys, key)?;
         match key {
+            "child_namespace" => {
+                let raw = decode_text(dec, limits)?;
+                child_namespace = Some(parse_namespace(raw)?);
+            }
             "child" => {
                 let raw = decode_text(dec, limits)?;
                 child = Some(parse_bead_id(raw)?);
+            }
+            "parent_namespace" => {
+                let raw = decode_text(dec, limits)?;
+                parent_namespace = Some(parse_namespace(raw)?);
             }
             "parent" => {
                 let raw = decode_text(dec, limits)?;
@@ -2271,8 +2325,14 @@ fn decode_wire_parent_add(
     }
 
     let edge = ParentEdge::new(
-        child.ok_or(DecodeError::MissingField("child"))?,
-        parent.ok_or(DecodeError::MissingField("parent"))?,
+        BeadRef::new(
+            child_namespace.ok_or(DecodeError::MissingField("child_namespace"))?,
+            child.ok_or(DecodeError::MissingField("child"))?,
+        ),
+        BeadRef::new(
+            parent_namespace.ok_or(DecodeError::MissingField("parent_namespace"))?,
+            parent.ok_or(DecodeError::MissingField("parent"))?,
+        ),
     )
     .map_err(|err| DecodeError::InvalidField {
         field: "parent_add",
@@ -2289,9 +2349,13 @@ fn encode_wire_parent_remove(
     enc: &mut Encoder<&mut Vec<u8>>,
     op: &WireParentRemoveV1,
 ) -> Result<(), EncodeError> {
-    enc.map(3)?;
+    enc.map(5)?;
+    enc.str("child_namespace")?;
+    enc.str(op.edge().child_ref().namespace().as_str())?;
     enc.str("child")?;
     enc.str(op.child().as_str())?;
+    enc.str("parent_namespace")?;
+    enc.str(op.edge().parent_ref().namespace().as_str())?;
     enc.str("parent")?;
     enc.str(op.parent().as_str())?;
     enc.str("ctx")?;
@@ -2306,7 +2370,9 @@ fn decode_wire_parent_remove(
 ) -> Result<WireParentRemoveV1, DecodeError> {
     let map_len = decode_map_len(dec, limits, depth)?;
     let mut seen_keys = BTreeSet::new();
+    let mut child_namespace = None;
     let mut child = None;
+    let mut parent_namespace = None;
     let mut parent = None;
     let mut ctx = None;
 
@@ -2314,9 +2380,17 @@ fn decode_wire_parent_remove(
         let key = decode_text(dec, limits)?;
         ensure_unique_key(&mut seen_keys, key)?;
         match key {
+            "child_namespace" => {
+                let raw = decode_text(dec, limits)?;
+                child_namespace = Some(parse_namespace(raw)?);
+            }
             "child" => {
                 let raw = decode_text(dec, limits)?;
                 child = Some(parse_bead_id(raw)?);
+            }
+            "parent_namespace" => {
+                let raw = decode_text(dec, limits)?;
+                parent_namespace = Some(parse_namespace(raw)?);
             }
             "parent" => {
                 let raw = decode_text(dec, limits)?;
@@ -2335,8 +2409,14 @@ fn decode_wire_parent_remove(
     }
 
     let edge = ParentEdge::new(
-        child.ok_or(DecodeError::MissingField("child"))?,
-        parent.ok_or(DecodeError::MissingField("parent"))?,
+        BeadRef::new(
+            child_namespace.ok_or(DecodeError::MissingField("child_namespace"))?,
+            child.ok_or(DecodeError::MissingField("child"))?,
+        ),
+        BeadRef::new(
+            parent_namespace.ok_or(DecodeError::MissingField("parent_namespace"))?,
+            parent.ok_or(DecodeError::MissingField("parent"))?,
+        ),
     )
     .map_err(|err| DecodeError::InvalidField {
         field: "parent_remove",

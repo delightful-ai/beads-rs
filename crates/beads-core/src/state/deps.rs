@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use crate::crdt::Crdt;
 use crate::dep::DepKey;
 use crate::domain::DepKind;
-use crate::identity::BeadId;
+use crate::identity::{BeadId, BeadRef};
 use crate::orset::{Dot, Dvv, OrSet};
 use crate::time::Stamp;
 
@@ -85,9 +85,9 @@ impl Default for DepStore {
 #[derive(Default, Debug, Clone)]
 pub struct DepIndexes {
     /// from -> [(to, kind)] for active deps
-    out_edges: BTreeMap<BeadId, Vec<(BeadId, DepKind)>>,
+    out_edges: BTreeMap<BeadRef, Vec<(BeadRef, DepKind)>>,
     /// to -> [(from, kind)] for active deps
-    in_edges: BTreeMap<BeadId, Vec<(BeadId, DepKind)>>,
+    in_edges: BTreeMap<BeadRef, Vec<(BeadRef, DepKind)>>,
 }
 
 impl DepIndexes {
@@ -97,7 +97,7 @@ impl DepIndexes {
     }
 
     /// Add an edge to both indexes.
-    pub(crate) fn add(&mut self, from: &BeadId, to: &BeadId, kind: DepKind) {
+    pub(crate) fn add(&mut self, from: &BeadRef, to: &BeadRef, kind: DepKind) {
         self.out_edges
             .entry(from.clone())
             .or_default()
@@ -109,7 +109,7 @@ impl DepIndexes {
     }
 
     /// Remove an edge from both indexes.
-    pub(crate) fn remove(&mut self, from: &BeadId, to: &BeadId, kind: DepKind) {
+    pub(crate) fn remove(&mut self, from: &BeadRef, to: &BeadRef, kind: DepKind) {
         if let Some(edges) = self.out_edges.get_mut(from) {
             edges.retain(|(t, k)| !(t == to && *k == kind));
         }
@@ -119,18 +119,44 @@ impl DepIndexes {
     }
 
     /// Get outgoing edges from a bead.
-    pub fn out_edges(&self, id: &BeadId) -> &[(BeadId, DepKind)] {
+    pub fn out_edges(&self, id: &BeadRef) -> &[(BeadRef, DepKind)] {
         self.out_edges
             .get(id)
-            .map(|v: &Vec<(BeadId, DepKind)>| v.as_slice())
+            .map(|v: &Vec<(BeadRef, DepKind)>| v.as_slice())
             .unwrap_or(&[])
     }
 
     /// Get incoming edges to a bead.
-    pub fn in_edges(&self, id: &BeadId) -> &[(BeadId, DepKind)] {
+    pub fn in_edges(&self, id: &BeadRef) -> &[(BeadRef, DepKind)] {
         self.in_edges
             .get(id)
-            .map(|v: &Vec<(BeadId, DepKind)>| v.as_slice())
+            .map(|v: &Vec<(BeadRef, DepKind)>| v.as_slice())
             .unwrap_or(&[])
+    }
+
+    /// Get outgoing edges from all namespace-qualified refs with this bare ID.
+    pub fn out_edges_for_id(&self, id: &BeadId) -> Vec<(BeadRef, BeadRef, DepKind)> {
+        self.out_edges
+            .iter()
+            .filter(|(from, _)| from.id() == id)
+            .flat_map(|(from, edges)| {
+                edges
+                    .iter()
+                    .map(|(to, kind)| (from.clone(), to.clone(), *kind))
+            })
+            .collect()
+    }
+
+    /// Get incoming edges to all namespace-qualified refs with this bare ID.
+    pub fn in_edges_for_id(&self, id: &BeadId) -> Vec<(BeadRef, BeadRef, DepKind)> {
+        self.in_edges
+            .iter()
+            .filter(|(to, _)| to.id() == id)
+            .flat_map(|(to, edges)| {
+                edges
+                    .iter()
+                    .map(|(from, kind)| (from.clone(), to.clone(), *kind))
+            })
+            .collect()
     }
 }

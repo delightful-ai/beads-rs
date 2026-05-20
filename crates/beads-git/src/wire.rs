@@ -12,8 +12,9 @@ use serde::{Deserialize, Serialize};
 use super::error::WireError;
 use crate::core::{
     ActorId, Bead, BeadId, BeadSlug, BeadSnapshotWireV1, CanonicalState, DepKey, DepKind, Dot, Dvv,
-    IssueStatus, NoteAppendV1, OrSet, OrSetValue, SnapshotCodec, SnapshotWireV1, Stamp,
-    StateJsonlSha256, WireDepEntryV1, WireDepStoreV1, WireStamp, WireTombstoneV1, WriteStamp,
+    IssueStatus, NamespaceId, NoteAppendV1, OrSet, OrSetValue, SnapshotCodec, SnapshotWireV1,
+    Stamp, StateJsonlSha256, WireDepEntryV1, WireDepStoreV1, WireStamp, WireTombstoneV1,
+    WriteStamp,
 };
 
 // =============================================================================
@@ -666,7 +667,7 @@ fn parse_legacy_edge_line(
         return None;
     };
 
-    let key = match DepKey::new(from, to, kind) {
+    let key = match DepKey::new_local(&NamespaceId::core(), from, to, kind) {
         Ok(key) => key,
         Err(err) => {
             warnings.push(legacy_deps_warning(

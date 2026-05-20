@@ -20,7 +20,7 @@ use super::composite::{Claim, IssueStatus, Note};
 use super::crdt::Lww;
 use super::dep::{DepKey, ParentEdge};
 use super::domain::{BeadType, DepKind, Priority};
-use super::identity::{ActorId, BeadId, BranchName, NoteId, ReplicaId};
+use super::identity::{ActorId, BeadId, BeadRef, BranchName, NoteId, ReplicaId};
 use super::orset::{Dot, Dvv, OrSet, OrSetError};
 use super::state::{
     CanonicalState, DepStore, LabelState, LabelStore, NoteStore, legacy_fallback_lineage,
@@ -1216,8 +1216,16 @@ impl WireDepAddV1 {
         self.key.from()
     }
 
+    pub fn from_ref(&self) -> &BeadRef {
+        self.key.from_ref()
+    }
+
     pub fn to(&self) -> &BeadId {
         self.key.to()
+    }
+
+    pub fn to_ref(&self) -> &BeadRef {
+        self.key.to_ref()
     }
 
     pub fn kind(&self) -> DepKind {
@@ -1241,8 +1249,16 @@ impl WireDepRemoveV1 {
         self.key.from()
     }
 
+    pub fn from_ref(&self) -> &BeadRef {
+        self.key.from_ref()
+    }
+
     pub fn to(&self) -> &BeadId {
         self.key.to()
+    }
+
+    pub fn to_ref(&self) -> &BeadRef {
+        self.key.to_ref()
     }
 
     pub fn kind(&self) -> DepKind {
