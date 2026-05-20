@@ -15,7 +15,7 @@ use crate::issues::{
     StatusOutput, Tombstone,
 };
 use crate::tracker::TrackerIssue;
-use beads_core::BeadId;
+use beads_core::BeadRef;
 
 /// Aggregated payload for rich `show` views.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,7 +44,7 @@ pub enum QueryResult {
     TrackerIssues(Vec<TrackerIssue>),
 
     /// Dependency tree.
-    DepTree { root: BeadId, edges: Vec<DepEdge> },
+    DepTree { root: BeadRef, edges: Vec<DepEdge> },
 
     /// Dependencies for a bead.
     Deps {

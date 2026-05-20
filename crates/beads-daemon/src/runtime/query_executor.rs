@@ -14,7 +14,8 @@ use super::ops::{MapLiveError, OpError};
 use super::query::{Filters, QueryResult};
 use super::store::runtime::StoreRuntime;
 use crate::core::{
-    BeadId, BeadProjection, BeadView, CanonicalState, DepKey, DepKind, IssueStatus, WallClock,
+    BeadId, BeadProjection, BeadRef, BeadView, CanonicalState, DepKey, DepKind, IssueStatus,
+    NamespaceId, WallClock,
 };
 use crate::git_lane::GitLaneState;
 use crate::remote::RemoteUrl;
@@ -192,18 +193,19 @@ impl Daemon {
             let mut incoming = Vec::new();
             let mut outgoing = Vec::new();
             let mut related_ids = std::collections::BTreeSet::new();
+            let root_ref = BeadRef::new(ctx.read.namespace().clone(), id.clone());
 
-            for (to, kind) in ctx.state.dep_indexes().out_edges(id) {
-                if let Ok(key) = DepKey::new(id.clone(), to.clone(), *kind) {
+            for (to, kind) in ctx.state.dep_indexes().out_edges(&root_ref) {
+                if let Ok(key) = DepKey::new(root_ref.clone(), to.clone(), *kind) {
                     outgoing.push(DepEdge::from(&key));
-                    related_ids.insert(to.clone());
+                    related_ids.insert(to.id().clone());
                 }
             }
 
-            for (from, kind) in ctx.state.dep_indexes().in_edges(id) {
-                if let Ok(key) = DepKey::new(from.clone(), id.clone(), *kind) {
+            for (from, kind) in ctx.state.dep_indexes().in_edges(&root_ref) {
+                if let Ok(key) = DepKey::new(from.clone(), root_ref.clone(), *kind) {
                     incoming.push(DepEdge::from(&key));
-                    related_ids.insert(from.clone());
+                    related_ids.insert(from.id().clone());
                 }
             }
 
@@ -442,7 +444,7 @@ impl Daemon {
             let mut edges = Vec::new();
             let mut visited = std::collections::HashSet::new();
             let mut queue = std::collections::VecDeque::new();
-            queue.push_back(id.clone());
+            queue.push_back(BeadRef::new(ctx.read.namespace().clone(), id.clone()));
 
             while let Some(current) = queue.pop_front() {
                 if !visited.insert(current.clone()) {
@@ -452,15 +454,15 @@ impl Daemon {
                 for (to, kind) in state.dep_indexes().out_edges(&current) {
                     if let Ok(key) = DepKey::new(current.clone(), to.clone(), *kind) {
                         edges.push(DepEdge::from(&key));
-                        if !visited.contains(key.to()) {
-                            queue.push_back(key.to().clone());
+                        if !visited.contains(key.to_ref()) {
+                            queue.push_back(key.to_ref().clone());
                         }
                     }
                 }
             }
 
             Ok(ResponsePayload::query(QueryResult::DepTree {
-                root: id.clone(),
+                root: BeadRef::new(ctx.read.namespace().clone(), id.clone()),
                 edges,
             }))
         })
@@ -482,15 +484,16 @@ impl Daemon {
 
             let mut incoming = Vec::new();
             let mut outgoing = Vec::new();
+            let root_ref = BeadRef::new(ctx.read.namespace().clone(), id.clone());
 
-            for (to, kind) in state.dep_indexes().out_edges(id) {
-                if let Ok(key) = DepKey::new(id.clone(), to.clone(), *kind) {
+            for (to, kind) in state.dep_indexes().out_edges(&root_ref) {
+                if let Ok(key) = DepKey::new(root_ref.clone(), to.clone(), *kind) {
                     outgoing.push(DepEdge::from(&key));
                 }
             }
 
-            for (from, kind) in state.dep_indexes().in_edges(id) {
-                if let Ok(key) = DepKey::new(from.clone(), id.clone(), *kind) {
+            for (from, kind) in state.dep_indexes().in_edges(&root_ref) {
+                if let Ok(key) = DepKey::new(from.clone(), root_ref.clone(), *kind) {
                     incoming.push(DepEdge::from(&key));
                 }
             }
@@ -958,10 +961,11 @@ impl Daemon {
             for (id, _) in state.iter_live() {
                 let mut visited = std::collections::HashSet::new();
                 let mut queue = std::collections::VecDeque::new();
-                queue.push_back(id.clone());
+                let root_ref = BeadRef::new(ctx.read.namespace().clone(), id.clone());
+                queue.push_back(root_ref.clone());
 
                 while let Some(current) = queue.pop_front() {
-                    if current == *id && !visited.is_empty() {
+                    if current == root_ref && !visited.is_empty() {
                         errors.push(format!("dependency cycle involving {}", id.as_str()));
                         break;
                     }
@@ -1050,12 +1054,13 @@ fn tracker_blockers_for_issue(
     id: &BeadId,
 ) -> Result<Vec<TrackerBlocker>, OpError> {
     let mut blockers = Vec::new();
+    let issue_ref = BeadRef::new(NamespaceId::core(), id.clone());
 
-    for (blocker_id, kind) in state.dep_indexes().out_edges(id) {
+    for (blocker_ref, kind) in state.dep_indexes().out_edges(&issue_ref) {
         if *kind != DepKind::Blocks {
             continue;
         }
-        let Some(blocker_view) = state.bead_view(blocker_id) else {
+        let Some(blocker_view) = state.bead_view(blocker_ref.id()) else {
             continue;
         };
         let blocker_projection = BeadProjection::from_view(&blocker_view);
@@ -1063,8 +1068,8 @@ fn tracker_blockers_for_issue(
             continue;
         }
         blockers.push(TrackerBlocker {
-            id: blocker_id.as_str().to_string(),
-            identifier: blocker_id.as_str().to_string(),
+            id: blocker_ref.id().as_str().to_string(),
+            identifier: blocker_ref.id().as_str().to_string(),
             status: blocker_projection.bead.fields.status.value,
         });
     }

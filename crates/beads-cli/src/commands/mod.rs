@@ -135,7 +135,7 @@ impl crate::render::HumanRenderer for CliCommandRenderer {
         out.trim_end().to_string()
     }
 
-    fn render_dep_tree(&self, root: &str, edges: &[DepEdge]) -> String {
+    fn render_dep_tree(&self, root: &beads_core::BeadRef, edges: &[DepEdge]) -> String {
         dep::render_dep_tree(root, edges)
     }
 

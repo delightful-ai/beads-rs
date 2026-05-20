@@ -9,8 +9,8 @@ use std::path::Path;
 
 use beads_core::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadSlug, BeadType, CanonicalState, Claim,
-    CoreError, DepKey, DepKind, Dot, IssueStatus, Label, Labels, Lww, Note, NoteId, OrSetValue,
-    Priority, ReplicaId, Stamp, Tombstone, WriteStamp,
+    CoreError, DepKey, DepKind, Dot, IssueStatus, Label, Labels, Lww, NamespaceId, Note, NoteId,
+    OrSetValue, Priority, ReplicaId, Stamp, Tombstone, WriteStamp,
 };
 use serde::Deserialize;
 use sha2::{Digest, Sha256 as Sha2};
@@ -376,7 +376,7 @@ fn dep_to_add(
         .unwrap_or_else(|| actor.as_str().to_string());
     let created_by = ActorId::new(created_by_raw)?;
     let created_stamp = Stamp::new(WriteStamp::new(created_ms, 0), created_by);
-    let key = DepKey::new(from, to, kind).map_err(CoreError::from)?;
+    let key = DepKey::new_local(&NamespaceId::core(), from, to, kind).map_err(CoreError::from)?;
     let dot = legacy_dot_from_bytes(&key.collision_bytes(), &created_stamp);
     Ok((key, dot, created_stamp))
 }

@@ -839,12 +839,11 @@ impl MutationEngine {
             if state.get_live(spec.id()).is_none() {
                 return Err(OpError::NotFound(spec.id().clone()));
             }
-            DepKey::new(id.clone(), spec.id().clone(), spec.kind()).map_err(|e| {
-                OpError::ValidationFailed {
+            DepKey::new_local(&NamespaceId::core(), id.clone(), spec.id().clone(), spec.kind())
+                .map_err(|e| OpError::ValidationFailed {
                     field: "dependency".into(),
                     reason: e.to_string(),
-                }
-            })?;
+                })?;
         }
 
         let mut source_repo_value = None;
@@ -903,7 +902,7 @@ impl MutationEngine {
 
         if let Some(parent_id) = parent_id {
             let edge =
-                ParentEdge::new(id.clone(), parent_id).map_err(|e| OpError::ValidationFailed {
+                ParentEdge::new_local(&NamespaceId::core(), id.clone(), parent_id).map_err(|e| OpError::ValidationFailed {
                     field: "parent".into(),
                     reason: e.to_string(),
                 })?;
@@ -1147,7 +1146,7 @@ impl MutationEngine {
                 reason: "parent edges must use set-parent".into(),
             });
         }
-        let key = DepKey::new(from, to, kind).map_err(|e| OpError::ValidationFailed {
+        let key = DepKey::new_local(&NamespaceId::core(), from, to, kind).map_err(|e| OpError::ValidationFailed {
             field: "dependency".into(),
             reason: e.to_string(),
         })?;
@@ -1218,7 +1217,7 @@ impl MutationEngine {
             });
         }
         let key =
-            DepKey::new(from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
+            DepKey::new_local(&NamespaceId::core(), from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
                 field: "dependency".into(),
                 reason: e.to_string(),
             })?;
@@ -1249,7 +1248,7 @@ impl MutationEngine {
 
         let parent_edge = match parent.as_ref() {
             Some(parent_id) => {
-                let edge = ParentEdge::new(id.clone(), parent_id.clone()).map_err(|e| {
+                let edge = ParentEdge::new_local(&NamespaceId::core(), id.clone(), parent_id.clone()).map_err(|e| {
                     OpError::ValidationFailed {
                         field: "parent".into(),
                         reason: e.to_string(),
@@ -1258,7 +1257,8 @@ impl MutationEngine {
                 if state.get_live(parent_id).is_none() {
                     return Err(OpError::NotFound(parent_id.clone()));
                 }
-                if let Err(err) = state.check_no_cycle(edge.child(), edge.parent(), DepKind::Parent)
+                if let Err(err) =
+                    state.check_no_cycle(edge.child_ref(), edge.parent_ref(), DepKind::Parent)
                 {
                     return Err(OpError::ValidationFailed {
                         field: "parent".into(),

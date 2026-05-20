@@ -266,7 +266,7 @@ fn parse_direction(raw: &str) -> Result<DepDirection, String> {
     }
 }
 
-pub fn render_dep_tree(root: &str, edges: &[DepEdge]) -> String {
+pub fn render_dep_tree(root: &beads_core::BeadRef, edges: &[DepEdge]) -> String {
     if edges.is_empty() {
         return format!("\n{root} has no dependencies\n");
     }

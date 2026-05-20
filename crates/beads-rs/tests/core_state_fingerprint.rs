@@ -5,7 +5,8 @@
 //! live in beads-rs rather than beads-core.
 
 use beads_core::bead::{Bead, BeadCore, BeadFields};
-use beads_core::composite::{Claim, Workflow};
+use beads_core::IssueStatus;
+use beads_core::composite::Claim;
 use beads_core::crdt::Lww;
 use beads_core::domain::{BeadType, DepKind, Priority};
 use beads_core::identity::{ActorId, BeadId, ReplicaId};
@@ -38,7 +39,8 @@ fn make_bead(id: &BeadId, stamp: &Stamp) -> Bead {
         external_ref: Lww::new(None, stamp.clone()),
         source_repo: Lww::new(None, stamp.clone()),
         estimated_minutes: Lww::new(None, stamp.clone()),
-        workflow: Lww::new(Workflow::default(), stamp.clone()),
+        status: Lww::new(IssueStatus::Todo, stamp.clone()),
+        closed_on_branch: Lww::new(None, stamp.clone()),
         claim: Lww::new(Claim::default(), stamp.clone()),
     };
     Bead::new(core, fields)
