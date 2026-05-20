@@ -9,8 +9,8 @@ use uuid::Uuid;
 
 use beads_core::{
     ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, CanonicalState, Claim, DepKey, DepKind,
-    Durable, HeadStatus, IssueStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp,
-    StoreEpoch, StoreId, StoreState, Tombstone, Watermarks, WriteStamp,
+    Durable, HeadStatus, Lww, NamespaceId, Priority, ReplicaId, Seq0, Stamp, StoreEpoch, StoreId,
+    StoreState, Tombstone, Watermarks, Workflow, WriteStamp,
 };
 use beads_core::{ContentHash, Dot};
 use beads_git::checkpoint::{
@@ -134,6 +134,64 @@ fn checkpoint_multi_namespace_includes_all_namespaces() {
 }
 
 #[test]
+fn checkpoint_multi_namespace_round_trip_preserves_state() {
+    let fixture = fixture_multi_namespace();
+    let temp = TempDir::new().expect("temp checkpoint dir");
+    write_checkpoint_tree(temp.path(), &fixture.export).expect("write checkpoint");
+
+    let imported = import_checkpoint(temp.path(), &beads_core::Limits::default()).expect("import");
+    let core = NamespaceId::core();
+    let sys = NamespaceId::parse("sys").expect("sys namespace");
+    let core_id = BeadId::parse("bd-core").expect("core bead id");
+    let sys_id = BeadId::parse("bd-sys").expect("sys bead id");
+
+    assert!(
+        imported
+            .state
+            .get(&core)
+            .and_then(|state| state.get_live(&core_id))
+            .is_some(),
+        "core bead missing after checkpoint import"
+    );
+    assert!(
+        imported
+            .state
+            .get(&sys)
+            .and_then(|state| state.get_live(&sys_id))
+            .is_some(),
+        "sys bead missing after checkpoint import"
+    );
+
+    let imported_watermarks =
+        watermarks_from_included(&imported.included, imported.included_heads.as_ref());
+    let snapshot = build_snapshot_from_state(
+        SnapshotBuildArgs {
+            checkpoint_group: fixture.export.meta.checkpoint_group.clone(),
+            namespaces: fixture.export.meta.namespaces.clone().into_vec(),
+            store_id: fixture.export.meta.store_id,
+            store_epoch: fixture.export.meta.store_epoch,
+            created_at_ms: fixture.export.meta.created_at_ms,
+            created_by_replica_id: fixture.export.meta.created_by_replica_id,
+            policy_hash: fixture.export.meta.policy_hash,
+            roster_hash: fixture.export.meta.roster_hash,
+        },
+        &imported.state,
+        &imported_watermarks,
+    );
+    let export_again = export_checkpoint(CheckpointExportInput {
+        snapshot: &snapshot,
+        previous: None,
+    })
+    .expect("export again");
+
+    assert_eq!(
+        fixture.export.manifest.canon_bytes().expect("manifest"),
+        export_again.manifest.canon_bytes().expect("manifest again"),
+        "multi-namespace manifest drifted after import/export"
+    );
+}
+
+#[test]
 fn checkpoint_included_watermarks_match() {
     let core = NamespaceId::core();
     let (store_state, watermarks, export) = build_core_store_state();
@@ -165,7 +223,13 @@ fn build_core_store_state() -> (StoreState, Watermarks<Durable>, CheckpointExpor
     state.insert_tombstone(tombstone);
 
     let origin = ReplicaId::new(Uuid::from_bytes([3u8; 16]));
-    let dep_key = DepKey::new(bead_id.clone(), other_id.clone(), DepKind::Blocks).expect("dep key");
+    let dep_key = DepKey::new_local(
+        &NamespaceId::core(),
+        bead_id.clone(),
+        other_id.clone(),
+        DepKind::Blocks,
+    )
+    .expect("dep key");
     let dot = Dot {
         replica: origin,
         counter: 1,
@@ -386,8 +450,7 @@ fn make_bead(id: &BeadId, stamp: &Stamp, title: &str) -> Bead {
         external_ref: Lww::new(None, stamp.clone()),
         source_repo: Lww::new(None, stamp.clone()),
         estimated_minutes: Lww::new(None, stamp.clone()),
-        status: Lww::new(IssueStatus::Todo, stamp.clone()),
-        closed_on_branch: Lww::new(None, stamp.clone()),
+        workflow: Lww::new(Workflow::default(), stamp.clone()),
         claim: Lww::new(Claim::default(), stamp.clone()),
     };
     Bead::new(core, fields)

@@ -5,7 +5,7 @@
 //! live in beads-rs rather than beads-core.
 
 use beads_core::bead::{Bead, BeadCore, BeadFields};
-use beads_core::composite::Claim;
+use beads_core::composite::{Claim, Workflow};
 use beads_core::crdt::Lww;
 use beads_core::domain::{BeadType, DepKind, Priority};
 use beads_core::identity::{ActorId, BeadId, ReplicaId};
@@ -13,7 +13,7 @@ use beads_core::orset::Dot;
 use beads_core::state::CanonicalState;
 use beads_core::time::{Stamp, WriteStamp};
 use beads_core::tombstone::Tombstone;
-use beads_core::{DepKey, IssueStatus, ParentEdge};
+use beads_core::{DepKey, NamespaceId, ParentEdge};
 use beads_git::wire;
 use proptest::prelude::*;
 use uuid::Uuid;
@@ -38,8 +38,7 @@ fn make_bead(id: &BeadId, stamp: &Stamp) -> Bead {
         external_ref: Lww::new(None, stamp.clone()),
         source_repo: Lww::new(None, stamp.clone()),
         estimated_minutes: Lww::new(None, stamp.clone()),
-        status: Lww::new(IssueStatus::Todo, stamp.clone()),
-        closed_on_branch: Lww::new(None, stamp.clone()),
+        workflow: Lww::new(Workflow::default(), stamp.clone()),
         claim: Lww::new(Claim::default(), stamp.clone()),
     };
     Bead::new(core, fields)
@@ -107,7 +106,7 @@ fn dep_strategy() -> impl Strategy<Value = (DepKey, Dot, Stamp)> {
             from != to
         })
         .prop_map(|(from, to, kind, dot, stamp)| {
-            let key = DepKey::new(bead_id(&from), bead_id(&to), kind)
+            let key = DepKey::new_local(&NamespaceId::core(), bead_id(&from), bead_id(&to), kind)
                 .unwrap_or_else(|e| panic!("dep key invalid: {}", e));
             (key, dot, stamp)
         });
@@ -123,8 +122,9 @@ fn dep_strategy() -> impl Strategy<Value = (DepKey, Dot, Stamp)> {
             |(child, parent, _, _)| child != parent,
         )
         .prop_map(|(child, parent, dot, stamp)| {
-            let edge = ParentEdge::new(bead_id(&child), bead_id(&parent))
-                .unwrap_or_else(|e| panic!("parent edge invalid: {}", e));
+            let edge =
+                ParentEdge::new_local(&NamespaceId::core(), bead_id(&child), bead_id(&parent))
+                    .unwrap_or_else(|e| panic!("parent edge invalid: {}", e));
             (edge.to_dep_key(), dot, stamp)
         });
 

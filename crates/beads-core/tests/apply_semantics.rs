@@ -5,10 +5,10 @@ mod support;
 use beads_core::Label;
 use beads_core::NoteAppendV1;
 use beads_core::{
-    ActorId, CanonicalState, DepKey, DepKind, EventBody, EventKindV1, HlcMax, Limits, ReplicaId,
-    Stamp, TxnDeltaV1, TxnOpV1, ValidatedEventBody, WireBeadPatch, WireDepAddV1, WireDepRemoveV1,
-    WireDotV1, WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireStamp, WriteStamp, apply_event,
-    sha256_bytes,
+    ActorId, BeadId, BeadRef, CanonicalState, DepKey, DepKind, EventBody, EventKindV1, HlcMax,
+    Limits, NamespaceId, ReplicaId, Stamp, TxnDeltaV1, TxnOpV1, ValidatedEventBody, WireBeadPatch,
+    WireDepAddV1, WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1, WireLabelRemoveV1,
+    WireStamp, WriteStamp, apply_event, sha256_bytes,
 };
 use std::collections::BTreeMap;
 use support::apply_harness::{
@@ -23,6 +23,10 @@ use uuid::Uuid;
 fn validated(body: EventBody) -> ValidatedEventBody {
     body.into_validated(&Limits::default())
         .expect("valid event fixture")
+}
+
+fn core_ref(id: &BeadId) -> BeadRef {
+    BeadRef::new(NamespaceId::core(), id.clone())
 }
 
 fn update_title_event(
@@ -261,7 +265,13 @@ fn orphan_dep_ops_become_visible_after_create() {
     let mut delta = TxnDeltaV1::new();
     delta
         .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-            key: DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap(),
+            key: DepKey::new_local(
+                &NamespaceId::core(),
+                from.clone(),
+                to.clone(),
+                DepKind::Blocks,
+            )
+            .unwrap(),
             dot: WireDotV1 {
                 replica: replica.clone(),
                 counter: 1,
@@ -270,7 +280,13 @@ fn orphan_dep_ops_become_visible_after_create() {
         .expect("unique dep add");
     delta
         .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-            key: DepKey::new(from.clone(), to_removed.clone(), DepKind::Related).unwrap(),
+            key: DepKey::new_local(
+                &NamespaceId::core(),
+                from.clone(),
+                to_removed.clone(),
+                DepKind::Related,
+            )
+            .unwrap(),
             ctx: WireDvvV1 {
                 max: BTreeMap::from([(remove_replica.clone(), 5)]),
                 dots: Vec::new(),
@@ -288,7 +304,13 @@ fn orphan_dep_ops_become_visible_after_create() {
     apply_event(&mut state, &bead_create_event(42)).expect("apply to");
     apply_event(&mut state, &bead_create_event(43)).expect("apply to removed");
 
-    let expected = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).expect("dep key");
+    let expected = DepKey::new_local(
+        &NamespaceId::core(),
+        from.clone(),
+        to.clone(),
+        DepKind::Blocks,
+    )
+    .expect("dep key");
     assert_eq!(state.deps_from(&from), vec![expected.clone()]);
     assert!(state.deps_to(&to).contains(&expected));
     assert!(state.deps_to(&to_removed).is_empty());
@@ -362,8 +384,20 @@ fn dep_dot_collision_is_deterministic() {
     apply_event(&mut state_b, &validated(sample_event_body(2))).expect("apply base to");
     apply_event(&mut state_b, &validated(sample_event_body(3))).expect("apply base to");
 
-    let key_low = DepKey::new(from.clone(), to_low.clone(), DepKind::Blocks).expect("dep key");
-    let key_high = DepKey::new(from.clone(), to_high.clone(), DepKind::Related).expect("dep key");
+    let key_low = DepKey::new_local(
+        &NamespaceId::core(),
+        from.clone(),
+        to_low.clone(),
+        DepKind::Blocks,
+    )
+    .expect("dep key");
+    let key_high = DepKey::new_local(
+        &NamespaceId::core(),
+        from.clone(),
+        to_high.clone(),
+        DepKind::Related,
+    )
+    .expect("dep key");
     let dot = WireDotV1 {
         replica: ReplicaId::new(Uuid::from_bytes([9u8; 16])),
         counter: 1,
@@ -372,7 +406,13 @@ fn dep_dot_collision_is_deterministic() {
     let mut delta_low = TxnDeltaV1::new();
     delta_low
         .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-            key: DepKey::new(from.clone(), to_low.clone(), DepKind::Blocks).unwrap(),
+            key: DepKey::new_local(
+                &NamespaceId::core(),
+                from.clone(),
+                to_low.clone(),
+                DepKind::Blocks,
+            )
+            .unwrap(),
             dot,
         }))
         .expect("unique dep add");
@@ -381,7 +421,13 @@ fn dep_dot_collision_is_deterministic() {
     let mut delta_high = TxnDeltaV1::new();
     delta_high
         .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-            key: DepKey::new(from.clone(), to_high.clone(), DepKind::Related).unwrap(),
+            key: DepKey::new_local(
+                &NamespaceId::core(),
+                from.clone(),
+                to_high.clone(),
+                DepKind::Related,
+            )
+            .unwrap(),
             dot,
         }))
         .expect("unique dep add");
@@ -413,7 +459,8 @@ fn dep_delete_then_readd_restores_indexes() {
     let from = bead_id(1);
     let to = bead_id(2);
     let kind = DepKind::Blocks;
-    let key = DepKey::new(from.clone(), to.clone(), kind).expect("valid dep key");
+    let key = DepKey::new_local(&NamespaceId::core(), from.clone(), to.clone(), kind)
+        .expect("valid dep key");
 
     apply_event(&mut state, &validated(sample_event_body(1))).expect("apply base 1");
     apply_event(&mut state, &validated(sample_event_body(2))).expect("apply base 2");
@@ -423,7 +470,7 @@ fn dep_delete_then_readd_restores_indexes() {
     let mut add_delta = TxnDeltaV1::new();
     add_delta
         .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-            key: DepKey::new(from.clone(), to.clone(), kind).unwrap(),
+            key: DepKey::new_local(&NamespaceId::core(), from.clone(), to.clone(), kind).unwrap(),
             dot: WireDotV1 {
                 replica,
                 counter: 1,
@@ -438,22 +485,22 @@ fn dep_delete_then_readd_restores_indexes() {
     assert!(
         state
             .dep_indexes()
-            .out_edges(&from)
+            .out_edges(&core_ref(&from))
             .iter()
-            .any(|(t, k)| t == &to && *k == kind)
+            .any(|(t, k)| t == &core_ref(&to) && *k == kind)
     );
     assert!(
         state
             .dep_indexes()
-            .in_edges(&to)
+            .in_edges(&core_ref(&to))
             .iter()
-            .any(|(f, k)| f == &from && *k == kind)
+            .any(|(f, k)| f == &core_ref(&from) && *k == kind)
     );
 
     let mut remove_delta = TxnDeltaV1::new();
     remove_delta
         .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-            key: DepKey::new(from.clone(), to.clone(), kind).unwrap(),
+            key: DepKey::new_local(&NamespaceId::core(), from.clone(), to.clone(), kind).unwrap(),
             ctx: WireDvvV1 {
                 max: BTreeMap::from([(replica, 1)]),
                 dots: Vec::new(),
@@ -465,13 +512,13 @@ fn dep_delete_then_readd_restores_indexes() {
 
     assert!(state.deps_from(&from).is_empty());
     assert!(state.deps_to(&to).is_empty());
-    assert!(state.dep_indexes().out_edges(&from).is_empty());
-    assert!(state.dep_indexes().in_edges(&to).is_empty());
+    assert!(state.dep_indexes().out_edges(&core_ref(&from)).is_empty());
+    assert!(state.dep_indexes().in_edges(&core_ref(&to)).is_empty());
 
     let mut readd_delta = TxnDeltaV1::new();
     readd_delta
         .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-            key: DepKey::new(from.clone(), to.clone(), kind).unwrap(),
+            key: DepKey::new_local(&NamespaceId::core(), from.clone(), to.clone(), kind).unwrap(),
             dot: WireDotV1 {
                 replica,
                 counter: 2,
@@ -483,20 +530,20 @@ fn dep_delete_then_readd_restores_indexes() {
 
     assert_eq!(state.deps_from(&from), vec![key.clone()]);
     assert_eq!(state.deps_to(&to), vec![key.clone()]);
-    assert_eq!(state.dep_indexes().out_edges(&from).len(), 1);
-    assert_eq!(state.dep_indexes().in_edges(&to).len(), 1);
+    assert_eq!(state.dep_indexes().out_edges(&core_ref(&from)).len(), 1);
+    assert_eq!(state.dep_indexes().in_edges(&core_ref(&to)).len(), 1);
     assert!(
         state
             .dep_indexes()
-            .out_edges(&from)
+            .out_edges(&core_ref(&from))
             .iter()
-            .any(|(t, k)| t == &to && *k == kind)
+            .any(|(t, k)| t == &core_ref(&to) && *k == kind)
     );
     assert!(
         state
             .dep_indexes()
-            .in_edges(&to)
+            .in_edges(&core_ref(&to))
             .iter()
-            .any(|(f, k)| f == &from && *k == kind)
+            .any(|(f, k)| f == &core_ref(&from) && *k == kind)
     );
 }
