@@ -14,8 +14,8 @@ use super::ops::{MapLiveError, OpError};
 use super::query::{Filters, QueryResult};
 use super::store::runtime::StoreRuntime;
 use crate::core::{
-    BeadId, BeadProjection, BeadRef, BeadView, CanonicalState, DepKey, DepKind, IssueStatus,
-    NamespaceId, WallClock,
+    BeadId, BeadProjection, BeadRef, BeadView, CanonicalState, DepKind, IssueStatus,
+    NamespaceId, NamespacePolicy, StoreState, WallClock,
 };
 use crate::git_lane::GitLaneState;
 use crate::remote::RemoteUrl;
@@ -32,6 +32,7 @@ struct ReadCtx<'a> {
     remote: RemoteUrl,
     read: ReadScope,
     store: &'a StoreRuntime,
+    store_state: &'a StoreState,
     state: &'a CanonicalState,
     repo_state: Option<&'a GitLaneState>,
 }
@@ -44,6 +45,306 @@ struct StatusParts {
     last_sync_wall_ms: Option<u64>,
     consecutive_failures: u32,
     remote_url: RemoteUrl,
+}
+
+fn issue_summary_for_ref(store_state: &StoreState, bead_ref: &BeadRef) -> Option<IssueSummary> {
+    let state = store_state.get(bead_ref.namespace())?;
+    let view = state.bead_view(bead_ref.id())?;
+    Some(IssueSummary::from_view(bead_ref.namespace(), &view))
+}
+
+fn require_live_store_ref(
+    store_state: &StoreState,
+    namespace: &NamespaceId,
+    id: &BeadId,
+) -> Result<(), OpError> {
+    let Some(state) = store_state.get(namespace) else {
+        return Err(OpError::NotFound(id.clone()));
+    };
+    state.require_live(id).map_live_err(id)?;
+    Ok(())
+}
+
+fn show_details_for_store(
+    read_namespace: &NamespaceId,
+    id: &BeadId,
+    state: &CanonicalState,
+    store_state: &StoreState,
+) -> Result<ShowDetails, OpError> {
+    require_live_store_ref(store_state, read_namespace, id)?;
+
+    let view = state.bead_view(id).expect("live bead should have view");
+    let mut issue = Issue::from_view(read_namespace, &view);
+    let (incoming, outgoing) = deps_for_store(read_namespace, id, store_state)?;
+
+    issue.deps_incoming = incoming.clone();
+    issue.deps_outgoing = outgoing.clone();
+
+    let mut related_refs = std::collections::BTreeSet::new();
+    for edge in &incoming {
+        if let (Ok(namespace), Ok(id)) = (
+            NamespaceId::parse(&edge.from_namespace),
+            BeadId::parse(&edge.from),
+        ) {
+            related_refs.insert(BeadRef::new(namespace, id));
+        }
+    }
+    for edge in &outgoing {
+        if let (Ok(namespace), Ok(id)) = (
+            NamespaceId::parse(&edge.to_namespace),
+            BeadId::parse(&edge.to),
+        ) {
+            related_refs.insert(BeadRef::new(namespace, id));
+        }
+    }
+
+    let summaries = related_refs
+        .into_iter()
+        .filter_map(|bead_ref| issue_summary_for_ref(store_state, &bead_ref))
+        .collect();
+
+    Ok(ShowDetails {
+        issue,
+        incoming,
+        outgoing,
+        summaries,
+    })
+}
+
+fn deps_for_store(
+    read_namespace: &NamespaceId,
+    id: &BeadId,
+    store_state: &StoreState,
+) -> Result<(Vec<DepEdge>, Vec<DepEdge>), OpError> {
+    require_live_store_ref(store_state, read_namespace, id)?;
+    let root_ref = BeadRef::new(read_namespace.clone(), id.clone());
+
+    let incoming = store_state
+        .deps_to(&root_ref)
+        .into_iter()
+        .map(|key| DepEdge::from(&key))
+        .collect();
+    let outgoing = store_state
+        .deps_from(&root_ref)
+        .into_iter()
+        .map(|key| DepEdge::from(&key))
+        .collect();
+    Ok((incoming, outgoing))
+}
+
+fn dep_tree_for_store(
+    read_namespace: &NamespaceId,
+    id: &BeadId,
+    store_state: &StoreState,
+) -> Result<Vec<DepEdge>, OpError> {
+    require_live_store_ref(store_state, read_namespace, id)?;
+    let root_ref = BeadRef::new(read_namespace.clone(), id.clone());
+
+    let mut edges = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut queue = std::collections::VecDeque::new();
+    queue.push_back(root_ref);
+
+    while let Some(current) = queue.pop_front() {
+        if !visited.insert(current.clone()) {
+            continue;
+        }
+
+        for key in store_state.deps_from(&current) {
+            edges.push(DepEdge::from(&key));
+            if !visited.contains(key.to_ref()) {
+                queue.push_back(key.to_ref().clone());
+            }
+        }
+    }
+
+    Ok(edges)
+}
+
+fn format_bead_ref_for_namespace(read_namespace: &NamespaceId, bead_ref: &BeadRef) -> String {
+    if bead_ref.namespace() == read_namespace {
+        bead_ref.id().as_str().to_string()
+    } else {
+        bead_ref.to_string()
+    }
+}
+
+fn namespace_ready_eligible(
+    namespace: &NamespaceId,
+    policies: &std::collections::BTreeMap<NamespaceId, NamespacePolicy>,
+) -> bool {
+    policies
+        .get(namespace)
+        .map(|policy| policy.ready_eligible)
+        .unwrap_or(false)
+}
+
+fn validation_warnings_for_namespace(
+    read_namespace: &NamespaceId,
+    state: &CanonicalState,
+    store_state: &StoreState,
+) -> Vec<String> {
+    let mut errors = Vec::new();
+
+    for key in state.dep_store().values() {
+        if key.from_ref().namespace() != read_namespace {
+            errors.push(format!(
+                "invalid dep owner: edge {} -> {} is stored in namespace {}",
+                key.from_ref(),
+                key.to_ref(),
+                read_namespace
+            ));
+        }
+        if store_state.resolve_ref(key.from_ref()).is_none() {
+            errors.push(format!(
+                "orphan dep: {} depends on {} but {} doesn't exist",
+                key.from_ref(),
+                key.to_ref(),
+                key.from_ref()
+            ));
+        }
+        if store_state.resolve_ref(key.to_ref()).is_none() {
+            errors.push(format!(
+                "orphan dep: {} depends on {} but {} doesn't exist",
+                key.from_ref(),
+                key.to_ref(),
+                key.to_ref()
+            ));
+        }
+    }
+
+    for cycle in store_state.dependency_cycles() {
+        if cycle
+            .iter()
+            .any(|bead_ref| bead_ref.namespace() == read_namespace)
+            && let Some(first) = cycle.first()
+        {
+            errors.push(format!("dependency cycle involving {first}"));
+        }
+    }
+
+    errors
+}
+
+fn compute_blocked_by_store(
+    store_state: &StoreState,
+) -> std::collections::BTreeMap<BeadRef, Vec<BeadRef>> {
+    let mut blocked: std::collections::BTreeMap<BeadRef, Vec<BeadRef>> =
+        std::collections::BTreeMap::new();
+
+    for (_, state) in store_state.namespaces() {
+        for key in state.dep_store().values() {
+            if key.kind() != DepKind::Blocks {
+                continue;
+            }
+            let Some(to_bead) = store_state.resolve_ref(key.to_ref()) else {
+                continue;
+            };
+            if to_bead.fields.status.value.is_terminal() {
+                continue;
+            }
+            blocked
+                .entry(key.from_ref().clone())
+                .or_default()
+                .push(key.to_ref().clone());
+        }
+    }
+
+    blocked
+}
+
+fn ready_for_namespace(
+    namespace: &NamespaceId,
+    state: &CanonicalState,
+    store_state: &StoreState,
+    policies: &std::collections::BTreeMap<NamespaceId, NamespacePolicy>,
+    limit: Option<usize>,
+) -> ReadyResult {
+    if !namespace_ready_eligible(namespace, policies) {
+        return ReadyResult {
+            issues: Vec::new(),
+            blocked_count: 0,
+            closed_count: 0,
+        };
+    }
+
+    let blocked_by = compute_blocked_by_store(store_state);
+    let mut blocked_count = 0usize;
+    let mut closed_count = 0usize;
+
+    let mut views: Vec<IssueSummary> = Vec::new();
+    for (id, bead) in state.iter_live() {
+        if bead.fields.status.value.is_terminal() {
+            closed_count += 1;
+            continue;
+        }
+
+        let bead_ref = BeadRef::new(namespace.clone(), id.clone());
+        if blocked_by.contains_key(&bead_ref) {
+            blocked_count += 1;
+            continue;
+        }
+        if let Some(view) = state.bead_view(id) {
+            views.push(IssueSummary::from_view(namespace, &view));
+        }
+    }
+
+    sort_ready_issues(&mut views);
+
+    if let Some(limit) = limit {
+        views.truncate(limit);
+    }
+
+    ReadyResult {
+        issues: views,
+        blocked_count,
+        closed_count,
+    }
+}
+
+fn blocked_for_namespace(
+    namespace: &NamespaceId,
+    state: &CanonicalState,
+    store_state: &StoreState,
+) -> Vec<BlockedIssue> {
+    let blocked_by = compute_blocked_by_store(store_state);
+    let mut out: Vec<BlockedIssue> = Vec::new();
+
+    for (from_ref, deps) in blocked_by {
+        if from_ref.namespace() != namespace {
+            continue;
+        }
+
+        let view = match state.bead_view(from_ref.id()) {
+            Some(view) => view,
+            None => continue,
+        };
+        if view.bead.fields.status.value.is_terminal() {
+            continue;
+        }
+
+        let mut blocked_by_ids: Vec<String> = deps
+            .into_iter()
+            .map(|bead_ref| format_bead_ref_for_namespace(namespace, &bead_ref))
+            .collect();
+        blocked_by_ids.sort();
+        blocked_by_ids.dedup();
+
+        out.push(BlockedIssue {
+            issue: IssueSummary::from_view(namespace, &view),
+            blocked_by_count: blocked_by_ids.len(),
+            blocked_by: blocked_by_ids,
+        });
+    }
+
+    out.sort_by(|a, b| {
+        b.issue
+            .priority
+            .cmp(&a.issue.priority)
+            .then_with(|| b.issue.updated_at.cmp(&a.issue.updated_at))
+    });
+
+    out
 }
 
 impl Daemon {
@@ -70,6 +371,7 @@ impl Daemon {
             remote,
             read,
             store,
+            store_state: &store.state,
             state,
             repo_state,
         })
@@ -97,6 +399,7 @@ impl Daemon {
             remote,
             read,
             store,
+            store_state: &store.state,
             state,
             repo_state,
         })
@@ -185,46 +488,8 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
-            ctx.state.require_live(id).map_live_err(id)?;
-
-            let view = ctx.state.bead_view(id).expect("live bead should have view");
-            let mut issue = Issue::from_view(ctx.read.namespace(), &view);
-
-            let mut incoming = Vec::new();
-            let mut outgoing = Vec::new();
-            let mut related_ids = std::collections::BTreeSet::new();
-            let root_ref = BeadRef::new(ctx.read.namespace().clone(), id.clone());
-
-            for (to, kind) in ctx.state.dep_indexes().out_edges(&root_ref) {
-                if let Ok(key) = DepKey::new(root_ref.clone(), to.clone(), *kind) {
-                    outgoing.push(DepEdge::from(&key));
-                    related_ids.insert(to.id().clone());
-                }
-            }
-
-            for (from, kind) in ctx.state.dep_indexes().in_edges(&root_ref) {
-                if let Ok(key) = DepKey::new(from.clone(), root_ref.clone(), *kind) {
-                    incoming.push(DepEdge::from(&key));
-                    related_ids.insert(from.id().clone());
-                }
-            }
-
-            issue.deps_incoming = incoming.clone();
-            issue.deps_outgoing = outgoing.clone();
-
-            let mut summaries = Vec::with_capacity(related_ids.len());
-            for related_id in related_ids {
-                if let Some(dep_view) = ctx.state.bead_view(&related_id) {
-                    summaries.push(IssueSummary::from_view(ctx.read.namespace(), &dep_view));
-                }
-            }
-
-            let details = ShowDetails {
-                issue,
-                incoming,
-                outgoing,
-                summaries,
-            };
+            let details =
+                show_details_for_store(ctx.read.namespace(), id, ctx.state, ctx.store_state)?;
             Ok(ResponsePayload::query(QueryResult::ShowDetails(details)))
         })
     }
@@ -239,15 +504,19 @@ impl Daemon {
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
             let state = ctx.state;
+            let namespace = ctx.read.namespace();
 
             // Build children set if parent filter is specified.
             // Parent deps: from=child, to=parent, kind=Parent.
             let children_of_parent: Option<std::collections::HashSet<BeadId>> =
                 filters.parent.as_ref().map(|parent_id| {
-                    state
-                        .parent_edges_to(parent_id)
+                    let parent_ref = BeadRef::new(namespace.clone(), parent_id.clone());
+                    ctx.store_state
+                        .deps_to(&parent_ref)
                         .into_iter()
-                        .map(|edge| edge.child().clone())
+                        .filter(|key| key.kind() == DepKind::Parent)
+                        .filter(|key| key.from_ref().namespace() == namespace)
+                        .map(|key| key.from_ref().id().clone())
                         .collect()
                 });
 
@@ -375,53 +644,13 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
-            let state = ctx.state;
-
-            // Collect IDs that are blocked by *blocking* deps (kind=blocks).
-            let mut blocked: std::collections::HashSet<&BeadId> = std::collections::HashSet::new();
-            for key in state.dep_store().values() {
-                // Only count `blocks` edges where the target is not closed.
-                if key.kind() == crate::core::DepKind::Blocks
-                    && let Some(to_bead) = state.get_live(key.to())
-                    && !to_bead.fields.status.value.is_terminal()
-                {
-                    blocked.insert(key.from());
-                }
-            }
-
-            // Count blocked and closed issues for summary.
-            let mut blocked_count = 0usize;
-            let mut closed_count = 0usize;
-
-            let mut views: Vec<IssueSummary> = Vec::new();
-            for (id, bead) in state.iter_live() {
-                if bead.fields.status.value.is_terminal() {
-                    closed_count += 1;
-                    continue;
-                }
-                if blocked.contains(id) {
-                    blocked_count += 1;
-                    continue;
-                }
-                if let Some(view) = state.bead_view(id) {
-                    views.push(IssueSummary::from_view(ctx.read.namespace(), &view));
-                }
-            }
-
-            // Sort by priority (low to high), then created_at (oldest first).
-            sort_ready_issues(&mut views);
-
-            // Apply limit
-            if let Some(limit) = limit {
-                views.truncate(limit);
-            }
-
-            let result = ReadyResult {
-                issues: views,
-                blocked_count,
-                closed_count,
-            };
-
+            let result = ready_for_namespace(
+                ctx.read.namespace(),
+                ctx.state,
+                ctx.store_state,
+                &ctx.store.policies,
+                limit,
+            );
             Ok(ResponsePayload::query(QueryResult::Ready(result)))
         })
     }
@@ -435,31 +664,7 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
-            let state = ctx.state;
-
-            // Check if bead exists
-            state.require_live(id).map_live_err(id)?;
-
-            // Collect all edges in the transitive closure
-            let mut edges = Vec::new();
-            let mut visited = std::collections::HashSet::new();
-            let mut queue = std::collections::VecDeque::new();
-            queue.push_back(BeadRef::new(ctx.read.namespace().clone(), id.clone()));
-
-            while let Some(current) = queue.pop_front() {
-                if !visited.insert(current.clone()) {
-                    continue;
-                }
-
-                for (to, kind) in state.dep_indexes().out_edges(&current) {
-                    if let Ok(key) = DepKey::new(current.clone(), to.clone(), *kind) {
-                        edges.push(DepEdge::from(&key));
-                        if !visited.contains(key.to_ref()) {
-                            queue.push_back(key.to_ref().clone());
-                        }
-                    }
-                }
-            }
+            let edges = dep_tree_for_store(ctx.read.namespace(), id, ctx.store_state)?;
 
             Ok(ResponsePayload::query(QueryResult::DepTree {
                 root: BeadRef::new(ctx.read.namespace().clone(), id.clone()),
@@ -477,26 +682,7 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
-            let state = ctx.state;
-
-            // Check if bead exists
-            state.require_live(id).map_live_err(id)?;
-
-            let mut incoming = Vec::new();
-            let mut outgoing = Vec::new();
-            let root_ref = BeadRef::new(ctx.read.namespace().clone(), id.clone());
-
-            for (to, kind) in state.dep_indexes().out_edges(&root_ref) {
-                if let Ok(key) = DepKey::new(root_ref.clone(), to.clone(), *kind) {
-                    outgoing.push(DepEdge::from(&key));
-                }
-            }
-
-            for (from, kind) in state.dep_indexes().in_edges(&root_ref) {
-                if let Ok(key) = DepKey::new(from.clone(), root_ref.clone(), *kind) {
-                    incoming.push(DepEdge::from(&key));
-                }
-            }
+            let (incoming, outgoing) = deps_for_store(ctx.read.namespace(), id, ctx.store_state)?;
 
             Ok(ResponsePayload::query(QueryResult::Deps {
                 incoming,
@@ -538,13 +724,18 @@ impl Daemon {
                 remote,
                 read,
                 store,
+                store_state,
                 state,
                 repo_state,
             } = ctx;
             let repo_state = repo_state.expect("repo state requested");
 
-            let blocked_by = compute_blocked_by(state);
-            let blocked_set: std::collections::HashSet<&BeadId> = blocked_by.keys().collect();
+            let blocked_by = compute_blocked_by_store(store_state);
+            let blocked_set: std::collections::HashSet<BeadId> = blocked_by
+                .keys()
+                .filter(|bead_ref| bead_ref.namespace() == read.namespace())
+                .map(|bead_ref| bead_ref.id().clone())
+                .collect();
 
             let mut open_issues = 0usize;
             let mut in_progress_issues = 0usize;
@@ -676,38 +867,7 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
-            let state = ctx.state;
-            let blocked_by = compute_blocked_by(state);
-            let mut out: Vec<BlockedIssue> = Vec::new();
-
-            for (from, deps) in blocked_by {
-                let view = match state.bead_view(&from) {
-                    Some(view) => view,
-                    None => continue,
-                };
-                if view.bead.fields.status.value.is_terminal() {
-                    continue;
-                }
-
-                let mut blocked_by_ids: Vec<String> =
-                    deps.into_iter().map(|id| id.as_str().to_string()).collect();
-                blocked_by_ids.sort();
-                blocked_by_ids.dedup();
-
-                out.push(BlockedIssue {
-                    issue: IssueSummary::from_view(ctx.read.namespace(), &view),
-                    blocked_by_count: blocked_by_ids.len(),
-                    blocked_by: blocked_by_ids,
-                });
-            }
-
-            // Sort by priority (high to low), then updated_at (newest first).
-            out.sort_by(|a, b| {
-                b.issue
-                    .priority
-                    .cmp(&a.issue.priority)
-                    .then_with(|| b.issue.updated_at.cmp(&a.issue.updated_at))
-            });
+            let out = blocked_for_namespace(ctx.read.namespace(), ctx.state, ctx.store_state);
 
             Ok(ResponsePayload::query(QueryResult::Blocked(out)))
         })
@@ -931,53 +1091,8 @@ impl Daemon {
         git_tx: &Sender<GitOp>,
     ) -> Response {
         self.with_read_ctx_response(repo, read, git_tx, false, |ctx| {
-            let state = ctx.state;
-
-            // Run validation checks
-            let mut errors = Vec::new();
-
-            // Check for orphan dependencies
-            for key in state.dep_store().values() {
-                if state.get_live(key.from()).is_none() {
-                    errors.push(format!(
-                        "orphan dep: {} depends on {} but {} doesn't exist",
-                        key.from().as_str(),
-                        key.to().as_str(),
-                        key.from().as_str()
-                    ));
-                }
-                if state.get_live(key.to()).is_none() {
-                    errors.push(format!(
-                        "orphan dep: {} depends on {} but {} doesn't exist",
-                        key.from().as_str(),
-                        key.to().as_str(),
-                        key.to().as_str()
-                    ));
-                }
-            }
-
-            // Check for dependency cycles
-            // (simplified - just report if found, don't enumerate all)
-            for (id, _) in state.iter_live() {
-                let mut visited = std::collections::HashSet::new();
-                let mut queue = std::collections::VecDeque::new();
-                let root_ref = BeadRef::new(ctx.read.namespace().clone(), id.clone());
-                queue.push_back(root_ref.clone());
-
-                while let Some(current) = queue.pop_front() {
-                    if current == root_ref && !visited.is_empty() {
-                        errors.push(format!("dependency cycle involving {}", id.as_str()));
-                        break;
-                    }
-                    if !visited.insert(current.clone()) {
-                        continue;
-                    }
-                    for (to, _) in state.dep_indexes().out_edges(&current) {
-                        queue.push_back(to.clone());
-                    }
-                }
-            }
-
+            let errors =
+                validation_warnings_for_namespace(ctx.read.namespace(), ctx.state, ctx.store_state);
             Ok(ResponsePayload::query(QueryResult::Validation {
                 warnings: errors,
             }))
@@ -994,7 +1109,19 @@ impl Daemon {
         // `dep_cycles` is diagnostic/structural and should remain queryable even
         // when min-seen watermarks are not yet satisfied.
         self.with_read_ctx_response_without_gate(repo, read, git_tx, false, |ctx| {
-            let cycles = dep_cycles_from_state(ctx.state);
+            let cycles = DepCycles {
+                cycles: ctx
+                    .store_state
+                    .dependency_cycles()
+                    .into_iter()
+                    .map(|cycle| {
+                        cycle
+                            .into_iter()
+                            .map(|bead_ref| bead_ref.to_string())
+                            .collect()
+                    })
+                    .collect(),
+            };
             Ok(ResponsePayload::query(QueryResult::DepCycles(cycles)))
         })
     }
@@ -1215,7 +1342,8 @@ mod tests {
         );
 
         let blocks =
-            DepKey::new(blocked_id.clone(), blocker_id.clone(), DepKind::Blocks).expect("dep key");
+            DepKey::new_local(&NamespaceId::core(), blocked_id.clone(), blocker_id.clone(), DepKind::Blocks)
+                .expect("dep key");
         let blocks = state.check_dep_add_key(blocks).expect("checked dep");
         state.apply_dep_add(
             blocks,
@@ -1226,7 +1354,8 @@ mod tests {
             stamp.clone(),
         );
         let closed_blocks =
-            DepKey::new(blocked_id.clone(), closed_blocker_id, DepKind::Blocks).expect("dep key");
+            DepKey::new_local(&NamespaceId::core(), blocked_id.clone(), closed_blocker_id, DepKind::Blocks)
+                .expect("dep key");
         let closed_blocks = state.check_dep_add_key(closed_blocks).expect("checked dep");
         state.apply_dep_add(
             closed_blocks,
@@ -1257,13 +1386,15 @@ mod tests {
         state.insert(make_bead(a, &stamp)).expect("insert bead a");
         state.insert(make_bead(b, &stamp)).expect("insert bead b");
 
-        let ab = DepKey::new(
+        let ab = DepKey::new_local(
+            &NamespaceId::core(),
             crate::core::BeadId::parse(a).unwrap(),
             crate::core::BeadId::parse(b).unwrap(),
             DepKind::Blocks,
         )
         .expect("dep key");
-        let ba = DepKey::new(
+        let ba = DepKey::new_local(
+            &NamespaceId::core(),
             crate::core::BeadId::parse(b).unwrap(),
             crate::core::BeadId::parse(a).unwrap(),
             DepKind::Blocks,

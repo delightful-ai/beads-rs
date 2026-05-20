@@ -1,5 +1,6 @@
 use super::*;
 
+#[allow(dead_code)]
 pub(super) fn compute_blocked_by(
     state: &CanonicalState,
 ) -> std::collections::BTreeMap<BeadId, Vec<BeadId>> {
@@ -29,6 +30,7 @@ pub(super) fn compute_blocked_by(
     blocked
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub(super) fn dep_cycles_from_state(state: &CanonicalState) -> DepCycles {
     let cycles = state
         .dependency_cycles()

@@ -3854,7 +3854,7 @@ mod tests {
         let mut dep_ab_delta = TxnDeltaV1::new();
         dep_ab_delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                key: DepKey::new(bead_a.clone(), bead_b.clone(), DepKind::Blocks)
+                key: DepKey::new_local(&namespace, bead_a.clone(), bead_b.clone(), DepKind::Blocks)
                     .expect("dep key a->b"),
                 dot: WireDotV1 {
                     replica: origin,
@@ -3886,7 +3886,7 @@ mod tests {
         let mut dep_ba_delta = TxnDeltaV1::new();
         dep_ba_delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                key: DepKey::new(bead_b.clone(), bead_a.clone(), DepKind::Blocks)
+                key: DepKey::new_local(&namespace, bead_b.clone(), bead_a.clone(), DepKind::Blocks)
                     .expect("dep key b->a"),
                 dot: WireDotV1 {
                     replica: origin,
@@ -3949,10 +3949,12 @@ mod tests {
             .get(&namespace)
             .expect("namespace state");
         assert!(state.dep_contains(
-            &DepKey::new(bead_a.clone(), bead_b.clone(), DepKind::Blocks).expect("dep key a->b")
+            &DepKey::new_local(&namespace, bead_a.clone(), bead_b.clone(), DepKind::Blocks)
+                .expect("dep key a->b")
         ));
         assert!(!state.dep_contains(
-            &DepKey::new(bead_b.clone(), bead_a.clone(), DepKind::Blocks).expect("dep key b->a")
+            &DepKey::new_local(&namespace, bead_b.clone(), bead_a.clone(), DepKind::Blocks)
+                .expect("dep key b->a")
         ));
     }
 

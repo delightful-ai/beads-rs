@@ -3010,7 +3010,9 @@ mod tests {
     #[test]
     fn add_dep_rejects_parent_kind() {
         let err = ParsedMutationRequest::parse_add_dep(DepPayload {
+            from_namespace: None,
             from: BeadId::parse("bd-child").unwrap(),
+            to_namespace: None,
             to: BeadId::parse("bd-parent").unwrap(),
             kind: DepKind::Parent,
         })
@@ -3038,7 +3040,9 @@ mod tests {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        let key = DepKey::new(bead_a.clone(), bead_b.clone(), DepKind::Blocks).unwrap();
+        let key =
+            DepKey::new_local(&NamespaceId::core(), bead_a.clone(), bead_b.clone(), DepKind::Blocks)
+                .unwrap();
         let key = state.check_dep_add_key(key).expect("acyclic key");
         state.apply_dep_add(key, dot, stamp.clone());
 
@@ -3051,7 +3055,9 @@ mod tests {
         let stamped = make_stamped_context(ctx, stamp.clone());
         let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([2u8; 16])), 0.into());
         let req = ParsedMutationRequest::parse_add_dep(DepPayload {
+            from_namespace: None,
             from: bead_b.clone(),
+            to_namespace: None,
             to: bead_a.clone(),
             kind: DepKind::Blocks,
         })
@@ -3092,7 +3098,9 @@ mod tests {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        let key = DepKey::new(bead_a.clone(), bead_b.clone(), DepKind::Related).unwrap();
+        let key =
+            DepKey::new_local(&NamespaceId::core(), bead_a.clone(), bead_b.clone(), DepKind::Related)
+                .unwrap();
         let key = state.check_dep_add_key(key).expect("free key");
         state.apply_dep_add(key, dot, stamp.clone());
 
@@ -3105,7 +3113,9 @@ mod tests {
         let stamped = make_stamped_context(ctx, stamp.clone());
         let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([2u8; 16])), 0.into());
         let req = ParsedMutationRequest::parse_add_dep(DepPayload {
+            from_namespace: None,
             from: bead_b.clone(),
+            to_namespace: None,
             to: bead_a.clone(),
             kind: DepKind::Related,
         })
@@ -3151,7 +3161,7 @@ mod tests {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        let edge = ParentEdge::new(bead_a.clone(), bead_b.clone()).unwrap();
+        let edge = ParentEdge::new_local(&NamespaceId::core(), bead_a.clone(), bead_b.clone()).unwrap();
         let key = state
             .check_dep_add_key(edge.to_dep_key())
             .expect("parent key");
@@ -3167,7 +3177,7 @@ mod tests {
         let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([2u8; 16])), 0.into());
         let req = ParsedMutationRequest::SetParent {
             id: bead_b.clone(),
-            parent: Some(bead_a.clone()),
+            parent: Some(bead_a.as_str().to_string()),
         };
         let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
 
@@ -3202,7 +3212,8 @@ mod tests {
             state.insert(make_bead(id.as_str(), &actor)).unwrap();
         }
 
-        let edge = ParentEdge::new(child_id.clone(), parent_a.clone()).unwrap();
+        let edge =
+            ParentEdge::new_local(&NamespaceId::core(), child_id.clone(), parent_a.clone()).unwrap();
         let dot = Dot {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,
@@ -3223,7 +3234,7 @@ mod tests {
         let store = StoreIdentity::new(StoreId::new(Uuid::from_bytes([2u8; 16])), 0.into());
         let req = ParsedMutationRequest::SetParent {
             id: child_id.clone(),
-            parent: Some(parent_b.clone()),
+            parent: Some(parent_b.as_str().to_string()),
         };
         let mut dots = TestDotAllocator::new(ReplicaId::new(Uuid::from_bytes([3u8; 16])));
 
