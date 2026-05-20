@@ -4605,6 +4605,80 @@ mod tests {
     }
 
     #[test]
+    fn decode_rejects_parent_add_without_child_namespace() {
+        let body = sample_body();
+        let txn = txn(&body);
+        let bytes = encode_body_with_custom_delta_and_hlc(
+            &body,
+            |enc| {
+                enc.map(2).unwrap();
+                enc.str("parent_adds").unwrap();
+                enc.array(1).unwrap();
+                enc.map(4).unwrap();
+                enc.str("child").unwrap();
+                enc.str("bd-child").unwrap();
+                enc.str("parent_namespace").unwrap();
+                enc.str("core").unwrap();
+                enc.str("parent").unwrap();
+                enc.str("bd-parent").unwrap();
+                enc.str("dot").unwrap();
+                encode_wire_dot(
+                    enc,
+                    &WireDotV1 {
+                        replica: ReplicaId::new(Uuid::from_bytes([9u8; 16])),
+                        counter: 1,
+                    },
+                )
+                .unwrap();
+                enc.str("v").unwrap();
+                enc.u32(2).unwrap();
+            },
+            |enc| {
+                encode_hlc_max(enc, &txn.hlc_max).unwrap();
+            },
+        );
+        let err = decode_event_body(&bytes, &Limits::default()).unwrap_err();
+        assert!(matches!(err, DecodeError::MissingField("child_namespace")));
+    }
+
+    #[test]
+    fn decode_rejects_parent_remove_without_parent_namespace() {
+        let body = sample_body();
+        let txn = txn(&body);
+        let bytes = encode_body_with_custom_delta_and_hlc(
+            &body,
+            |enc| {
+                enc.map(2).unwrap();
+                enc.str("parent_removes").unwrap();
+                enc.array(1).unwrap();
+                enc.map(4).unwrap();
+                enc.str("child_namespace").unwrap();
+                enc.str("core").unwrap();
+                enc.str("child").unwrap();
+                enc.str("bd-child").unwrap();
+                enc.str("parent").unwrap();
+                enc.str("bd-parent").unwrap();
+                enc.str("ctx").unwrap();
+                encode_wire_dvv(
+                    enc,
+                    &WireDvvV1 {
+                        max: BTreeMap::new(),
+                        dots: Vec::new(),
+                    },
+                )
+                .unwrap();
+                enc.str("v").unwrap();
+                enc.u32(2).unwrap();
+            },
+            |enc| {
+                encode_hlc_max(enc, &txn.hlc_max).unwrap();
+            },
+        );
+        let err = decode_event_body(&bytes, &Limits::default()).unwrap_err();
+        assert!(matches!(err, DecodeError::MissingField("parent_namespace")));
+    }
+
+    #[test]
     fn decode_rejects_indefinite_length() {
         let limits = Limits::default();
         let bytes = [0xbf, 0xff];

@@ -54,6 +54,9 @@ pub(super) fn compute_epic_statuses(
     let mut children: std::collections::BTreeMap<BeadId, Vec<BeadId>> =
         std::collections::BTreeMap::new();
     for edge in state.parent_edges() {
+        if state.get_live(edge.child()).is_none() {
+            continue;
+        }
         children
             .entry(edge.parent().clone())
             .or_default()

@@ -15,11 +15,15 @@ use crate::fixtures::bd_runtime::{
     wait_for_daemon_pid as runtime_wait_for_daemon_pid,
     wait_for_store_id as runtime_wait_for_store_id,
 };
+#[cfg(feature = "slow-tests")]
+use crate::fixtures::daemon_runtime::shutdown_daemon;
 use crate::fixtures::git::repo_has_branch;
 #[cfg(feature = "slow-tests")]
 use crate::fixtures::wait;
 #[cfg(feature = "slow-tests")]
 use beads_api::UnlockAction;
+#[cfg(feature = "slow-tests")]
+use beads_core::{NamespaceId, NamespacePolicies, NamespacePolicy};
 use predicates::prelude::*;
 
 fn cli_issue_id_from_output(bytes: &[u8]) -> String {
@@ -3674,4 +3678,100 @@ fn test_crash_recovery_replays_wal() {
         remote_state.state.get_live(&id).is_some(),
         "expected recovered issue to sync to remote"
     );
+}
+
+#[cfg(feature = "slow-tests")]
+#[test]
+fn test_namespace_ref_update_and_parent_list_route_to_ref_namespace() {
+    let repo = BdRuntimeRepo::new_local_only();
+    repo.bd()
+        .args(["init", "--server", "-p", "ns", "--skip-hooks"])
+        .assert()
+        .success();
+    repo.bd()
+        .args(["create", "Core seed", "--type=task"])
+        .assert()
+        .success();
+
+    let store_dir = crate::fixtures::bd_runtime::store_dir_from_data_dir(repo.data_dir())
+        .expect("store dir after init");
+    let mut namespaces = std::collections::BTreeMap::new();
+    namespaces.insert(NamespaceId::core(), NamespacePolicy::core_default());
+    namespaces.insert(
+        NamespaceId::parse("sessions").expect("sessions namespace"),
+        NamespacePolicy::core_default(),
+    );
+    let policies = NamespacePolicies { namespaces };
+    let toml = toml::to_string(&policies).expect("serialize namespace policies");
+    fs::write(store_dir.join("namespaces.toml"), toml).expect("write namespaces.toml");
+    repo.bd()
+        .args(["admin", "reload-policies"])
+        .assert()
+        .success();
+    shutdown_daemon(repo.runtime_dir(), repo.data_dir());
+
+    let epic_out = repo
+        .bd()
+        .args([
+            "--namespace",
+            "sessions",
+            "create",
+            "Sessions epic",
+            "--type=epic",
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let epic_id = cli_issue_id_from_output(&epic_out);
+
+    let child_out = repo
+        .bd()
+        .args([
+            "--namespace",
+            "sessions",
+            "create",
+            "Session child",
+            "--type=task",
+            "--parent",
+            &epic_id,
+            "--json",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let child_id = cli_issue_id_from_output(&child_out);
+    let child_ref = format!("sessions/{child_id}");
+    let epic_ref = format!("sessions/{epic_id}");
+
+    repo.bd()
+        .args(["update", &child_ref, "--title", "Updated session child"])
+        .assert()
+        .success();
+
+    repo.bd()
+        .args(["list", "--parent", &epic_ref, "--tree"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Updated session child"));
+
+    let children_out = repo
+        .bd()
+        .args(["list", "--parent", &epic_ref, "--json", "--all"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let children: serde_json::Value = serde_json::from_slice(&children_out).unwrap();
+    let children = children.as_array().expect("list json is an array");
+    assert!(children.iter().any(|issue| {
+        issue["namespace"].as_str() == Some("sessions")
+            && issue["id"].as_str() == Some(child_id.as_str())
+            && issue["title"].as_str() == Some("Updated session child")
+    }));
 }

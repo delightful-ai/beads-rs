@@ -1,5 +1,5 @@
 use beads_api::QueryResult;
-use beads_core::BeadId;
+use beads_core::{BeadId, NamespaceId};
 use beads_surface::Filters;
 use beads_surface::ipc::{ListPayload, Request, ResponsePayload};
 use clap::Args;
@@ -9,7 +9,7 @@ use super::{CommandResult, print_ok};
 use crate::filters::{CommonFilterArgs, apply_common_filters};
 use crate::parsers::parse_sort;
 use crate::runtime::{CliRuntimeCtx, send};
-use crate::validation::{normalize_bead_id_for, validation_error};
+use crate::validation::{normalize_bead_ref_for, validation_error};
 
 #[derive(Args, Debug)]
 pub struct ListArgs {
@@ -67,11 +67,16 @@ pub fn handle_list(ctx: &CliRuntimeCtx, args: ListArgs) -> CommandResult<()> {
     } else {
         Some(args.query.join(" "))
     };
+    let default_namespace = ctx.active_namespace();
     let parent = args
         .parent
         .as_deref()
-        .map(|raw| normalize_bead_id_for("parent", raw))
+        .map(|raw| normalize_bead_ref_for("parent", raw, &default_namespace))
         .transpose()?;
+    let list_ctx = parent
+        .as_ref()
+        .map(|parent| ctx.with_namespace(parent.namespace().clone()))
+        .unwrap_or_else(|| ctx.clone());
 
     let mut filters = Filters::default();
     apply_common_filters(&args.common, &mut filters)?;
@@ -84,7 +89,7 @@ pub fn handle_list(ctx: &CliRuntimeCtx, args: ListArgs) -> CommandResult<()> {
 
     filters.limit = args.limit.filter(|limit| *limit > 0);
     filters.search = search;
-    filters.parent = parent;
+    filters.parent = parent.as_ref().map(|parent| parent.id().clone());
 
     if let Some(sort) = args.sort {
         let (field, ascending) =
@@ -93,19 +98,24 @@ pub fn handle_list(ctx: &CliRuntimeCtx, args: ListArgs) -> CommandResult<()> {
         filters.ascending = ascending;
     }
 
-    let tree_parent = filters.parent.clone();
+    let tree_parent = parent.clone();
     if !ctx.json && args.tree {
-        let Some(parent) = tree_parent.as_ref() else {
+        let Some(parent_ref) = tree_parent.as_ref() else {
             return Err(validation_error("tree", "--tree requires --parent").into());
         };
-        let tree = fetch_child_tree(ctx, &filters, parent)?;
-        let output = render_issue_tree(parent.as_str(), &tree, args.show_labels);
+        let tree = fetch_child_tree(&list_ctx, &filters, parent_ref.id())?;
+        let parent_label = if parent_ref.namespace() == &NamespaceId::core() {
+            parent_ref.id().as_str().to_string()
+        } else {
+            parent_ref.to_string()
+        };
+        let output = render_issue_tree(&parent_label, &tree, args.show_labels);
         crate::render::print_line(&output)?;
         return Ok(());
     }
 
     let req = Request::List {
-        ctx: ctx.read_ctx(),
+        ctx: list_ctx.read_ctx(),
         payload: ListPayload {
             filters: filters.clone(),
         },
