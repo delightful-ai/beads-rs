@@ -404,6 +404,21 @@ mod tests {
         unsafe { OwnedFd::from_raw_fd(dup_fd) }
     }
 
+    fn sparse_fd_floor() -> i32 {
+        let mut limits = std::mem::MaybeUninit::<nix::libc::rlimit>::uninit();
+        // Safety: `getrlimit` writes a rlimit struct to the provided pointer.
+        let rc = unsafe { nix::libc::getrlimit(nix::libc::RLIMIT_NOFILE, limits.as_mut_ptr()) };
+        assert_eq!(rc, 0, "getrlimit(RLIMIT_NOFILE) failed");
+        // Safety: `limits` was initialized by a successful getrlimit call.
+        let soft_limit = unsafe { limits.assume_init().rlim_cur };
+        let high_fd = if soft_limit == nix::libc::RLIM_INFINITY {
+            4096
+        } else {
+            (soft_limit as i32 - 1).max(16)
+        };
+        high_fd.min(4096)
+    }
+
     #[test]
     fn spawn_command_closes_non_stdio_fds_in_child() {
         let (mut reader, writer) = UnixStream::pair().expect("unix pair");
@@ -435,7 +450,7 @@ mod tests {
     #[test]
     fn spawn_command_closes_sparse_high_fd_in_child() {
         let (mut reader, writer) = UnixStream::pair().expect("unix pair");
-        let sparse_fd = dup_to_min_fd(writer.as_raw_fd(), 4096);
+        let sparse_fd = dup_to_min_fd(writer.as_raw_fd(), sparse_fd_floor());
         clear_cloexec(sparse_fd.as_raw_fd());
 
         let child = spawn_daemon_process(
