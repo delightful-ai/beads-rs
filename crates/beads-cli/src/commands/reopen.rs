@@ -5,7 +5,7 @@ use clap::Args;
 use super::{CommandResult, print_ok};
 use crate::render::print_line;
 use crate::runtime::{CliRuntimeCtx, send};
-use crate::validation::normalize_bead_id;
+use crate::validation::normalize_bead_ref_for;
 
 #[derive(Args, Debug)]
 pub struct ReopenArgs {
@@ -13,9 +13,11 @@ pub struct ReopenArgs {
 }
 
 pub fn handle(ctx: &CliRuntimeCtx, args: ReopenArgs) -> CommandResult<()> {
-    let id = normalize_bead_id(&args.id)?;
+    let target_ref = normalize_bead_ref_for("id", &args.id, &ctx.active_namespace())?;
+    let command_ctx = ctx.with_namespace(target_ref.namespace().clone());
+    let id = target_ref.id().clone();
     let req = Request::Reopen {
-        ctx: ctx.mutation_ctx(),
+        ctx: command_ctx.mutation_ctx(),
         payload: IdPayload { id },
     };
     let ok = send(&req)?;

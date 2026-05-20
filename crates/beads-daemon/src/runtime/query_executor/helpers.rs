@@ -105,6 +105,9 @@ pub(super) fn compute_epic_statuses(
             if edge.parent_ref().namespace() != namespace {
                 continue;
             }
+            if store_state.resolve_ref(edge.child_ref()).is_none() {
+                continue;
+            }
             children
                 .entry(edge.parent().clone())
                 .or_default()

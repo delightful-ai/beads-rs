@@ -108,14 +108,19 @@ pub fn handle_list(ctx: &CliRuntimeCtx, args: ListArgs) -> CommandResult<()> {
         let Some(parent) = tree_parent.as_ref() else {
             return Err(validation_error("tree", "--tree requires --parent").into());
         };
-        let tree = fetch_child_tree(ctx, &filters, parent)?;
+        let list_ctx = ctx.with_namespace(parent.namespace().clone());
+        let tree = fetch_child_tree(&list_ctx, &filters, parent)?;
         let output = render_issue_tree(&parent.to_string(), &tree, args.show_labels);
         crate::render::print_line(&output)?;
         return Ok(());
     }
 
+    let list_ctx = tree_parent
+        .as_ref()
+        .map(|parent| ctx.with_namespace(parent.namespace().clone()))
+        .unwrap_or_else(|| ctx.clone());
     let req = Request::List {
-        ctx: ctx.read_ctx(),
+        ctx: list_ctx.read_ctx(),
         payload: ListPayload {
             filters: filters.clone(),
         },

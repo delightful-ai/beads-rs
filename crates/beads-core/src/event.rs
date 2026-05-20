@@ -4299,6 +4299,51 @@ mod tests {
     }
 
     #[test]
+    fn cbor_parent_ops_reject_legacy_bare_endpoints() {
+        let mut add = Vec::new();
+        let mut enc = Encoder::new(&mut add);
+        enc.map(3).unwrap();
+        enc.str("child").unwrap();
+        enc.str("bd-child").unwrap();
+        enc.str("parent").unwrap();
+        enc.str("bd-parent").unwrap();
+        enc.str("dot").unwrap();
+        encode_wire_dot(
+            &mut enc,
+            &WireDotV1 {
+                replica: ReplicaId::new(Uuid::from_bytes([8u8; 16])),
+                counter: 1,
+            },
+        )
+        .unwrap();
+
+        let mut dec = Decoder::new(add.as_slice());
+        let err = decode_wire_parent_add(&mut dec, &Limits::default(), 0).unwrap_err();
+        assert!(matches!(err, DecodeError::MissingField("child_namespace")));
+
+        let mut remove = Vec::new();
+        let mut enc = Encoder::new(&mut remove);
+        enc.map(3).unwrap();
+        enc.str("child").unwrap();
+        enc.str("bd-child").unwrap();
+        enc.str("parent").unwrap();
+        enc.str("bd-parent").unwrap();
+        enc.str("ctx").unwrap();
+        encode_wire_dvv(
+            &mut enc,
+            &WireDvvV1 {
+                max: BTreeMap::new(),
+                dots: Vec::new(),
+            },
+        )
+        .unwrap();
+
+        let mut dec = Decoder::new(remove.as_slice());
+        let err = decode_wire_parent_remove(&mut dec, &Limits::default(), 0).unwrap_err();
+        assert!(matches!(err, DecodeError::MissingField("child_namespace")));
+    }
+
+    #[test]
     fn validate_rejects_keep_workflow_patch_fields() {
         let mut body = sample_body();
         let mut patch = WireBeadPatch::new(BeadId::parse("bd-test1").unwrap());

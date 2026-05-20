@@ -5,7 +5,7 @@ use serde::Serialize;
 use super::CommandResult;
 use crate::render::{print_json, print_line};
 use crate::runtime::{CliRuntimeCtx, send};
-use crate::validation::normalize_bead_ids;
+use crate::validation::normalize_bead_ref_for;
 
 #[derive(Debug, Clone, Serialize)]
 struct DeleteResult {
@@ -25,11 +25,17 @@ pub struct DeleteArgs {
 
 pub fn handle(ctx: &CliRuntimeCtx, args: DeleteArgs) -> CommandResult<()> {
     let mut results: Vec<DeleteResult> = Vec::new();
-    let ids = normalize_bead_ids(args.ids)?;
-    for id in ids {
+    let refs = args
+        .ids
+        .into_iter()
+        .map(|raw| normalize_bead_ref_for("id", &raw, &ctx.active_namespace()))
+        .collect::<Result<Vec<_>, _>>()?;
+    for bead_ref in refs {
+        let command_ctx = ctx.with_namespace(bead_ref.namespace().clone());
+        let id = bead_ref.id().clone();
         let issue_id = id.as_str().to_string();
         let req = Request::Delete {
-            ctx: ctx.mutation_ctx(),
+            ctx: command_ctx.mutation_ctx(),
             payload: DeletePayload {
                 id,
                 reason: args.reason.clone(),

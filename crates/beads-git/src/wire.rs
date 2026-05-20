@@ -424,6 +424,72 @@ pub fn parse_legacy_deps_edges(bytes: &[u8]) -> Result<(WireDepStoreV1, Vec<Stri
     Ok((wire, warnings))
 }
 
+/// Parse OR-Set deps that used pre-namespace string endpoint refs.
+///
+/// This parser is migration-only. The strict runtime parser must reject this
+/// shape so old stores get rewritten to canonical structured endpoint refs.
+fn parse_legacy_orset_string_refs(
+    bytes: &[u8],
+) -> Result<(WireDepStoreV1, Vec<String>), WireError> {
+    let content = parse_utf8(bytes)?;
+    let mut raw: serde_json::Value =
+        serde_json::from_str(content.trim()).map_err(|err| map_json_error("deps.jsonl", err))?;
+    let entries = raw
+        .get_mut("entries")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or_else(|| {
+            WireError::InvalidValue(
+                "deps.jsonl does not contain OR-Set entries for legacy string ref migration".into(),
+            )
+        })?;
+
+    let mut rewrote = false;
+    for entry in entries {
+        let Some(key) = entry
+            .get_mut("key")
+            .and_then(serde_json::Value::as_object_mut)
+        else {
+            continue;
+        };
+        rewrote |= rewrite_legacy_bead_ref_field(key, "from")?;
+        rewrote |= rewrite_legacy_bead_ref_field(key, "to")?;
+    }
+
+    if !rewrote {
+        return Err(WireError::InvalidValue(
+            "deps.jsonl does not contain legacy string endpoint refs".into(),
+        ));
+    }
+
+    let wire: WireDepStoreV1 =
+        serde_json::from_value(raw).map_err(|err| map_json_error("deps.jsonl", err))?;
+    SnapshotCodec::validate_dep_store(&wire)
+        .map_err(|err| map_snapshot_error("deps.jsonl", err))?;
+    Ok((
+        wire,
+        vec!["LEGACY_DEPS_SHAPE: OR-Set endpoint refs used pre-namespace strings".into()],
+    ))
+}
+
+fn rewrite_legacy_bead_ref_field(
+    key: &mut serde_json::Map<String, serde_json::Value>,
+    field: &'static str,
+) -> Result<bool, WireError> {
+    let Some(value) = key.get_mut(field) else {
+        return Ok(false);
+    };
+    let Some(raw) = value.as_str() else {
+        return Ok(false);
+    };
+    let bead_ref = crate::core::BeadRef::parse(raw, &NamespaceId::core())
+        .map_err(|err| WireError::InvalidValue(format!("invalid legacy {field} ref: {err}")))?;
+    *value = serde_json::json!({
+        "namespace": bead_ref.namespace().as_str(),
+        "id": bead_ref.id().as_str(),
+    });
+    Ok(true)
+}
+
 /// Parse notes.jsonl bytes into note append entries.
 pub fn parse_notes(bytes: &[u8]) -> Result<Vec<NoteAppendV1>, WireError> {
     let content = parse_utf8(bytes)?;
@@ -478,13 +544,16 @@ pub fn parse_state_allow_legacy_deps(
     let notes = parse_notes(notes_bytes)?;
     let (deps, deps_format, warnings) = match parse_deps_wire(deps_bytes) {
         Ok(wire) => (wire, DepsFormat::OrSetV1, Vec::new()),
-        Err(strict_err) => match parse_legacy_deps_edges(deps_bytes) {
+        Err(strict_err) => match parse_legacy_orset_string_refs(deps_bytes) {
             Ok((wire, warnings)) => (wire, DepsFormat::LegacyEdges, warnings),
-            Err(legacy_err) => {
-                return Err(WireError::InvalidValue(format!(
-                    "deps.jsonl decode failed (strict: {strict_err}; legacy: {legacy_err})"
-                )));
-            }
+            Err(legacy_orset_err) => match parse_legacy_deps_edges(deps_bytes) {
+                Ok((wire, warnings)) => (wire, DepsFormat::LegacyEdges, warnings),
+                Err(legacy_edges_err) => {
+                    return Err(WireError::InvalidValue(format!(
+                        "deps.jsonl decode failed (strict: {strict_err}; legacy_orset: {legacy_orset_err}; legacy_edges: {legacy_edges_err})"
+                    )));
+                }
+            },
         },
     };
 
@@ -2015,7 +2084,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_legacy_state_accepts_or_set_deps_with_legacy_string_refs() {
+    fn parse_state_allow_legacy_deps_migrates_or_set_string_refs_while_strict_rejects() {
         let state_bytes = b"";
         let tomb_bytes = b"";
         let notes_bytes = b"";
@@ -2028,9 +2097,24 @@ mod tests {
         )
         .unwrap();
 
-        let state = parse_legacy_state(state_bytes, tomb_bytes, deps_bytes, notes_bytes)
-            .expect("string bead refs in OR-Set deps should decode as core refs");
+        let strict_err = parse_legacy_state(state_bytes, tomb_bytes, deps_bytes, notes_bytes)
+            .expect_err("strict parse must reject string endpoint refs");
+        match strict_err {
+            WireError::Json(_) | WireError::InvalidValue(_) => {}
+            other => panic!("unexpected strict error: {other:?}"),
+        }
 
+        let (state, deps_format, warnings) =
+            parse_state_allow_legacy_deps(state_bytes, tomb_bytes, deps_bytes, notes_bytes)
+                .expect("migration parse should rewrite string endpoint refs");
+
+        assert_eq!(deps_format, DepsFormat::LegacyEdges);
+        assert!(
+            warnings
+                .iter()
+                .any(|warning| warning.contains("OR-Set endpoint refs")),
+            "expected OR-Set string-ref migration warning, got {warnings:?}"
+        );
         assert!(state.dep_contains(&key));
     }
 

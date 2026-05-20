@@ -2914,9 +2914,15 @@ fn test_gascity_sessions_extmsg_namespace_smoke() {
     let (session_id, _) =
         create_gascity_issue(&repo, Some("sessions"), "Gas City session lifecycle");
     let (extmsg_id, _) = create_gascity_issue(&repo, Some("extmsg"), "Gas City extmsg delivery");
+    let (session_parent_id, _) =
+        create_gascity_issue(&repo, Some("sessions"), "Gas City session parent");
+    let (session_child_id, _) =
+        create_gascity_issue(&repo, Some("sessions"), "Gas City session child");
 
     let session_ref = format!("sessions/{session_id}");
     let extmsg_ref = format!("extmsg/{extmsg_id}");
+    let session_parent_ref = format!("sessions/{session_parent_id}");
+    let session_child_ref = format!("sessions/{session_child_id}");
 
     let session_dep_add_out = repo
         .bd()
@@ -3065,6 +3071,82 @@ fn test_gascity_sessions_extmsg_namespace_smoke() {
         .assert()
         .success()
         .stdout(predicate::eq("[]\n"));
+
+    repo.bd()
+        .args([
+            "update",
+            &session_child_ref,
+            "--parent",
+            &session_parent_ref,
+        ])
+        .assert()
+        .success();
+
+    let session_children_out = repo
+        .bd()
+        .args([
+            "list",
+            "--parent",
+            &session_parent_ref,
+            "--json",
+            "--all",
+            "--limit",
+            "0",
+        ])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let session_children = json_array_from_cli(&session_children_out);
+    assert!(json_array_has_id(&session_children, &session_child_id));
+    assert!(
+        session_children
+            .iter()
+            .all(|issue| issue["namespace"] == "sessions")
+    );
+
+    repo.bd()
+        .args(["close", &session_child_ref])
+        .assert()
+        .success();
+    let closed_session_child = json_array_from_cli(
+        &repo
+            .bd()
+            .args(["show", &session_child_ref, "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+    assert_eq!(closed_session_child[0]["status"].as_str(), Some("closed"));
+
+    repo.bd()
+        .args(["reopen", &session_child_ref])
+        .assert()
+        .success();
+    let reopened_session_child = json_array_from_cli(
+        &repo
+            .bd()
+            .args(["show", &session_child_ref, "--json"])
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+    assert_eq!(reopened_session_child[0]["status"].as_str(), Some("open"));
+
+    let (session_delete_id, _) =
+        create_gascity_issue(&repo, Some("sessions"), "Gas City session delete path");
+    let session_delete_ref = format!("sessions/{session_delete_id}");
+    repo.bd()
+        .args(["delete", &session_delete_ref])
+        .assert()
+        .success();
+    repo.bd()
+        .args(["show", &session_delete_ref, "--json"])
+        .assert()
+        .failure();
 
     let session_show_out = repo
         .bd()

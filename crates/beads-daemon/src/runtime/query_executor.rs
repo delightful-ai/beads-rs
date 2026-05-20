@@ -1686,6 +1686,56 @@ mod tests {
     }
 
     #[test]
+    fn epic_status_ignores_tombstoned_children_with_retained_parent_edges() {
+        let (mut store, sessions, core, _) = cross_namespace_store();
+        let actor = ActorId::new("tester").unwrap();
+        let stamp = Stamp::new(WriteStamp::new(5_000, 0), actor);
+        store
+            .core_mut()
+            .get_mut(&BeadId::parse("bd-core").unwrap())
+            .expect("core bead")
+            .fields
+            .bead_type = Lww::new(BeadType::Epic, stamp.clone());
+        close_bead(&mut store, &sessions, "bd-session", stamp.clone());
+        add_store_dep_kind(
+            &mut store,
+            &sessions,
+            &sessions,
+            "bd-session",
+            &core,
+            "bd-core",
+            DepKind::Parent,
+            9,
+        );
+        let deleted_id = BeadId::parse("bd-deleted").unwrap();
+        store
+            .ensure_namespace(sessions.clone())
+            .insert(make_bead(deleted_id.as_str(), &stamp))
+            .expect("deleted child");
+        add_store_dep_kind(
+            &mut store,
+            &sessions,
+            &sessions,
+            deleted_id.as_str(),
+            &core,
+            "bd-core",
+            DepKind::Parent,
+            10,
+        );
+        store
+            .get_mut(&sessions)
+            .expect("sessions namespace")
+            .delete(Tombstone::new(deleted_id, stamp, None));
+
+        let statuses = super::helpers::compute_epic_statuses(&core, store.core(), &store, false);
+
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].total_children, 1);
+        assert_eq!(statuses[0].closed_children, 1);
+        assert!(statuses[0].eligible_for_close);
+    }
+
+    #[test]
     fn dep_cycles_from_state_reports_cycle() {
         let mut state = CanonicalState::new();
         let actor = ActorId::new("alice").unwrap();

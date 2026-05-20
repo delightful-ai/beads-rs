@@ -6,9 +6,7 @@ use super::{CommandError, CommandResult, print_ok};
 use crate::parsers::{parse_bead_type, parse_priority};
 use crate::render::print_line;
 use crate::runtime::{CliRuntimeCtx, send};
-use crate::validation::{
-    normalize_bead_id, normalize_bead_ref_for, normalize_dep_specs_for, validation_error,
-};
+use crate::validation::{normalize_bead_ref_for, normalize_dep_specs_for, validation_error};
 use beads_api::QueryResult;
 use beads_core::{BeadType, DepKind, Priority, WorkflowStatus};
 use beads_surface::ipc::{
@@ -114,7 +112,9 @@ pub struct UpdateArgs {
 }
 
 pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
-    let id = normalize_bead_id(&args.id)?;
+    let target_ref = normalize_bead_ref_for("id", &args.id, &ctx.active_namespace())?;
+    let command_ctx = ctx.with_namespace(target_ref.namespace().clone());
+    let id = target_ref.id().clone();
     let id_str = id.as_str().to_string();
     let mut patch = BeadPatch::default();
     let close_reason = normalize_reason(args.reason);
@@ -141,8 +141,8 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
         {
             Some(None)
         } else {
-            let parent_ref = normalize_bead_ref_for("parent", v, &ctx.active_namespace())?;
-            let parent = if parent_ref.namespace() == &ctx.active_namespace() {
+            let parent_ref = normalize_bead_ref_for("parent", v, &command_ctx.active_namespace())?;
+            let parent = if parent_ref.namespace() == &command_ctx.active_namespace() {
                 parent_ref.id().as_str().to_string()
             } else {
                 parent_ref.to_string()
@@ -258,7 +258,7 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
             .validate_for_update()
             .map_err(map_patch_validation_error)?;
         let req = Request::Update {
-            ctx: ctx.mutation_ctx(),
+            ctx: command_ctx.mutation_ctx(),
             payload: UpdatePayload {
                 id: id.clone(),
                 patch,
@@ -270,7 +270,7 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
 
     if !add_labels.is_empty() {
         let req = Request::AddLabels {
-            ctx: ctx.mutation_ctx(),
+            ctx: command_ctx.mutation_ctx(),
             payload: LabelsPayload {
                 id: id.clone(),
                 labels: add_labels,
@@ -281,7 +281,7 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
 
     if !remove_labels.is_empty() {
         let req = Request::RemoveLabels {
-            ctx: ctx.mutation_ctx(),
+            ctx: command_ctx.mutation_ctx(),
             payload: LabelsPayload {
                 id: id.clone(),
                 labels: remove_labels,
@@ -293,7 +293,7 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
     // Parent relationship (child -> parent edge).
     if let Some(new_parent) = parent_action {
         let req = Request::SetParent {
-            ctx: ctx.mutation_ctx(),
+            ctx: command_ctx.mutation_ctx(),
             payload: ParentPayload {
                 id: id.clone(),
                 parent: new_parent,
@@ -304,21 +304,21 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
 
     // Add dependencies
     if !args.deps.is_empty() {
-        let dep_specs = normalize_dep_specs_for(args.deps, &ctx.active_namespace())?;
+        let dep_specs = normalize_dep_specs_for(args.deps, &command_ctx.active_namespace())?;
         for spec in dep_specs {
             let (kind, to_raw) = if let Some((k, i)) = spec.split_once(':') {
                 (DepKind::parse(k).unwrap_or(DepKind::Blocks), i)
             } else {
                 (DepKind::Blocks, spec.as_str())
             };
-            let to = normalize_bead_ref_for("deps", to_raw, &ctx.active_namespace())?;
-            let to_namespace = if to.namespace() == &ctx.active_namespace() {
+            let to = normalize_bead_ref_for("deps", to_raw, &command_ctx.active_namespace())?;
+            let to_namespace = if to.namespace() == &command_ctx.active_namespace() {
                 None
             } else {
                 Some(to.namespace().clone())
             };
             let _ = send(&Request::AddDep {
-                ctx: ctx.mutation_ctx(),
+                ctx: command_ctx.mutation_ctx(),
                 payload: DepPayload {
                     from_namespace: None,
                     from: id.clone(),
@@ -333,7 +333,7 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
     // Notes
     if let Some(content) = args.notes {
         let note = Request::AddNote {
-            ctx: ctx.mutation_ctx(),
+            ctx: command_ctx.mutation_ctx(),
             payload: AddNotePayload {
                 id: id.clone(),
                 content,
@@ -346,7 +346,7 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
     if let Some(assignee) = args.assignee {
         if assignee == "none" || assignee == "-" || assignee == "unassigned" {
             let req = Request::Unclaim {
-                ctx: ctx.mutation_ctx(),
+                ctx: command_ctx.mutation_ctx(),
                 payload: IdPayload { id: id.clone() },
             };
             let _ = send(&req)?;
@@ -361,7 +361,7 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
                 .into());
             }
             let req = Request::Claim {
-                ctx: ctx.mutation_ctx(),
+                ctx: command_ctx.mutation_ctx(),
                 payload: ClaimPayload {
                     id: id.clone(),
                     lease_secs: 3600,
@@ -373,7 +373,7 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
 
     if status_closed {
         let req = Request::Close {
-            ctx: ctx.mutation_ctx(),
+            ctx: command_ctx.mutation_ctx(),
             payload: ClosePayload {
                 id: id.clone(),
                 reason: close_reason,
@@ -385,7 +385,7 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
 
     // Emit updated view / summary.
     if ctx.json {
-        let issue = fetch_issue(ctx, &id)?;
+        let issue = fetch_issue(&command_ctx, &id)?;
         print_ok(&ResponsePayload::Query(QueryResult::Issue(issue)), true)?;
     } else {
         print_line(&render_updated(&id_str))?;
