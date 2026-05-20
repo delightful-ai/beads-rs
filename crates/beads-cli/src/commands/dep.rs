@@ -174,8 +174,8 @@ fn handle_dep_remove(ctx: &CliRuntimeCtx, args: DepRmArgs) -> CommandResult<()> 
         existing.to == edge.to.id().as_str()
             && existing.to_namespace == edge.to.namespace().as_str()
     }) {
-        let kind =
-            DepKind::parse(&existing.kind).map_err(|err| validation_error("dep", err.to_string()))?;
+        let kind = DepKind::parse(&existing.kind)
+            .map_err(|err| validation_error("dep", err.to_string()))?;
         let req = Request::RemoveDep {
             ctx: mutation_ctx.mutation_ctx(),
             payload: DepPayload {

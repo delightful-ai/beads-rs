@@ -3948,14 +3948,18 @@ mod tests {
             .state
             .get(&namespace)
             .expect("namespace state");
-        assert!(state.dep_contains(
-            &DepKey::new_local(&namespace, bead_a.clone(), bead_b.clone(), DepKind::Blocks)
-                .expect("dep key a->b")
-        ));
-        assert!(!state.dep_contains(
-            &DepKey::new_local(&namespace, bead_b.clone(), bead_a.clone(), DepKind::Blocks)
-                .expect("dep key b->a")
-        ));
+        assert!(
+            state.dep_contains(
+                &DepKey::new_local(&namespace, bead_a.clone(), bead_b.clone(), DepKind::Blocks)
+                    .expect("dep key a->b")
+            )
+        );
+        assert!(
+            !state.dep_contains(
+                &DepKey::new_local(&namespace, bead_b.clone(), bead_a.clone(), DepKind::Blocks)
+                    .expect("dep key b->a")
+            )
+        );
     }
 
     #[test]

@@ -4,8 +4,8 @@
 //! serialized representations. They depend on git::wire serialization and thus
 //! live in beads-rs rather than beads-core.
 
-use beads_core::bead::{Bead, BeadCore, BeadFields};
 use beads_core::IssueStatus;
+use beads_core::bead::{Bead, BeadCore, BeadFields};
 use beads_core::composite::Claim;
 use beads_core::crdt::Lww;
 use beads_core::domain::{BeadType, DepKind, Priority};

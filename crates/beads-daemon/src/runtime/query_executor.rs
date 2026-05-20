@@ -14,8 +14,8 @@ use super::ops::{MapLiveError, OpError};
 use super::query::{Filters, QueryResult};
 use super::store::runtime::StoreRuntime;
 use crate::core::{
-    BeadId, BeadProjection, BeadRef, BeadView, CanonicalState, DepKind, IssueStatus,
-    NamespaceId, NamespacePolicy, StoreState, WallClock,
+    BeadId, BeadProjection, BeadRef, BeadView, CanonicalState, DepKind, IssueStatus, NamespaceId,
+    NamespacePolicy, StoreState, WallClock,
 };
 use crate::git_lane::GitLaneState;
 use crate::remote::RemoteUrl;
@@ -1341,9 +1341,13 @@ mod tests {
             blocked_lineage,
         );
 
-        let blocks =
-            DepKey::new_local(&NamespaceId::core(), blocked_id.clone(), blocker_id.clone(), DepKind::Blocks)
-                .expect("dep key");
+        let blocks = DepKey::new_local(
+            &NamespaceId::core(),
+            blocked_id.clone(),
+            blocker_id.clone(),
+            DepKind::Blocks,
+        )
+        .expect("dep key");
         let blocks = state.check_dep_add_key(blocks).expect("checked dep");
         state.apply_dep_add(
             blocks,
@@ -1353,9 +1357,13 @@ mod tests {
             },
             stamp.clone(),
         );
-        let closed_blocks =
-            DepKey::new_local(&NamespaceId::core(), blocked_id.clone(), closed_blocker_id, DepKind::Blocks)
-                .expect("dep key");
+        let closed_blocks = DepKey::new_local(
+            &NamespaceId::core(),
+            blocked_id.clone(),
+            closed_blocker_id,
+            DepKind::Blocks,
+        )
+        .expect("dep key");
         let closed_blocks = state.check_dep_add_key(closed_blocks).expect("checked dep");
         state.apply_dep_add(
             closed_blocks,

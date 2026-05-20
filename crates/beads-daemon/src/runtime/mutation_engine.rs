@@ -11,8 +11,8 @@ use crate::core::limits::LimitViolation;
 use crate::core::{
     ActorId, Bead, BeadId, BeadPatchWireV1, BeadRef, BeadSlug, BeadType, BranchName,
     CanonicalState, ClientRequestId, DepAddKey, DepKey, DepKind, Dot, EventBody, EventBytes,
-    EventKindV1, HlcMax, Label, Labels, Limits, NamespaceId, NamespacePolicy, NoteAppendV1,
-    NoteId, ParentEdge, Priority, ReplicaId, Seq1, Stamp, StoreIdentity, StoreState, TraceId,
+    EventKindV1, HlcMax, Label, Labels, Limits, NamespaceId, NamespacePolicy, NoteAppendV1, NoteId,
+    ParentEdge, Priority, ReplicaId, Seq1, Stamp, StoreIdentity, StoreState, TraceId,
     TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, ValidatedBeadPatch, ValidatedEventBody,
     ValidatedEventKindV1, ValidatedMutationCommand, ValidatedTxnV1, WallClock, WireDepAddV1,
     WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireNoteV1,
@@ -802,15 +802,13 @@ impl MutationEngine {
                 to_namespace,
                 to,
                 kind,
-            } => {
-                Ok(CanonicalMutationOp::RemoveDep {
-                    from_namespace: from_namespace.clone(),
-                    from: from.clone(),
-                    to_namespace: to_namespace.clone(),
-                    to: to.clone(),
-                    kind: *kind,
-                })
-            }
+            } => Ok(CanonicalMutationOp::RemoveDep {
+                from_namespace: from_namespace.clone(),
+                from: from.clone(),
+                to_namespace: to_namespace.clone(),
+                to: to.clone(),
+                kind: *kind,
+            }),
             ParsedMutationRequest::AddNote { id, content } => {
                 enforce_note_limit(content, &self.limits)?;
                 Ok(CanonicalMutationOp::AddNote {
@@ -3040,9 +3038,13 @@ mod tests {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        let key =
-            DepKey::new_local(&NamespaceId::core(), bead_a.clone(), bead_b.clone(), DepKind::Blocks)
-                .unwrap();
+        let key = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_a.clone(),
+            bead_b.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap();
         let key = state.check_dep_add_key(key).expect("acyclic key");
         state.apply_dep_add(key, dot, stamp.clone());
 
@@ -3098,9 +3100,13 @@ mod tests {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        let key =
-            DepKey::new_local(&NamespaceId::core(), bead_a.clone(), bead_b.clone(), DepKind::Related)
-                .unwrap();
+        let key = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_a.clone(),
+            bead_b.clone(),
+            DepKind::Related,
+        )
+        .unwrap();
         let key = state.check_dep_add_key(key).expect("free key");
         state.apply_dep_add(key, dot, stamp.clone());
 
@@ -3161,7 +3167,8 @@ mod tests {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,
         };
-        let edge = ParentEdge::new_local(&NamespaceId::core(), bead_a.clone(), bead_b.clone()).unwrap();
+        let edge =
+            ParentEdge::new_local(&NamespaceId::core(), bead_a.clone(), bead_b.clone()).unwrap();
         let key = state
             .check_dep_add_key(edge.to_dep_key())
             .expect("parent key");
@@ -3212,8 +3219,8 @@ mod tests {
             state.insert(make_bead(id.as_str(), &actor)).unwrap();
         }
 
-        let edge =
-            ParentEdge::new_local(&NamespaceId::core(), child_id.clone(), parent_a.clone()).unwrap();
+        let edge = ParentEdge::new_local(&NamespaceId::core(), child_id.clone(), parent_a.clone())
+            .unwrap();
         let dot = Dot {
             replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
             counter: 1,

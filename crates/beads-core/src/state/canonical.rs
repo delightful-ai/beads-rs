@@ -840,8 +840,8 @@ impl CanonicalState {
     pub fn rebuild_dep_indexes(&mut self) {
         self.dep_indexes = DepIndexes::new();
         for key in self.dep_store.values() {
-                self.dep_indexes
-                    .add(key.from_ref(), key.to_ref(), key.kind());
+            self.dep_indexes
+                .add(key.from_ref(), key.to_ref(), key.kind());
         }
     }
 

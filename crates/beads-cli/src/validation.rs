@@ -37,8 +37,7 @@ pub fn normalize_bead_ref_for(
     raw: &str,
     default_namespace: &NamespaceId,
 ) -> Result<BeadRef> {
-    BeadRef::parse(raw, default_namespace)
-        .map_err(|err| validation_error(field, err.to_string()))
+    BeadRef::parse(raw, default_namespace).map_err(|err| validation_error(field, err.to_string()))
 }
 
 pub fn normalize_bead_slug_for(field: &str, slug: &str) -> Result<BeadSlug> {

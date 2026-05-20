@@ -625,9 +625,13 @@ mod tests {
             collision_lineage,
             Some("bye".into()),
         );
-        let dep_key =
-            DepKey::new_local(&NamespaceId::core(), bead_id.clone(), dep_to.clone(), DepKind::Blocks)
-                .unwrap();
+        let dep_key = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id.clone(),
+            dep_to.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap();
         let dep_dot = Dot {
             replica: ReplicaId::from(Uuid::from_bytes([5u8; 16])),
             counter: 1,

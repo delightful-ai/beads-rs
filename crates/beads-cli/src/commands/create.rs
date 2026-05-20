@@ -341,7 +341,8 @@ fn handle_from_markdown_file(ctx: &CliRuntimeCtx, path: &std::path::Path) -> Com
     let active_namespace = ctx.active_namespace();
 
     for t in templates {
-        let dependencies = match normalize_dep_specs_for(t.dependencies.clone(), &active_namespace) {
+        let dependencies = match normalize_dep_specs_for(t.dependencies.clone(), &active_namespace)
+        {
             Ok(v) => v,
             Err(e) => {
                 failed.push(t.title.clone());

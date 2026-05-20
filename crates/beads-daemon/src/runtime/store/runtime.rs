@@ -3595,9 +3595,13 @@ mod tests {
             claim: Lww::new(Claim::default(), stamp.clone()),
         };
         let bead = crate::core::Bead::new(core, fields);
-        let dep_key =
-            DepKey::new_local(&NamespaceId::core(), bead_id.clone(), dep_to, DepKind::Blocks)
-                .expect("dep key");
+        let dep_key = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id.clone(),
+            dep_to,
+            DepKind::Blocks,
+        )
+        .expect("dep key");
         let mut core_state = CanonicalState::new();
         core_state.insert(bead).expect("insert bead");
         let dep_dot = Dot {
