@@ -31,7 +31,7 @@ pub struct CreatePayload {
     #[serde(default)]
     pub id: Option<BeadId>,
     #[serde(default)]
-    pub parent: Option<BeadId>,
+    pub parent: Option<String>,
     pub title: String,
     #[serde(rename = "type")]
     pub bead_type: BeadType,
@@ -72,7 +72,7 @@ pub struct LabelsPayload {
 pub struct ParentPayload {
     pub id: BeadId,
     #[serde(default)]
-    pub parent: Option<BeadId>,
+    pub parent: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -93,7 +93,11 @@ pub struct DeletePayload {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DepPayload {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_namespace: Option<NamespaceId>,
     pub from: BeadId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub to_namespace: Option<NamespaceId>,
     pub to: BeadId,
     pub kind: DepKind,
 }

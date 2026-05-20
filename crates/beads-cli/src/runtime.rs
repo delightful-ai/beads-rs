@@ -104,6 +104,16 @@ impl CliRuntimeCtx {
         RepoCtx::new(self.repo.clone())
     }
 
+    pub fn active_namespace(&self) -> NamespaceId {
+        self.namespace.clone().unwrap_or_else(NamespaceId::core)
+    }
+
+    pub fn with_namespace(&self, namespace: NamespaceId) -> Self {
+        let mut ctx = self.clone();
+        ctx.namespace = Some(namespace);
+        ctx
+    }
+
     pub fn actor_id(&self) -> ValidationResult<ActorId> {
         self.actor_id
             .clone()

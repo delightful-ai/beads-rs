@@ -242,10 +242,11 @@ impl Daemon {
         .map_err(wal_index_to_op)?;
         let planned = {
             let store_runtime = proof.runtime_mut();
-            let state_snapshot = store_runtime.state.get_or_default(&namespace);
+            let policies_snapshot = store_runtime.policies.clone();
             let mut dot_alloc = RuntimeDotAllocator::new(origin_replica_id, atomic_txn.index_mut());
-            engine.plan(
-                &state_snapshot,
+            engine.plan_for_store(
+                &store_runtime.state,
+                &policies_snapshot,
                 now_ms,
                 stamped_ctx,
                 store,

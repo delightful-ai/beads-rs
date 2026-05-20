@@ -1,7 +1,9 @@
 use std::io::{BufRead, Write};
 
 use crate::parsers::{parse_bead_type, parse_priority};
-use crate::validation::{normalize_bead_id_for, normalize_dep_specs, validation_error};
+use crate::validation::{
+    normalize_bead_id_for, normalize_bead_ref_for, normalize_dep_specs_for, validation_error,
+};
 use clap::Args;
 
 use super::common::fetch_issue;
@@ -202,12 +204,20 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: CreateArgs) -> CommandResult<()> {
         .take()
         .map(|raw| normalize_bead_id_for("id", &raw))
         .transpose()?;
+    let active_namespace = ctx.active_namespace();
     let parent = args
         .parent
         .take()
-        .map(|raw| normalize_bead_id_for("parent", &raw))
-        .transpose()?;
-    let dependencies = normalize_dep_specs(args.deps)?;
+        .map(|raw| normalize_bead_ref_for("parent", &raw, &active_namespace))
+        .transpose()?
+        .map(|bead_ref| {
+            if bead_ref.namespace() == &active_namespace {
+                bead_ref.id().as_str().to_string()
+            } else {
+                bead_ref.to_string()
+            }
+        });
+    let dependencies = normalize_dep_specs_for(args.deps, &active_namespace)?;
 
     let req = Request::Create {
         ctx: ctx.mutation_ctx(),
@@ -328,9 +338,10 @@ fn handle_from_markdown_file(ctx: &CliRuntimeCtx, path: &std::path::Path) -> Com
     let mut created = Vec::new();
     let mut created_summaries = Vec::new();
     let mut failed = Vec::new();
+    let active_namespace = ctx.active_namespace();
 
     for t in templates {
-        let dependencies = match normalize_dep_specs(t.dependencies.clone()) {
+        let dependencies = match normalize_dep_specs_for(t.dependencies.clone(), &active_namespace) {
             Ok(v) => v,
             Err(e) => {
                 failed.push(t.title.clone());

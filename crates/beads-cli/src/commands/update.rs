@@ -7,7 +7,7 @@ use crate::parsers::{parse_bead_type, parse_priority};
 use crate::render::print_line;
 use crate::runtime::{CliRuntimeCtx, send};
 use crate::validation::{
-    normalize_bead_id, normalize_bead_id_for, normalize_dep_specs, validation_error,
+    normalize_bead_id, normalize_bead_ref_for, normalize_dep_specs_for, validation_error,
 };
 use beads_api::QueryResult;
 use beads_core::{BeadType, DepKind, IssueStatus, Priority};
@@ -130,6 +130,7 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
         return Err(validation_error("reason", "--reason requires a terminal --status").into());
     }
 
+    let active_namespace = ctx.active_namespace();
     let parent_action = if args.no_parent {
         Some(None)
     } else if let Some(p) = &args.parent {
@@ -141,7 +142,12 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
         {
             Some(None)
         } else {
-            Some(Some(normalize_bead_id_for("parent", v)?))
+            let parent = normalize_bead_ref_for("parent", v, &active_namespace)?;
+            Some(Some(if parent.namespace() == &active_namespace {
+                parent.id().as_str().to_string()
+            } else {
+                parent.to_string()
+            }))
         }
     } else {
         None
@@ -290,19 +296,26 @@ pub fn handle(ctx: &CliRuntimeCtx, mut args: UpdateArgs) -> CommandResult<()> {
 
     // Add dependencies
     if !args.deps.is_empty() {
-        let dep_specs = normalize_dep_specs(args.deps)?;
+        let dep_specs = normalize_dep_specs_for(args.deps, &active_namespace)?;
         for spec in dep_specs {
             let (kind, to_raw) = if let Some((k, i)) = spec.split_once(':') {
                 (DepKind::parse(k).unwrap_or(DepKind::Blocks), i)
             } else {
                 (DepKind::Blocks, spec.as_str())
             };
-            let to = normalize_bead_id_for("deps", to_raw)?;
+            let to = normalize_bead_ref_for("deps", to_raw, &active_namespace)?;
+            let to_namespace = if to.namespace() == &active_namespace {
+                None
+            } else {
+                Some(to.namespace().clone())
+            };
             let _ = send(&Request::AddDep {
                 ctx: ctx.mutation_ctx(),
                 payload: DepPayload {
+                    from_namespace: None,
                     from: id.clone(),
-                    to,
+                    to_namespace,
+                    to: to.id().clone(),
                     kind,
                 },
             })?;

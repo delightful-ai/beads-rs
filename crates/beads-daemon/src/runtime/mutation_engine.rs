@@ -9,15 +9,15 @@ use super::ops::{MapLiveError, OpError, ValidatedSurfaceBeadPatch};
 use super::tracker::{status_transition_plan, terminal_status_from_close_reason};
 use crate::core::limits::LimitViolation;
 use crate::core::{
-    ActorId, BeadId, BeadPatchWireV1, BeadSlug, BeadType, BranchName, CanonicalState,
-    ClientRequestId, DepAddKey, DepKey, DepKind, DepSpec, DepSpecSet, Dot, EventBody, EventBytes,
-    EventKindV1, HlcMax, Label, Labels, Limits, NamespaceId, NoteAppendV1, NoteId, ParentEdge,
-    Priority, ReplicaId, Seq1, Stamp, StoreIdentity, TraceId, TxnDeltaError, TxnDeltaV1, TxnId,
-    TxnOpV1, TxnV1, ValidatedBeadPatch, ValidatedEventBody, ValidatedEventKindV1,
-    ValidatedMutationCommand, ValidatedTxnV1, WallClock, WireDepAddV1, WireDepRemoveV1, WireDotV1,
-    WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireNoteV1, WireParentAddV1, WireParentRemoveV1,
-    WirePatch, WireStamp, WireTombstoneV1, encode_event_body_canonical, sha256_bytes,
-    to_canon_json_bytes,
+    ActorId, Bead, BeadId, BeadPatchWireV1, BeadRef, BeadSlug, BeadType, BranchName,
+    CanonicalState, ClientRequestId, DepAddKey, DepKey, DepKind, Dot, EventBody, EventBytes,
+    EventKindV1, HlcMax, Label, Labels, Limits, NamespaceId, NamespacePolicy, NoteAppendV1,
+    NoteId, ParentEdge, Priority, ReplicaId, Seq1, Stamp, StoreIdentity, StoreState, TraceId,
+    TxnDeltaError, TxnDeltaV1, TxnId, TxnOpV1, TxnV1, ValidatedBeadPatch, ValidatedEventBody,
+    ValidatedEventKindV1, ValidatedMutationCommand, ValidatedTxnV1, WallClock, WireDepAddV1,
+    WireDepRemoveV1, WireDotV1, WireDvvV1, WireLabelAddV1, WireLabelRemoveV1, WireNoteV1,
+    WireParentAddV1, WireParentRemoveV1, WirePatch, WireStamp, WireTombstoneV1,
+    encode_event_body_canonical, sha256_bytes, to_canon_json_bytes,
 };
 use crate::remote::RemoteUrl;
 use crate::runtime::ipc::{
@@ -143,7 +143,7 @@ pub struct SequencedEvent {
 pub enum ParsedMutationRequest {
     Create {
         id: Option<BeadId>,
-        parent: Option<BeadId>,
+        parent: Option<String>,
         title: String,
         bead_type: BeadType,
         priority: Priority,
@@ -154,7 +154,7 @@ pub enum ParsedMutationRequest {
         external_ref: Option<String>,
         estimated_minutes: Option<u32>,
         labels: Labels,
-        dependencies: DepSpecSet,
+        dependencies: Vec<String>,
     },
     Update {
         id: BeadId,
@@ -171,7 +171,7 @@ pub enum ParsedMutationRequest {
     },
     SetParent {
         id: BeadId,
-        parent: Option<BeadId>,
+        parent: Option<String>,
     },
     Close {
         id: BeadId,
@@ -186,12 +186,16 @@ pub enum ParsedMutationRequest {
         reason: Option<String>,
     },
     AddDep {
+        from_namespace: Option<NamespaceId>,
         from: BeadId,
+        to_namespace: Option<NamespaceId>,
         to: BeadId,
         kind: DepKind,
     },
     RemoveDep {
+        from_namespace: Option<NamespaceId>,
         from: BeadId,
+        to_namespace: Option<NamespaceId>,
         to: BeadId,
         kind: DepKind,
     },
@@ -245,7 +249,6 @@ impl ParsedMutationRequest {
         }
 
         let labels = parse_labels(labels)?;
-        let dependencies = parse_dep_specs(&dependencies)?;
         let assignee = normalize_assignee(assignee, actor)?;
         let design = normalize_optional_string(design);
         let acceptance_criteria = normalize_optional_string(acceptance_criteria);
@@ -315,25 +318,49 @@ impl ParsedMutationRequest {
     }
 
     pub fn parse_add_dep(payload: DepPayload) -> Result<Self, OpError> {
-        let DepPayload { from, to, kind } = payload;
+        let DepPayload {
+            from_namespace,
+            from,
+            to_namespace,
+            to,
+            kind,
+        } = payload;
         if kind == DepKind::Parent {
             return Err(OpError::ValidationFailed {
                 field: "dependency".into(),
                 reason: "parent edges must use set-parent".into(),
             });
         }
-        Ok(ParsedMutationRequest::AddDep { from, to, kind })
+        Ok(ParsedMutationRequest::AddDep {
+            from_namespace,
+            from,
+            to_namespace,
+            to,
+            kind,
+        })
     }
 
     pub fn parse_remove_dep(payload: DepPayload) -> Result<Self, OpError> {
-        let DepPayload { from, to, kind } = payload;
+        let DepPayload {
+            from_namespace,
+            from,
+            to_namespace,
+            to,
+            kind,
+        } = payload;
         if kind == DepKind::Parent {
             return Err(OpError::ValidationFailed {
                 field: "dependency".into(),
                 reason: "parent edges must use set-parent".into(),
             });
         }
-        Ok(ParsedMutationRequest::RemoveDep { from, to, kind })
+        Ok(ParsedMutationRequest::RemoveDep {
+            from_namespace,
+            from,
+            to_namespace,
+            to,
+            kind,
+        })
     }
 
     pub fn parse_add_note(payload: AddNotePayload) -> Result<Self, OpError> {
@@ -397,7 +424,53 @@ impl MutationEngine {
         req: ParsedMutationRequest,
         dot_alloc: &mut dyn DotAllocator,
     ) -> Result<PlannedMutation, OpError> {
+        self.plan_inner(
+            state, None, None, now_ms, stamped, store, id_ctx, req, dot_alloc,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn plan_for_store(
+        &self,
+        store_state: &StoreState,
+        namespace_policies: &BTreeMap<NamespaceId, NamespacePolicy>,
+        now_ms: u64,
+        stamped: StampedContext,
+        store: StoreIdentity,
+        id_ctx: Option<&IdContext>,
+        req: ParsedMutationRequest,
+        dot_alloc: &mut dyn DotAllocator,
+    ) -> Result<PlannedMutation, OpError> {
+        let namespace = stamped.ctx.namespace.clone();
+        let state = store_state.get_or_default(&namespace);
+        self.plan_inner(
+            &state,
+            Some(store_state),
+            Some(namespace_policies),
+            now_ms,
+            stamped,
+            store,
+            id_ctx,
+            req,
+            dot_alloc,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn plan_inner(
+        &self,
+        state: &CanonicalState,
+        store_state: Option<&StoreState>,
+        namespace_policies: Option<&BTreeMap<NamespaceId, NamespacePolicy>>,
+        now_ms: u64,
+        stamped: StampedContext,
+        store: StoreIdentity,
+        id_ctx: Option<&IdContext>,
+        req: ParsedMutationRequest,
+        dot_alloc: &mut dyn DotAllocator,
+    ) -> Result<PlannedMutation, OpError> {
         let (ctx, stamp) = stamped.into_parts();
+        let namespace = ctx.namespace.clone();
         let write_stamp = stamp.at.clone();
         let mut durability = PendingPlanningDurabilityEffects::default();
 
@@ -418,7 +491,10 @@ impl MutationEngine {
                 dependencies,
             } => self.plan_create(
                 state,
+                store_state,
+                namespace_policies,
                 &stamp,
+                &namespace,
                 dot_alloc,
                 &mut durability,
                 id_ctx,
@@ -445,9 +521,16 @@ impl MutationEngine {
             ParsedMutationRequest::RemoveLabels { id, labels } => {
                 self.plan_remove_labels(state, id, labels)?
             }
-            ParsedMutationRequest::SetParent { id, parent } => {
-                self.plan_set_parent(state, id, parent, &stamp, dot_alloc, &mut durability)?
-            }
+            ParsedMutationRequest::SetParent { id, parent } => self.plan_set_parent(
+                state,
+                store_state,
+                namespace_policies,
+                &namespace,
+                id,
+                parent,
+                dot_alloc,
+                &mut durability,
+            )?,
             ParsedMutationRequest::Close {
                 id,
                 reason,
@@ -457,12 +540,44 @@ impl MutationEngine {
             ParsedMutationRequest::Delete { id, reason } => {
                 self.plan_delete(state, &stamp, id, reason)?
             }
-            ParsedMutationRequest::AddDep { from, to, kind } => {
-                self.plan_add_dep(state, &stamp, from, to, kind, dot_alloc, &mut durability)?
-            }
-            ParsedMutationRequest::RemoveDep { from, to, kind } => {
-                self.plan_remove_dep(state, &stamp, from, to, kind)?
-            }
+            ParsedMutationRequest::AddDep {
+                from_namespace,
+                from,
+                to_namespace,
+                to,
+                kind,
+            } => self.plan_add_dep(
+                state,
+                store_state,
+                namespace_policies,
+                &namespace,
+                &stamp,
+                from_namespace,
+                from,
+                to_namespace,
+                to,
+                kind,
+                dot_alloc,
+                &mut durability,
+            )?,
+            ParsedMutationRequest::RemoveDep {
+                from_namespace,
+                from,
+                to_namespace,
+                to,
+                kind,
+            } => self.plan_remove_dep(
+                state,
+                store_state,
+                namespace_policies,
+                &namespace,
+                &stamp,
+                from_namespace,
+                from,
+                to_namespace,
+                to,
+                kind,
+            )?,
             ParsedMutationRequest::AddNote { id, content } => {
                 self.plan_add_note(state, &stamp, id, content)?
             }
@@ -609,7 +724,9 @@ impl MutationEngine {
                 }
 
                 enforce_label_limit(labels, &self.limits, None)?;
-                let canonical_deps = canonical_deps(dependencies);
+                let mut canonical_deps = dependencies.clone();
+                canonical_deps.sort();
+                canonical_deps.dedup();
                 let description = description.clone().unwrap_or_default();
 
                 Ok(CanonicalMutationOp::Create {
@@ -666,14 +783,30 @@ impl MutationEngine {
                 id: id.clone(),
                 reason: reason.clone(),
             }),
-            ParsedMutationRequest::AddDep { from, to, kind } => Ok(CanonicalMutationOp::AddDep {
+            ParsedMutationRequest::AddDep {
+                from_namespace,
+                from,
+                to_namespace,
+                to,
+                kind,
+            } => Ok(CanonicalMutationOp::AddDep {
+                from_namespace: from_namespace.clone(),
                 from: from.clone(),
+                to_namespace: to_namespace.clone(),
                 to: to.clone(),
                 kind: *kind,
             }),
-            ParsedMutationRequest::RemoveDep { from, to, kind } => {
+            ParsedMutationRequest::RemoveDep {
+                from_namespace,
+                from,
+                to_namespace,
+                to,
+                kind,
+            } => {
                 Ok(CanonicalMutationOp::RemoveDep {
+                    from_namespace: from_namespace.clone(),
                     from: from.clone(),
+                    to_namespace: to_namespace.clone(),
                     to: to.clone(),
                     kind: *kind,
                 })
@@ -760,12 +893,15 @@ impl MutationEngine {
     fn plan_create(
         &self,
         state: &CanonicalState,
+        store_state: Option<&StoreState>,
+        namespace_policies: Option<&BTreeMap<NamespaceId, NamespacePolicy>>,
         stamp: &Stamp,
+        namespace: &NamespaceId,
         dot_alloc: &mut dyn DotAllocator,
         durability: &mut PendingPlanningDurabilityEffects,
         id_ctx: Option<&IdContext>,
         id: Option<BeadId>,
-        parent: Option<BeadId>,
+        parent: Option<String>,
         title: String,
         bead_type: BeadType,
         priority: Priority,
@@ -776,17 +912,14 @@ impl MutationEngine {
         external_ref: Option<String>,
         estimated_minutes: Option<u32>,
         labels: Labels,
-        dependencies: DepSpecSet,
+        dependencies: Vec<String>,
     ) -> Result<PlannedDelta, OpError> {
-        if id.is_some() && parent.is_some() {
-            return Err(OpError::ValidationFailed {
-                field: "create".into(),
-                reason: "cannot specify both id and parent".into(),
-            });
-        }
-
         let requested_id = id.clone();
         let requested_parent = parent.clone();
+        let parent_ref = requested_parent
+            .as_deref()
+            .map(|raw| parse_bead_ref("parent", raw, namespace))
+            .transpose()?;
 
         let title = title.trim().to_string();
         if title.is_empty() {
@@ -798,7 +931,8 @@ impl MutationEngine {
 
         enforce_label_limit(&labels, &self.limits, None)?;
 
-        let canonical_deps = canonical_deps(&dependencies);
+        let dependencies = parse_create_dep_specs(&dependencies, namespace)?;
+        let canonical_deps = canonical_create_deps(&dependencies, namespace);
 
         let description = description.unwrap_or_default();
 
@@ -807,18 +941,29 @@ impl MutationEngine {
             reason: "id context missing for create".into(),
         })?;
 
-        let (id, parent_id) = match (requested_id.as_ref(), requested_parent.as_ref()) {
-            (Some(requested_id), None) => {
+        let (id, parent_ref) = match (requested_id.as_ref(), parent_ref.as_ref()) {
+            (Some(requested_id), parent_ref) => {
                 if state.get_live(requested_id).is_some()
                     || state.get_tombstone(requested_id).is_some()
                 {
                     return Err(OpError::AlreadyExists(requested_id.clone()));
                 }
-                (requested_id.clone(), None)
+                if let Some(parent_ref) = parent_ref {
+                    Self::require_configured_dep_namespace(
+                        namespace_policies,
+                        namespace,
+                        parent_ref,
+                    )?;
+                    Self::require_live_dep_endpoint(state, store_state, namespace, parent_ref)?;
+                    (requested_id.clone(), Some(parent_ref.clone()))
+                } else {
+                    (requested_id.clone(), None)
+                }
             }
-            (None, Some(parent_id)) => {
-                let child = next_child_id(state, parent_id)?;
-                (child, Some(parent_id.clone()))
+            (None, Some(parent_ref)) => {
+                Self::require_configured_dep_namespace(namespace_policies, namespace, parent_ref)?;
+                let child = next_child_id_for_ref(state, store_state, namespace, parent_ref)?;
+                (child, Some(parent_ref.clone()))
             }
             (None, None) => (
                 generate_unique_id(
@@ -832,25 +977,28 @@ impl MutationEngine {
                 )?,
                 None,
             ),
-            (Some(_), Some(_)) => unreachable!("guarded above"),
         };
 
         for spec in dependencies.iter() {
-            if state.get_live(spec.id()).is_none() {
-                return Err(OpError::NotFound(spec.id().clone()));
-            }
-            DepKey::new_local(&NamespaceId::core(), id.clone(), spec.id().clone(), spec.kind())
-                .map_err(|e| OpError::ValidationFailed {
-                    field: "dependency".into(),
-                    reason: e.to_string(),
-                })?;
+            Self::require_configured_dep_namespace(namespace_policies, namespace, spec.to_ref())?;
+            Self::require_live_dep_endpoint(state, store_state, namespace, spec.to_ref())?;
+            DepKey::new(
+                BeadRef::new(namespace.clone(), id.clone()),
+                spec.to_ref().clone(),
+                spec.kind(),
+            )
+            .map_err(|e| OpError::ValidationFailed {
+                field: "dependency".into(),
+                reason: e.to_string(),
+            })?;
         }
 
         let mut source_repo_value = None;
         if let Some(spec) = dependencies
             .iter()
             .find(|spec| matches!(spec.kind(), DepKind::DiscoveredFrom))
-            && let Some(parent_bead) = state.get_live(spec.id())
+            && let Some(parent_bead) =
+                live_bead_for_ref(state, store_state, namespace, spec.to_ref())
             && let Some(sr) = &parent_bead.fields.source_repo.value
             && !sr.trim().is_empty()
         {
@@ -900,9 +1048,9 @@ impl MutationEngine {
                 .map_err(delta_error_to_op)?;
         }
 
-        if let Some(parent_id) = parent_id {
-            let edge =
-                ParentEdge::new_local(&NamespaceId::core(), id.clone(), parent_id).map_err(|e| OpError::ValidationFailed {
+        if let Some(parent_ref) = parent_ref {
+            let edge = ParentEdge::new(BeadRef::new(namespace.clone(), id.clone()), parent_ref)
+                .map_err(|e| OpError::ValidationFailed {
                     field: "parent".into(),
                     reason: e.to_string(),
                 })?;
@@ -915,12 +1063,17 @@ impl MutationEngine {
         }
 
         for spec in dependencies.iter() {
-            let key = Self::dep_add_key_into_inner(self.checked_dep_add_key(
-                state,
-                id.clone(),
-                spec.id().clone(),
+            let key = DepKey::new(
+                BeadRef::new(namespace.clone(), id.clone()),
+                spec.to_ref().clone(),
                 spec.kind(),
-            )?);
+            )
+            .map_err(|e| OpError::ValidationFailed {
+                field: "dependency".into(),
+                reason: e.to_string(),
+            })?;
+            let key =
+                Self::dep_add_key_into_inner(self.checked_dep_add_key(state, store_state, key)?);
             delta
                 .insert(TxnOpV1::DepAdd(WireDepAddV1 {
                     key,
@@ -1136,26 +1289,24 @@ impl MutationEngine {
     fn checked_dep_add_key(
         &self,
         state: &CanonicalState,
-        from: BeadId,
-        to: BeadId,
-        kind: DepKind,
+        store_state: Option<&StoreState>,
+        key: DepKey,
     ) -> Result<DepAddKey, OpError> {
-        if kind == DepKind::Parent {
+        if key.kind() == DepKind::Parent {
             return Err(OpError::ValidationFailed {
                 field: "dependency".into(),
                 reason: "parent edges must use set-parent".into(),
             });
         }
-        let key = DepKey::new_local(&NamespaceId::core(), from, to, kind).map_err(|e| OpError::ValidationFailed {
+
+        match store_state {
+            Some(store_state) => store_state.check_dep_add_key(key),
+            None => state.check_dep_add_key(key),
+        }
+        .map_err(|err| OpError::ValidationFailed {
             field: "dependency".into(),
-            reason: e.to_string(),
-        })?;
-        state
-            .check_dep_add_key(key)
-            .map_err(|err| OpError::ValidationFailed {
-                field: "dependency".into(),
-                reason: err.to_string(),
-            })
+            reason: err.to_string(),
+        })
     }
 
     fn dep_add_key_into_inner(key: DepAddKey) -> DepKey {
@@ -1165,29 +1316,109 @@ impl MutationEngine {
         }
     }
 
+    fn dep_ref(
+        active_namespace: &NamespaceId,
+        endpoint_namespace: Option<NamespaceId>,
+        id: BeadId,
+    ) -> BeadRef {
+        BeadRef::new(
+            endpoint_namespace.unwrap_or_else(|| active_namespace.clone()),
+            id,
+        )
+    }
+
+    fn require_configured_dep_namespace(
+        namespace_policies: Option<&BTreeMap<NamespaceId, NamespacePolicy>>,
+        active_namespace: &NamespaceId,
+        bead_ref: &BeadRef,
+    ) -> Result<(), OpError> {
+        match namespace_policies {
+            Some(policies) if !policies.contains_key(bead_ref.namespace()) => {
+                Err(OpError::NamespaceUnknown {
+                    namespace: bead_ref.namespace().clone(),
+                })
+            }
+            None if bead_ref.namespace() != active_namespace => Err(OpError::NamespaceUnknown {
+                namespace: bead_ref.namespace().clone(),
+            }),
+            _ => Ok(()),
+        }
+    }
+
+    fn require_dep_owner_namespace(
+        active_namespace: &NamespaceId,
+        from_ref: &BeadRef,
+    ) -> Result<(), OpError> {
+        if from_ref.namespace() == active_namespace {
+            return Ok(());
+        }
+        Err(OpError::ValidationFailed {
+            field: "dependency".into(),
+            reason: format!(
+                "dependency source namespace {} must match mutation namespace {}",
+                from_ref.namespace(),
+                active_namespace
+            ),
+        })
+    }
+
+    fn require_live_dep_endpoint(
+        state: &CanonicalState,
+        store_state: Option<&StoreState>,
+        active_namespace: &NamespaceId,
+        bead_ref: &BeadRef,
+    ) -> Result<(), OpError> {
+        if let Some(store_state) = store_state {
+            let Some(endpoint_state) = store_state.get(bead_ref.namespace()) else {
+                return Err(OpError::NotFound(bead_ref.id().clone()));
+            };
+            endpoint_state
+                .require_live(bead_ref.id())
+                .map_live_err(bead_ref.id())?;
+            return Ok(());
+        }
+
+        if bead_ref.namespace() != active_namespace {
+            return Err(OpError::NamespaceUnknown {
+                namespace: bead_ref.namespace().clone(),
+            });
+        }
+        state
+            .require_live(bead_ref.id())
+            .map_live_err(bead_ref.id())?;
+        Ok(())
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn plan_add_dep(
         &self,
         state: &CanonicalState,
+        store_state: Option<&StoreState>,
+        namespace_policies: Option<&BTreeMap<NamespaceId, NamespacePolicy>>,
+        namespace: &NamespaceId,
         _stamp: &Stamp,
+        from_namespace: Option<NamespaceId>,
         from: BeadId,
+        to_namespace: Option<NamespaceId>,
         to: BeadId,
         kind: DepKind,
         dot_alloc: &mut dyn DotAllocator,
         durability: &mut PendingPlanningDurabilityEffects,
     ) -> Result<PlannedDelta, OpError> {
-        if state.get_live(&from).is_none() {
-            return Err(OpError::NotFound(from));
-        }
-        if state.get_live(&to).is_none() {
-            return Err(OpError::NotFound(to));
-        }
-        let key = Self::dep_add_key_into_inner(self.checked_dep_add_key(
-            state,
-            from.clone(),
-            to.clone(),
-            kind,
-        )?);
+        let from_ref = Self::dep_ref(namespace, from_namespace.clone(), from.clone());
+        let to_ref = Self::dep_ref(namespace, to_namespace.clone(), to.clone());
+        Self::require_configured_dep_namespace(namespace_policies, namespace, &from_ref)?;
+        Self::require_configured_dep_namespace(namespace_policies, namespace, &to_ref)?;
+        Self::require_dep_owner_namespace(namespace, &from_ref)?;
+        Self::require_live_dep_endpoint(state, store_state, namespace, &from_ref)?;
+        Self::require_live_dep_endpoint(state, store_state, namespace, &to_ref)?;
+
+        let key = DepKey::new(from_ref, to_ref, kind).map_err(|e| OpError::ValidationFailed {
+            field: "dependency".into(),
+            reason: e.to_string(),
+        })?;
+        let key =
+            Self::dep_add_key_into_inner(self.checked_dep_add_key(state, store_state, key)?);
 
         let mut delta = TxnDeltaV1::new();
         delta
@@ -1197,16 +1428,28 @@ impl MutationEngine {
             }))
             .map_err(delta_error_to_op)?;
 
-        let canonical = CanonicalMutationOp::AddDep { from, to, kind };
+        let canonical = CanonicalMutationOp::AddDep {
+            from_namespace,
+            from,
+            to_namespace,
+            to,
+            kind,
+        };
 
         Ok(PlannedDelta { delta, canonical })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn plan_remove_dep(
         &self,
         state: &CanonicalState,
+        _store_state: Option<&StoreState>,
+        namespace_policies: Option<&BTreeMap<NamespaceId, NamespacePolicy>>,
+        namespace: &NamespaceId,
         _stamp: &Stamp,
+        from_namespace: Option<NamespaceId>,
         from: BeadId,
+        to_namespace: Option<NamespaceId>,
         to: BeadId,
         kind: DepKind,
     ) -> Result<PlannedDelta, OpError> {
@@ -1216,11 +1459,15 @@ impl MutationEngine {
                 reason: "parent edges must use set-parent".into(),
             });
         }
-        let key =
-            DepKey::new_local(&NamespaceId::core(), from.clone(), to.clone(), kind).map_err(|e| OpError::ValidationFailed {
-                field: "dependency".into(),
-                reason: e.to_string(),
-            })?;
+        let from_ref = Self::dep_ref(namespace, from_namespace.clone(), from.clone());
+        let to_ref = Self::dep_ref(namespace, to_namespace.clone(), to.clone());
+        Self::require_configured_dep_namespace(namespace_policies, namespace, &from_ref)?;
+        Self::require_configured_dep_namespace(namespace_policies, namespace, &to_ref)?;
+        Self::require_dep_owner_namespace(namespace, &from_ref)?;
+        let key = DepKey::new(from_ref, to_ref, kind).map_err(|e| OpError::ValidationFailed {
+            field: "dependency".into(),
+            reason: e.to_string(),
+        })?;
 
         let mut delta = TxnDeltaV1::new();
         delta
@@ -1230,36 +1477,53 @@ impl MutationEngine {
             }))
             .map_err(delta_error_to_op)?;
 
-        let canonical = CanonicalMutationOp::RemoveDep { from, to, kind };
+        let canonical = CanonicalMutationOp::RemoveDep {
+            from_namespace,
+            from,
+            to_namespace,
+            to,
+            kind,
+        };
 
         Ok(PlannedDelta { delta, canonical })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn plan_set_parent(
         &self,
         state: &CanonicalState,
+        store_state: Option<&StoreState>,
+        namespace_policies: Option<&BTreeMap<NamespaceId, NamespacePolicy>>,
+        namespace: &NamespaceId,
         id: BeadId,
-        parent: Option<BeadId>,
-        _stamp: &Stamp,
+        parent: Option<String>,
         dot_alloc: &mut dyn DotAllocator,
         durability: &mut PendingPlanningDurabilityEffects,
     ) -> Result<PlannedDelta, OpError> {
         state.require_live(&id).map_live_err(&id)?;
+        let requested_parent = parent.clone();
+        let child_ref = BeadRef::new(namespace.clone(), id.clone());
 
         let parent_edge = match parent.as_ref() {
-            Some(parent_id) => {
-                let edge = ParentEdge::new_local(&NamespaceId::core(), id.clone(), parent_id.clone()).map_err(|e| {
+            Some(parent_raw) => {
+                let parent_ref = parse_bead_ref("parent", parent_raw, namespace)?;
+                Self::require_configured_dep_namespace(namespace_policies, namespace, &parent_ref)?;
+                Self::require_live_dep_endpoint(state, store_state, namespace, &parent_ref)?;
+                let edge = ParentEdge::new(child_ref.clone(), parent_ref.clone()).map_err(|e| {
                     OpError::ValidationFailed {
                         field: "parent".into(),
                         reason: e.to_string(),
                     }
                 })?;
-                if state.get_live(parent_id).is_none() {
-                    return Err(OpError::NotFound(parent_id.clone()));
-                }
-                if let Err(err) =
-                    state.check_no_cycle(edge.child_ref(), edge.parent_ref(), DepKind::Parent)
-                {
+                let cycle_check = match store_state {
+                    Some(store_state) => store_state
+                        .check_no_cycle(edge.child_ref(), edge.parent_ref())
+                        .map(|_| ()),
+                    None => state
+                        .check_no_cycle(edge.child_ref(), edge.parent_ref(), DepKind::Parent)
+                        .map(|_| ()),
+                };
+                if let Err(err) = cycle_check {
                     return Err(OpError::ValidationFailed {
                         field: "parent".into(),
                         reason: err.to_string(),
@@ -1294,7 +1558,7 @@ impl MutationEngine {
 
         let canonical = CanonicalMutationOp::SetParent {
             id,
-            parent: parent_edge.map(|edge| edge.parent().clone()),
+            parent: requested_parent,
         };
 
         Ok(PlannedDelta { delta, canonical })
@@ -1526,7 +1790,7 @@ enum CanonicalMutationOp {
         #[serde(skip_serializing_if = "Option::is_none")]
         id: Option<BeadId>,
         #[serde(skip_serializing_if = "Option::is_none")]
-        parent: Option<BeadId>,
+        parent: Option<String>,
         title: String,
         bead_type: BeadType,
         priority: Priority,
@@ -1576,15 +1840,23 @@ enum CanonicalMutationOp {
     SetParent {
         id: BeadId,
         #[serde(skip_serializing_if = "Option::is_none")]
-        parent: Option<BeadId>,
+        parent: Option<String>,
     },
     AddDep {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from_namespace: Option<NamespaceId>,
         from: BeadId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        to_namespace: Option<NamespaceId>,
         to: BeadId,
         kind: DepKind,
     },
     RemoveDep {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        from_namespace: Option<NamespaceId>,
         from: BeadId,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        to_namespace: Option<NamespaceId>,
         to: BeadId,
         kind: DepKind,
     },
@@ -1685,11 +1957,80 @@ fn parse_labels(labels: Vec<String>) -> Result<Labels, OpError> {
     Ok(parsed)
 }
 
-fn parse_dep_specs(deps: &[String]) -> Result<DepSpecSet, OpError> {
-    DepSpec::parse_list(deps).map_err(|e| OpError::ValidationFailed {
-        field: "dependencies".into(),
-        reason: e.to_string(),
+#[derive(Clone, Debug)]
+struct CreateDepSpec {
+    kind: DepKind,
+    to: BeadRef,
+}
+
+impl CreateDepSpec {
+    fn kind(&self) -> DepKind {
+        self.kind
+    }
+
+    fn to_ref(&self) -> &BeadRef {
+        &self.to
+    }
+
+    fn to_spec_string(&self, default_namespace: &NamespaceId) -> String {
+        let id = if self.to.namespace() == default_namespace {
+            self.to.id().as_str().to_string()
+        } else {
+            self.to.to_string()
+        };
+        if self.kind == DepKind::Blocks {
+            id
+        } else {
+            format!("{}:{id}", self.kind.as_str())
+        }
+    }
+}
+
+fn parse_bead_ref(
+    field: &'static str,
+    raw: &str,
+    default_namespace: &NamespaceId,
+) -> Result<BeadRef, OpError> {
+    BeadRef::parse(raw, default_namespace).map_err(|err| OpError::ValidationFailed {
+        field: field.into(),
+        reason: err.to_string(),
     })
+}
+
+fn parse_create_dep_specs(
+    deps: &[String],
+    default_namespace: &NamespaceId,
+) -> Result<Vec<CreateDepSpec>, OpError> {
+    let mut out = Vec::new();
+    for raw in deps {
+        let trimmed = raw.trim();
+        let (kind, id_raw) = if let Some((kind_raw, id_raw)) = trimmed.split_once(':') {
+            (
+                crate::core::ValidatedDepKind::parse(kind_raw)
+                    .map_err(|err| OpError::ValidationFailed {
+                        field: "dependencies".into(),
+                        reason: err.to_string(),
+                    })?
+                    .into_inner(),
+                id_raw.trim(),
+            )
+        } else {
+            (DepKind::Blocks, trimmed)
+        };
+        if kind == DepKind::Parent {
+            return Err(OpError::ValidationFailed {
+                field: "dependencies".into(),
+                reason: "parent edges must use set-parent".into(),
+            });
+        }
+        out.push(CreateDepSpec {
+            kind,
+            to: parse_bead_ref("dependencies", id_raw, default_namespace)?,
+        });
+    }
+    out.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.to.cmp(&b.to)));
+    out.dedup_by(|a, b| a.kind == b.kind && a.to == b.to);
+    Ok(out)
 }
 
 fn canonical_labels(labels: &Labels) -> Vec<String> {
@@ -1699,15 +2040,43 @@ fn canonical_labels(labels: &Labels) -> Vec<String> {
         .collect()
 }
 
-fn canonical_deps(deps: &DepSpecSet) -> Vec<String> {
-    deps.iter().map(|spec| spec.to_spec_string()).collect()
+fn canonical_create_deps(deps: &[CreateDepSpec], default_namespace: &NamespaceId) -> Vec<String> {
+    deps.iter()
+        .map(|spec| spec.to_spec_string(default_namespace))
+        .collect()
 }
 
-fn next_child_id(state: &CanonicalState, parent: &BeadId) -> Result<BeadId, OpError> {
-    if state.get_live(parent).is_none() {
-        return Err(OpError::NotFound(parent.clone()));
+fn live_bead_for_ref<'a>(
+    state: &'a CanonicalState,
+    store_state: Option<&'a StoreState>,
+    active_namespace: &NamespaceId,
+    bead_ref: &BeadRef,
+) -> Option<&'a Bead> {
+    if let Some(store_state) = store_state {
+        return store_state.resolve_ref(bead_ref);
     }
+    if bead_ref.namespace() != active_namespace {
+        return None;
+    }
+    state.get_live(bead_ref.id())
+}
 
+fn next_child_id_for_ref(
+    state: &CanonicalState,
+    store_state: Option<&StoreState>,
+    active_namespace: &NamespaceId,
+    parent: &BeadRef,
+) -> Result<BeadId, OpError> {
+    if live_bead_for_ref(state, store_state, active_namespace, parent).is_none() {
+        return Err(OpError::NotFound(parent.id().clone()));
+    }
+    next_child_id_from_active_state(state, parent.id())
+}
+
+fn next_child_id_from_active_state(
+    state: &CanonicalState,
+    parent: &BeadId,
+) -> Result<BeadId, OpError> {
     let depth = parent.as_str().chars().filter(|c| *c == '.').count();
     if depth >= 3 {
         return Err(OpError::ValidationFailed {

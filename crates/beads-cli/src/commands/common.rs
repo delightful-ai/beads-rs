@@ -10,6 +10,20 @@ pub(crate) fn fmt_issue_ref(namespace: &NamespaceId, id: &str) -> String {
     format!("{}/{}", namespace.as_str(), id)
 }
 
+pub(crate) fn fmt_dep_endpoint(namespace: &str, id: &str, force_namespace: bool) -> String {
+    if !force_namespace && namespace == "core" {
+        id.to_string()
+    } else {
+        format!("{namespace}/{id}")
+    }
+}
+
+pub(crate) fn dep_edges_need_namespace<'a>(
+    mut edges: impl Iterator<Item = &'a beads_api::DepEdge>,
+) -> bool {
+    edges.any(|edge| edge.from_namespace != "core" || edge.to_namespace != "core")
+}
+
 pub(crate) fn fmt_labels(labels: &[String]) -> String {
     let mut out = String::from("[");
     for (i, label) in labels.iter().enumerate() {

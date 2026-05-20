@@ -2,7 +2,11 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::bead::Bead;
 use crate::crdt::Crdt;
+use crate::dep::{AcyclicDepKey, DepAddKey, DepKey, FreeDepKey, NoCycleProof};
+use crate::error::InvalidDependency;
+use crate::identity::BeadRef;
 
 use super::{CanonicalState, NamespaceId, WriteStamp};
 
@@ -82,6 +86,105 @@ impl StoreState {
         self.by_namespace.iter()
     }
 
+    /// Resolve a namespace-qualified bead reference to a live bead.
+    pub fn resolve_ref(&self, bead_ref: &BeadRef) -> Option<&Bead> {
+        self.get(bead_ref.namespace())?.get_live(bead_ref.id())
+    }
+
+    /// Returns true when a namespace-qualified bead reference resolves live.
+    pub fn contains_live_ref(&self, bead_ref: &BeadRef) -> bool {
+        self.resolve_ref(bead_ref).is_some()
+    }
+
+    /// Get active outgoing deps from a namespace-qualified bead reference.
+    ///
+    /// This scans the store-level dep graph instead of consulting a single
+    /// `CanonicalState` index, because cross-namespace incoming edges may live
+    /// outside the target namespace's local indexes.
+    pub fn deps_from(&self, from: &BeadRef) -> Vec<DepKey> {
+        if !self.contains_live_ref(from) {
+            return Vec::new();
+        }
+        self.active_deps()
+            .filter(|key| key.from_ref() == from)
+            .filter(|key| self.contains_live_ref(key.to_ref()))
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// Get active incoming deps to a namespace-qualified bead reference.
+    pub fn deps_to(&self, to: &BeadRef) -> Vec<DepKey> {
+        if !self.contains_live_ref(to) {
+            return Vec::new();
+        }
+        self.active_deps()
+            .filter(|key| key.to_ref() == to)
+            .filter(|key| self.contains_live_ref(key.from_ref()))
+            .cloned()
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// Convert a raw dep key into a typed add key, enforcing store-wide DAG rules.
+    pub fn check_dep_add_key(&self, key: DepKey) -> Result<DepAddKey, InvalidDependency> {
+        if key.kind().requires_dag() {
+            let proof = self.check_no_cycle(key.from_ref(), key.to_ref())?;
+            let key = AcyclicDepKey::from_dep_key(key, proof)?;
+            Ok(DepAddKey::Acyclic(key))
+        } else {
+            let key = FreeDepKey::from_dep_key(key)?;
+            Ok(DepAddKey::Free(key))
+        }
+    }
+
+    /// Prove that adding `from -> to` would not create a store-wide DAG cycle.
+    pub fn check_no_cycle(
+        &self,
+        from: &BeadRef,
+        to: &BeadRef,
+    ) -> Result<NoCycleProof, InvalidDependency> {
+        if from == to {
+            return Err(InvalidDependency::SelfDependency(from.to_string()));
+        }
+
+        let mut stack = vec![to.clone()];
+        let mut visited = BTreeSet::new();
+        while let Some(current) = stack.pop() {
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            if &current == from {
+                return Err(InvalidDependency::CycleDetected {
+                    from: from.to_string(),
+                    to: to.to_string(),
+                });
+            }
+            for key in self.deps_from(&current) {
+                if key.kind().requires_dag() {
+                    stack.push(key.to_ref().clone());
+                }
+            }
+        }
+
+        Ok(NoCycleProof::new())
+    }
+
+    /// Detect store-wide dependency cycles among active DAG dependency kinds.
+    pub fn dependency_cycles(&self) -> Vec<Vec<BeadRef>> {
+        let mut cycles = BTreeSet::new();
+        let mut visited = BTreeSet::new();
+        let mut stack = Vec::new();
+
+        for key in self.active_deps().filter(|key| key.kind().requires_dag()) {
+            self.visit_cycle_node(key.from_ref(), &mut visited, &mut stack, &mut cycles);
+        }
+
+        cycles.into_iter().collect()
+    }
+
     pub fn max_write_stamp(&self) -> Option<WriteStamp> {
         self.by_namespace
             .values()
@@ -93,6 +196,54 @@ impl StoreState {
     pub fn join(a: &Self, b: &Self) -> Self {
         <Self as Crdt>::join(a, b)
     }
+
+    fn active_deps(&self) -> impl Iterator<Item = &DepKey> {
+        self.by_namespace
+            .values()
+            .flat_map(|state| state.dep_store().values())
+    }
+
+    fn visit_cycle_node(
+        &self,
+        node: &BeadRef,
+        visited: &mut BTreeSet<BeadRef>,
+        stack: &mut Vec<BeadRef>,
+        cycles: &mut BTreeSet<Vec<BeadRef>>,
+    ) {
+        if let Some(pos) = stack.iter().position(|entry| entry == node) {
+            cycles.insert(canonical_cycle(&stack[pos..], node));
+            return;
+        }
+        if visited.contains(node) {
+            return;
+        }
+
+        stack.push(node.clone());
+        for key in self.deps_from(node) {
+            if key.kind().requires_dag() {
+                self.visit_cycle_node(key.to_ref(), visited, stack, cycles);
+            }
+        }
+        stack.pop();
+        visited.insert(node.clone());
+    }
+}
+
+fn canonical_cycle(path: &[BeadRef], repeated: &BeadRef) -> Vec<BeadRef> {
+    let mut body = path.to_vec();
+    if body.is_empty() {
+        return vec![repeated.clone(), repeated.clone()];
+    }
+
+    let min_pos = body
+        .iter()
+        .enumerate()
+        .min_by(|(_, left), (_, right)| left.cmp(right))
+        .map(|(idx, _)| idx)
+        .unwrap_or(0);
+    body.rotate_left(min_pos);
+    body.push(body[0].clone());
+    body
 }
 
 impl Default for StoreState {

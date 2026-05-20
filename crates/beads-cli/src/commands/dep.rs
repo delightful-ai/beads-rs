@@ -1,17 +1,18 @@
 use clap::{Args, Subcommand};
 
 use super::{CommandResult, print_ok};
-use crate::parsers::{parse_dep_edge, parse_dep_kind};
-use crate::render::{dep_record_json_value, dependency_summary_json_value, print_json};
+use crate::commands::common::{dep_edges_need_namespace, fmt_dep_endpoint};
+use crate::parsers::parse_dep_kind;
+use crate::render::{dep_record_json_value, dependency_summary_json_value_for_edge, print_json};
 use crate::runtime::{CliRuntimeCtx, send};
-use crate::validation::{normalize_bead_id, normalize_bead_ids, validation_error};
+use crate::validation::{normalize_bead_ref_for, validation_error};
 use beads_api::{DepCycles, DepEdge};
-use beads_core::{BeadId, DepKind};
+use beads_core::{BeadId, BeadRef, DepKind, NamespaceId};
 use beads_surface::Filters;
 use beads_surface::ipc::{
     DepPayload, EmptyPayload, IdPayload, ListPayload, Request, ResponsePayload,
 };
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 #[derive(Subcommand, Debug)]
 pub enum DepCmd {
@@ -67,14 +68,63 @@ pub enum DepDirection {
     Up,
 }
 
+#[derive(Clone, Debug)]
+struct DepRefEdge {
+    kind: DepKind,
+    from: BeadRef,
+    to: BeadRef,
+}
+
+fn parse_bead_ref_arg(ctx: &CliRuntimeCtx, field: &str, raw: &str) -> CommandResult<BeadRef> {
+    let default_namespace = ctx.active_namespace();
+    normalize_bead_ref_for(field, raw, &default_namespace).map_err(Into::into)
+}
+
+fn parse_dep_ref_edge(
+    ctx: &CliRuntimeCtx,
+    kind_flag: Option<DepKind>,
+    from_raw: &str,
+    to_raw: &str,
+) -> CommandResult<DepRefEdge> {
+    let default_namespace = ctx.active_namespace();
+    let (kind_from, from_raw) = split_kind_ref(from_raw)?;
+    let (kind_to, to_raw) = split_kind_ref(to_raw)?;
+    let kind = kind_flag
+        .or(kind_from)
+        .or(kind_to)
+        .unwrap_or(DepKind::Blocks);
+    let from = normalize_bead_ref_for("from", &from_raw, &default_namespace)?;
+    let to = normalize_bead_ref_for("to", &to_raw, &default_namespace)?;
+    Ok(DepRefEdge { kind, from, to })
+}
+
+fn split_kind_ref(raw: &str) -> CommandResult<(Option<DepKind>, String)> {
+    if let Some((kind, id)) = raw.split_once(':') {
+        let kind = parse_dep_kind(kind).map_err(|err| validation_error("kind", err.to_string()))?;
+        Ok((Some(kind), id.trim().to_string()))
+    } else {
+        Ok((None, raw.trim().to_string()))
+    }
+}
+
+fn dep_payload(edge: &DepRefEdge) -> DepPayload {
+    DepPayload {
+        from_namespace: Some(edge.from.namespace().clone()),
+        from: edge.from.id().clone(),
+        to_namespace: Some(edge.to.namespace().clone()),
+        to: edge.to.id().clone(),
+        kind: edge.kind,
+    }
+}
+
 pub fn handle(ctx: &CliRuntimeCtx, cmd: DepCmd) -> CommandResult<()> {
     match cmd {
         DepCmd::Add(args) => {
-            let (kind, from, to) = parse_dep_edge(args.kind, &args.from, &args.to)
-                .map_err(|err| validation_error("dep", err.to_string()))?;
+            let edge = parse_dep_ref_edge(ctx, args.kind, &args.from, &args.to)?;
+            let mutation_ctx = ctx.with_namespace(edge.from.namespace().clone());
             let req = Request::AddDep {
-                ctx: ctx.mutation_ctx(),
-                payload: DepPayload { from, to, kind },
+                ctx: mutation_ctx.mutation_ctx(),
+                payload: dep_payload(&edge),
             };
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
@@ -82,10 +132,13 @@ pub fn handle(ctx: &CliRuntimeCtx, cmd: DepCmd) -> CommandResult<()> {
         DepCmd::Rm(args) => handle_dep_remove(ctx, args),
         DepCmd::List(args) => handle_dep_list(ctx, args),
         DepCmd::Tree { id } => {
-            let id = normalize_bead_id(&id)?;
+            let bead_ref = parse_bead_ref_arg(ctx, "id", &id)?;
+            let read_ctx = ctx.with_namespace(bead_ref.namespace().clone());
             let req = Request::DepTree {
-                ctx: ctx.read_ctx(),
-                payload: IdPayload { id },
+                ctx: read_ctx.read_ctx(),
+                payload: IdPayload {
+                    id: bead_ref.id().clone(),
+                },
             };
             let ok = send(&req)?;
             print_ok(&ok, ctx.json)
@@ -103,28 +156,33 @@ pub fn handle(ctx: &CliRuntimeCtx, cmd: DepCmd) -> CommandResult<()> {
 
 fn handle_dep_remove(ctx: &CliRuntimeCtx, args: DepRmArgs) -> CommandResult<()> {
     let explicit_kind = args.kind.is_some() || args.from.contains(':') || args.to.contains(':');
-    let (kind, from, to) = parse_dep_edge(args.kind, &args.from, &args.to)
-        .map_err(|err| validation_error("dep", err.to_string()))?;
+    let edge = parse_dep_ref_edge(ctx, args.kind, &args.from, &args.to)?;
+    let mutation_ctx = ctx.with_namespace(edge.from.namespace().clone());
 
     if explicit_kind {
         let req = Request::RemoveDep {
-            ctx: ctx.mutation_ctx(),
-            payload: DepPayload { from, to, kind },
+            ctx: mutation_ctx.mutation_ctx(),
+            payload: dep_payload(&edge),
         };
         let ok = send(&req)?;
         return print_ok(&ok, ctx.json);
     }
 
-    let (_, outgoing) = fetch_dep_edges(ctx, &from)?;
+    let (_, outgoing) = fetch_dep_edges(ctx, &edge.from)?;
     let mut removed = None;
-    for edge in outgoing.into_iter().filter(|edge| edge.to == to.as_str()) {
+    for existing in outgoing.into_iter().filter(|existing| {
+        existing.to == edge.to.id().as_str()
+            && existing.to_namespace == edge.to.namespace().as_str()
+    }) {
         let kind =
-            DepKind::parse(&edge.kind).map_err(|err| validation_error("dep", err.to_string()))?;
+            DepKind::parse(&existing.kind).map_err(|err| validation_error("dep", err.to_string()))?;
         let req = Request::RemoveDep {
-            ctx: ctx.mutation_ctx(),
+            ctx: mutation_ctx.mutation_ctx(),
             payload: DepPayload {
-                from: from.clone(),
-                to: to.clone(),
+                from_namespace: Some(edge.from.namespace().clone()),
+                from: edge.from.id().clone(),
+                to_namespace: Some(edge.to.namespace().clone()),
+                to: edge.to.id().clone(),
                 kind,
             },
         };
@@ -135,8 +193,8 @@ fn handle_dep_remove(ctx: &CliRuntimeCtx, args: DepRmArgs) -> CommandResult<()> 
         print_ok(&ok, ctx.json)
     } else {
         let req = Request::RemoveDep {
-            ctx: ctx.mutation_ctx(),
-            payload: DepPayload { from, to, kind },
+            ctx: mutation_ctx.mutation_ctx(),
+            payload: dep_payload(&edge),
         };
         let ok = send(&req)?;
         print_ok(&ok, ctx.json)
@@ -144,7 +202,11 @@ fn handle_dep_remove(ctx: &CliRuntimeCtx, args: DepRmArgs) -> CommandResult<()> 
 }
 
 fn handle_dep_list(ctx: &CliRuntimeCtx, args: DepListArgs) -> CommandResult<()> {
-    let ids = normalize_bead_ids(args.ids)?;
+    let ids = args
+        .ids
+        .into_iter()
+        .map(|raw| parse_bead_ref_arg(ctx, "id", &raw))
+        .collect::<CommandResult<Vec<_>>>()?;
     let kind_filter = args.kind.map(|kind| kind.as_str().to_string());
 
     if ctx.json && ids.len() > 1 && args.direction == DepDirection::Down {
@@ -153,7 +215,7 @@ fn handle_dep_list(ctx: &CliRuntimeCtx, args: DepListArgs) -> CommandResult<()> 
             let (_, outgoing) = fetch_dep_edges(ctx, id)?;
             for edge in outgoing {
                 if kind_matches(kind_filter.as_deref(), &edge.kind) {
-                    records.push(dep_record_json_value(&edge.from, &edge.to, &edge.kind));
+                    records.push(dep_record_json_value(&edge));
                 }
             }
         }
@@ -176,23 +238,18 @@ fn handle_dep_list(ctx: &CliRuntimeCtx, args: DepListArgs) -> CommandResult<()> 
     }
 
     if ctx.json {
-        let target_ids = all_edges
+        let target_refs = all_edges
             .iter()
-            .map(|edge| match args.direction {
-                DepDirection::Down => edge.to.clone(),
-                DepDirection::Up => edge.from.clone(),
-            })
-            .filter_map(|id| BeadId::parse(&id).ok())
-            .collect::<Vec<_>>();
-        let summaries = fetch_summary_map(ctx, target_ids)?;
+            .map(|edge| dep_edge_target_ref(edge, args.direction))
+            .collect::<CommandResult<Vec<_>>>()?;
+        let summaries = fetch_summary_map(ctx, target_refs)?;
         let mut out = Vec::new();
         for edge in all_edges {
-            let target = match args.direction {
-                DepDirection::Down => edge.to.as_str(),
-                DepDirection::Up => edge.from.as_str(),
-            };
-            if let Some(summary) = summaries.get(target) {
-                out.push(dependency_summary_json_value(summary, &edge.kind));
+            let target = dep_edge_target_ref(&edge, args.direction)?;
+            if let Some(summary) = summaries.get(&target) {
+                out.push(dependency_summary_json_value_for_edge(summary, &edge));
+            } else {
+                out.push(dep_record_json_value(&edge));
             }
         }
         print_json(&serde_json::Value::Array(out))?;
@@ -209,11 +266,14 @@ fn handle_dep_list(ctx: &CliRuntimeCtx, args: DepListArgs) -> CommandResult<()> 
 
 fn fetch_dep_edges(
     ctx: &CliRuntimeCtx,
-    id: &BeadId,
+    bead_ref: &BeadRef,
 ) -> CommandResult<(Vec<DepEdge>, Vec<DepEdge>)> {
+    let read_ctx = ctx.with_namespace(bead_ref.namespace().clone());
     let req = Request::Deps {
-        ctx: ctx.read_ctx(),
-        payload: IdPayload { id: id.clone() },
+        ctx: read_ctx.read_ctx(),
+        payload: IdPayload {
+            id: bead_ref.id().clone(),
+        },
     };
     match send(&req)? {
         ResponsePayload::Query(beads_api::QueryResult::Deps { incoming, outgoing }) => {
@@ -228,30 +288,59 @@ fn fetch_dep_edges(
 
 fn fetch_summary_map(
     ctx: &CliRuntimeCtx,
-    ids: Vec<BeadId>,
-) -> CommandResult<HashMap<String, beads_api::IssueSummary>> {
-    if ids.is_empty() {
+    refs: Vec<BeadRef>,
+) -> CommandResult<HashMap<BeadRef, beads_api::IssueSummary>> {
+    if refs.is_empty() {
         return Ok(HashMap::new());
     }
-    let req = Request::List {
-        ctx: ctx.read_ctx(),
-        payload: ListPayload {
-            filters: Filters {
-                ids: Some(ids),
-                ..Filters::default()
-            },
-        },
-    };
-    match send(&req)? {
-        ResponsePayload::Query(beads_api::QueryResult::Issues(issues)) => Ok(issues
-            .into_iter()
-            .map(|issue| (issue.id.clone(), issue))
-            .collect()),
-        other => Err(beads_surface::ipc::IpcError::DaemonUnavailable(format!(
-            "unexpected response for dependency summaries: {other:?}"
-        ))
-        .into()),
+
+    let mut by_namespace: BTreeMap<NamespaceId, BTreeSet<BeadId>> = BTreeMap::new();
+    for bead_ref in refs {
+        let (namespace, id) = bead_ref.into_parts();
+        by_namespace.entry(namespace).or_default().insert(id);
     }
+
+    let mut out = HashMap::new();
+    for (namespace, ids) in by_namespace {
+        let read_ctx = ctx.with_namespace(namespace.clone());
+        let req = Request::List {
+            ctx: read_ctx.read_ctx(),
+            payload: ListPayload {
+                filters: Filters {
+                    ids: Some(ids.into_iter().collect()),
+                    ..Filters::default()
+                },
+            },
+        };
+        match send(&req)? {
+            ResponsePayload::Query(beads_api::QueryResult::Issues(issues)) => {
+                for issue in issues {
+                    let id = BeadId::parse(&issue.id)
+                        .map_err(|err| validation_error("id", err.to_string()))?;
+                    out.insert(BeadRef::new(issue.namespace.clone(), id), issue);
+                }
+            }
+            other => {
+                return Err(beads_surface::ipc::IpcError::DaemonUnavailable(format!(
+                    "unexpected response for dependency summaries: {other:?}"
+                ))
+                .into());
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn dep_edge_target_ref(edge: &DepEdge, direction: DepDirection) -> CommandResult<BeadRef> {
+    let (namespace, id) = match direction {
+        DepDirection::Down => (&edge.to_namespace, &edge.to),
+        DepDirection::Up => (&edge.from_namespace, &edge.from),
+    };
+    Ok(BeadRef::new(
+        NamespaceId::parse(namespace)
+            .map_err(|err| validation_error("namespace", err.to_string()))?,
+        BeadId::parse(id).map_err(|err| validation_error("id", err.to_string()))?,
+    ))
 }
 
 fn kind_matches(filter: Option<&str>, kind: &str) -> bool {
@@ -267,29 +356,41 @@ fn parse_direction(raw: &str) -> Result<DepDirection, String> {
 }
 
 pub fn render_dep_tree(root: &beads_core::BeadRef, edges: &[DepEdge]) -> String {
+    let force_namespace =
+        root.namespace() != &NamespaceId::core() || dep_edges_need_namespace(edges.iter());
+    let root = fmt_dep_endpoint(
+        root.namespace().as_str(),
+        root.id().as_str(),
+        force_namespace,
+    );
     if edges.is_empty() {
         return format!("\n{root} has no dependencies\n");
     }
     let mut out = format!("\n🌲 Dependency tree for {root}:\n\n");
     for e in edges {
-        out.push_str(&format!("{} → {} ({})\n", e.from, e.to, e.kind));
+        let from = fmt_dep_endpoint(&e.from_namespace, &e.from, force_namespace);
+        let to = fmt_dep_endpoint(&e.to_namespace, &e.to, force_namespace);
+        out.push_str(&format!("{from} → {to} ({})\n", e.kind));
     }
     out.push('\n');
     out
 }
 
 pub fn render_deps(incoming: &[DepEdge], outgoing: &[DepEdge]) -> String {
+    let force_namespace = dep_edges_need_namespace(incoming.iter().chain(outgoing.iter()));
     let mut out = String::new();
     if !outgoing.is_empty() {
         out.push_str(&format!("\nDepends on ({}):\n", outgoing.len()));
         for e in outgoing {
-            out.push_str(&format!("  → {} ({})\n", e.to, e.kind));
+            let to = fmt_dep_endpoint(&e.to_namespace, &e.to, force_namespace);
+            out.push_str(&format!("  → {to} ({})\n", e.kind));
         }
     }
     if !incoming.is_empty() {
         out.push_str(&format!("\nBlocks ({}):\n", incoming.len()));
         for e in incoming {
-            out.push_str(&format!("  ← {} ({})\n", e.from, e.kind));
+            let from = fmt_dep_endpoint(&e.from_namespace, &e.from, force_namespace);
+            out.push_str(&format!("  ← {from} ({})\n", e.kind));
         }
     }
     if out.is_empty() {

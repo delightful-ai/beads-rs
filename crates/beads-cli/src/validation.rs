@@ -1,5 +1,6 @@
 use beads_core::{
-    BeadId, BeadSlug, ClientRequestId, DepSpec, NamespaceId, ValidatedBeadId, ValidatedNamespaceId,
+    BeadId, BeadRef, BeadSlug, ClientRequestId, DepKind, NamespaceId, ValidatedBeadId,
+    ValidatedDepKind, ValidatedNamespaceId,
 };
 
 pub type Result<T> = std::result::Result<T, ValidationError>;
@@ -29,6 +30,15 @@ pub fn normalize_bead_id_for(field: &str, id: &str) -> Result<BeadId> {
 
 pub fn normalize_bead_ids(ids: Vec<String>) -> Result<Vec<BeadId>> {
     ids.into_iter().map(|id| normalize_bead_id(&id)).collect()
+}
+
+pub fn normalize_bead_ref_for(
+    field: &str,
+    raw: &str,
+    default_namespace: &NamespaceId,
+) -> Result<BeadRef> {
+    BeadRef::parse(raw, default_namespace)
+        .map_err(|err| validation_error(field, err.to_string()))
 }
 
 pub fn normalize_bead_slug_for(field: &str, slug: &str) -> Result<BeadSlug> {
@@ -62,10 +72,48 @@ pub fn normalize_optional_client_request_id(raw: Option<&str>) -> Result<Option<
 }
 
 pub fn normalize_dep_specs(specs: Vec<String>) -> Result<Vec<String>> {
-    let parsed =
-        DepSpec::parse_list(&specs).map_err(|err| validation_error("deps", err.to_string()))?;
+    normalize_dep_specs_for(specs, &NamespaceId::core())
+}
 
-    Ok(parsed.iter().map(|spec| spec.to_spec_string()).collect())
+pub fn normalize_dep_specs_for(
+    specs: Vec<String>,
+    default_namespace: &NamespaceId,
+) -> Result<Vec<String>> {
+    let mut parsed = Vec::new();
+    for spec in specs {
+        for part in spec.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            parsed.push(normalize_dep_spec_for(part, default_namespace)?);
+        }
+    }
+    parsed.sort();
+    parsed.dedup();
+    Ok(parsed)
+}
+
+fn normalize_dep_spec_for(raw: &str, default_namespace: &NamespaceId) -> Result<String> {
+    let (kind, ref_raw) = if let Some((kind_raw, id_raw)) = raw.split_once(':') {
+        let kind = ValidatedDepKind::parse(kind_raw.trim())
+            .map_err(|err| validation_error("deps.kind", err.to_string()))?
+            .into_inner();
+        (kind, id_raw.trim())
+    } else {
+        (DepKind::Blocks, raw)
+    };
+    let bead_ref = normalize_bead_ref_for("deps", ref_raw, default_namespace)?;
+    let id = if bead_ref.namespace() == default_namespace {
+        bead_ref.id().as_str().to_string()
+    } else {
+        bead_ref.to_string()
+    };
+    if kind == DepKind::Blocks {
+        Ok(id)
+    } else {
+        Ok(format!("{}:{id}", kind.as_str()))
+    }
 }
 
 #[cfg(test)]
