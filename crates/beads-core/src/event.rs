@@ -2158,11 +2158,11 @@ fn decode_wire_dep_add(
 
     let key = DepKey::new(
         BeadRef::new(
-            from_namespace.ok_or(DecodeError::MissingField("from_namespace"))?,
+            from_namespace.unwrap_or_else(NamespaceId::core),
             from.ok_or(DecodeError::MissingField("from"))?,
         ),
         BeadRef::new(
-            to_namespace.ok_or(DecodeError::MissingField("to_namespace"))?,
+            to_namespace.unwrap_or_else(NamespaceId::core),
             to.ok_or(DecodeError::MissingField("to"))?,
         ),
         kind.ok_or(DecodeError::MissingField("kind"))?,
@@ -2250,11 +2250,11 @@ fn decode_wire_dep_remove(
 
     let key = DepKey::new(
         BeadRef::new(
-            from_namespace.ok_or(DecodeError::MissingField("from_namespace"))?,
+            from_namespace.unwrap_or_else(NamespaceId::core),
             from.ok_or(DecodeError::MissingField("from"))?,
         ),
         BeadRef::new(
-            to_namespace.ok_or(DecodeError::MissingField("to_namespace"))?,
+            to_namespace.unwrap_or_else(NamespaceId::core),
             to.ok_or(DecodeError::MissingField("to"))?,
         ),
         kind.ok_or(DecodeError::MissingField("kind"))?,
@@ -2335,11 +2335,11 @@ fn decode_wire_parent_add(
 
     let edge = ParentEdge::new(
         BeadRef::new(
-            child_namespace.ok_or(DecodeError::MissingField("child_namespace"))?,
+            child_namespace.unwrap_or_else(NamespaceId::core),
             child.ok_or(DecodeError::MissingField("child"))?,
         ),
         BeadRef::new(
-            parent_namespace.ok_or(DecodeError::MissingField("parent_namespace"))?,
+            parent_namespace.unwrap_or_else(NamespaceId::core),
             parent.ok_or(DecodeError::MissingField("parent"))?,
         ),
     )
@@ -2419,11 +2419,11 @@ fn decode_wire_parent_remove(
 
     let edge = ParentEdge::new(
         BeadRef::new(
-            child_namespace.ok_or(DecodeError::MissingField("child_namespace"))?,
+            child_namespace.unwrap_or_else(NamespaceId::core),
             child.ok_or(DecodeError::MissingField("child"))?,
         ),
         BeadRef::new(
-            parent_namespace.ok_or(DecodeError::MissingField("parent_namespace"))?,
+            parent_namespace.unwrap_or_else(NamespaceId::core),
             parent.ok_or(DecodeError::MissingField("parent"))?,
         ),
     )
@@ -4250,7 +4250,7 @@ mod tests {
     }
 
     #[test]
-    fn cbor_dep_ops_reject_legacy_bare_endpoints() {
+    fn cbor_dep_ops_decode_legacy_bare_endpoints_as_core_refs() {
         let mut add = Vec::new();
         let mut enc = Encoder::new(&mut add);
         enc.map(4).unwrap();
@@ -4271,8 +4271,9 @@ mod tests {
         .unwrap();
 
         let mut dec = Decoder::new(add.as_slice());
-        let err = decode_wire_dep_add(&mut dec, &Limits::default(), 0).unwrap_err();
-        assert!(matches!(err, DecodeError::MissingField("from_namespace")));
+        let add = decode_wire_dep_add(&mut dec, &Limits::default(), 0).unwrap();
+        assert_eq!(add.key.from_ref().namespace(), &NamespaceId::core());
+        assert_eq!(add.key.to_ref().namespace(), &NamespaceId::core());
 
         let mut remove = Vec::new();
         let mut enc = Encoder::new(&mut remove);
@@ -4294,8 +4295,9 @@ mod tests {
         .unwrap();
 
         let mut dec = Decoder::new(remove.as_slice());
-        let err = decode_wire_dep_remove(&mut dec, &Limits::default(), 0).unwrap_err();
-        assert!(matches!(err, DecodeError::MissingField("from_namespace")));
+        let remove = decode_wire_dep_remove(&mut dec, &Limits::default(), 0).unwrap();
+        assert_eq!(remove.key.from_ref().namespace(), &NamespaceId::core());
+        assert_eq!(remove.key.to_ref().namespace(), &NamespaceId::core());
     }
 
     #[test]

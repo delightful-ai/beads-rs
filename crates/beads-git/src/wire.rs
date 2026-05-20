@@ -2015,6 +2015,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_legacy_state_accepts_or_set_deps_with_legacy_string_refs() {
+        let state_bytes = b"";
+        let tomb_bytes = b"";
+        let notes_bytes = b"";
+        let deps_bytes = br#"{"cc":{"max":{},"dots":[]},"entries":[{"key":{"from":"bd-a","to":"bd-b","kind":"blocks"},"dots":[{"replica":"11111111-1111-1111-1111-111111111111","counter":1}]}],"stamp":null}"#;
+        let key = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id("bd-a"),
+            bead_id("bd-b"),
+            DepKind::Blocks,
+        )
+        .unwrap();
+
+        let state = parse_legacy_state(state_bytes, tomb_bytes, deps_bytes, notes_bytes)
+            .expect("string bead refs in OR-Set deps should decode as core refs");
+
+        assert!(state.dep_contains(&key));
+    }
+
+    #[test]
     fn parse_legacy_deps_edges_errors_when_no_valid_lines() {
         let bytes = br#"{"garbage":true}
 "#;

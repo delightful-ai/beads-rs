@@ -6,7 +6,7 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use sha2::Digest;
 use uuid::Uuid;
 
@@ -755,7 +755,7 @@ impl From<BeadId> for String {
 ///
 /// `BeadId` is only unique inside a namespace. Use this type at graph and API
 /// boundaries that need to identify a bead without relying on ambient context.
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 pub struct BeadRef {
     pub namespace: NamespaceId,
     pub id: BeadId,
@@ -791,6 +791,24 @@ impl BeadRef {
 impl fmt::Display for BeadRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.namespace, self.id)
+    }
+}
+
+impl<'de> Deserialize<'de> for BeadRef {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Wire {
+            Qualified { namespace: NamespaceId, id: BeadId },
+            LegacyCoreString(String),
+        }
+
+        match Wire::deserialize(deserializer)? {
+            Wire::Qualified { namespace, id } => Ok(BeadRef::new(namespace, id)),
+            Wire::LegacyCoreString(raw) => {
+                BeadRef::parse(&raw, &NamespaceId::core()).map_err(serde::de::Error::custom)
+            }
+        }
     }
 }
 
