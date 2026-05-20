@@ -96,12 +96,18 @@ pub fn normalize_dep_specs_for(
 fn normalize_dep_spec_for(raw: &str, default_namespace: &NamespaceId) -> Result<String> {
     let (kind, ref_raw) = if let Some((kind_raw, id_raw)) = raw.split_once(':') {
         let kind = ValidatedDepKind::parse(kind_raw.trim())
-            .map_err(|err| validation_error("deps.kind", err.to_string()))?
+            .map_err(|err| validation_error("deps", err.to_string()))?
             .into_inner();
         (kind, id_raw.trim())
     } else {
         (DepKind::Blocks, raw)
     };
+    if kind == DepKind::Parent {
+        return Err(validation_error(
+            "deps",
+            "parent dependency kind is reserved for parent relationships",
+        ));
+    }
     let bead_ref = normalize_bead_ref_for("deps", ref_raw, default_namespace)?;
     let id = if bead_ref.namespace() == default_namespace {
         bead_ref.id().as_str().to_string()

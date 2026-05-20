@@ -16,7 +16,9 @@ use crate::fixtures::legacy_store::{
     store_first_parent_oid, store_ref_oid, wait_for_fetched_remote_store_ref,
     write_nonempty_strict_store_commit, write_store_commit, write_strict_store_commit,
 };
-use beads_core::{BeadId, CanonicalState, Claim, DepKey, DepKind, StoreMetaVersions, WriteStamp};
+use beads_core::{
+    BeadId, CanonicalState, Claim, DepKey, DepKind, NamespaceId, StoreMetaVersions, WriteStamp,
+};
 use beads_git::sync::migrate_store_ref_to_v2_with_before_push_for_testing;
 use beads_git::wire::{StoreChecksums, serialize_meta};
 use git2::{ObjectType, Repository};
@@ -206,7 +208,8 @@ fn bead_id(raw: &str) -> BeadId {
 }
 
 fn dep_key(from: &str, to: &str, kind: DepKind) -> DepKey {
-    DepKey::new(bead_id(from), bead_id(to), kind).expect("valid dep key")
+    DepKey::new_local(&NamespaceId::core(), bead_id(from), bead_id(to), kind)
+        .expect("valid dep key")
 }
 
 fn assert_rich_workflow_state(

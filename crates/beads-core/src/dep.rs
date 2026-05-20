@@ -527,7 +527,8 @@ mod tests {
     use super::*;
 
     fn make_key() -> DepKey {
-        DepKey::new(
+        DepKey::new_local(
+            &NamespaceId::core(),
             BeadId::parse("bd-abc").unwrap(),
             BeadId::parse("bd-xyz").unwrap(),
             DepKind::Blocks,
@@ -538,7 +539,7 @@ mod tests {
     #[test]
     fn self_dependency_rejected() {
         let id = BeadId::parse("bd-abc").unwrap();
-        let result = DepKey::new(id.clone(), id, DepKind::Blocks);
+        let result = DepKey::new_local(&NamespaceId::core(), id.clone(), id, DepKind::Blocks);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(matches!(err, InvalidDependency::SelfDependency(_)));
@@ -548,7 +549,7 @@ mod tests {
     fn accessors_work() {
         let from = BeadId::parse("bd-abc").unwrap();
         let to = BeadId::parse("bd-xyz").unwrap();
-        let edge = ParentEdge::new(from.clone(), to.clone()).unwrap();
+        let edge = ParentEdge::new_local(&NamespaceId::core(), from.clone(), to.clone()).unwrap();
         assert_eq!(edge.child(), &from);
         assert_eq!(edge.parent(), &to);
     }
@@ -627,7 +628,7 @@ mod tests {
     #[test]
     fn parent_edge_rejects_self_parent() {
         let id = BeadId::parse("bd-abc").unwrap();
-        let err = ParentEdge::new(id.clone(), id).unwrap_err();
+        let err = ParentEdge::new_local(&NamespaceId::core(), id.clone(), id).unwrap_err();
         assert!(matches!(err, InvalidDependency::SelfDependency(_)));
     }
 }

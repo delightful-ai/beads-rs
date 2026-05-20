@@ -1136,8 +1136,9 @@ mod tests {
                 from != to
             })
             .prop_map(|(from, to, kind, dot, stamp)| {
-                let key = DepKey::new(bead_id(&from), bead_id(&to), kind)
-                    .unwrap_or_else(|err| panic!("dep key invalid: {}", err));
+                let key =
+                    DepKey::new_local(&NamespaceId::core(), bead_id(&from), bead_id(&to), kind)
+                        .unwrap_or_else(|err| panic!("dep key invalid: {}", err));
                 (key, dot, stamp)
             });
 
@@ -1152,8 +1153,9 @@ mod tests {
                 |(child, parent, _, _)| child != parent,
             )
             .prop_map(|(child, parent, dot, stamp)| {
-                let edge = ParentEdge::new(bead_id(&child), bead_id(&parent))
-                    .unwrap_or_else(|e| panic!("parent edge invalid: {}", e));
+                let edge =
+                    ParentEdge::new_local(&NamespaceId::core(), bead_id(&child), bead_id(&parent))
+                        .unwrap_or_else(|e| panic!("parent edge invalid: {}", e));
                 (edge.to_dep_key(), dot, stamp)
             });
 
@@ -1197,7 +1199,8 @@ mod tests {
             stamp.clone(),
             None,
         ));
-        let dep_key = DepKey::new(
+        let dep_key = DepKey::new_local(
+            &NamespaceId::core(),
             bead_id("bd-legacy"),
             bead_id("bd-legacy-target"),
             DepKind::Blocks,
@@ -1589,7 +1592,13 @@ mod tests {
         let ctx = state.label_dvv(&id, &label, &stamp);
         state.apply_label_remove(id.clone(), &label, &ctx, stamp.clone(), stamp.clone());
 
-        let dep_key = DepKey::new(id.clone(), bead_id("bd-target"), DepKind::Blocks).unwrap();
+        let dep_key = DepKey::new_local(
+            &NamespaceId::core(),
+            id.clone(),
+            bead_id("bd-target"),
+            DepKind::Blocks,
+        )
+        .unwrap();
         let dep_dot = Dot {
             replica: ReplicaId::from(Uuid::from_bytes([2u8; 16])),
             counter: 2,
@@ -1651,8 +1660,20 @@ mod tests {
             stamp.clone(),
         );
 
-        let dep_key_a = DepKey::new(id.clone(), bead_id("bd-target-a"), DepKind::Blocks).unwrap();
-        let dep_key_b = DepKey::new(id.clone(), bead_id("bd-target-b"), DepKind::Related).unwrap();
+        let dep_key_a = DepKey::new_local(
+            &NamespaceId::core(),
+            id.clone(),
+            bead_id("bd-target-a"),
+            DepKind::Blocks,
+        )
+        .unwrap();
+        let dep_key_b = DepKey::new_local(
+            &NamespaceId::core(),
+            id.clone(),
+            bead_id("bd-target-b"),
+            DepKind::Related,
+        )
+        .unwrap();
         apply_dep_add_checked(&mut state, dep_key_a.clone(), dot(3, 3), stamp.clone());
         apply_dep_add_checked(&mut state, dep_key_b.clone(), dot(4, 4), stamp.clone());
         let dep_ctx = state.dep_dvv(&dep_key_b);
@@ -1739,8 +1760,20 @@ mod tests {
             label_stamp_b.clone(),
             stamp.clone(),
         );
-        let dep_key_a = DepKey::new(id.clone(), bead_id("bd-order-a"), DepKind::Blocks).unwrap();
-        let dep_key_b = DepKey::new(id.clone(), bead_id("bd-order-b"), DepKind::Related).unwrap();
+        let dep_key_a = DepKey::new_local(
+            &NamespaceId::core(),
+            id.clone(),
+            bead_id("bd-order-a"),
+            DepKind::Blocks,
+        )
+        .unwrap();
+        let dep_key_b = DepKey::new_local(
+            &NamespaceId::core(),
+            id.clone(),
+            bead_id("bd-order-b"),
+            DepKind::Related,
+        )
+        .unwrap();
         apply_dep_add_checked(
             &mut state_a,
             dep_key_a.clone(),
@@ -1851,9 +1884,20 @@ mod tests {
     fn dep_ops_with_distinct_stamps_are_deterministic() {
         let stamp_a = Stamp::new(WriteStamp::new(15, 0), actor_id("dan"));
         let stamp_b = Stamp::new(WriteStamp::new(16, 0), actor_id("erin"));
-        let key_a = DepKey::new(bead_id("bd-dep-a"), bead_id("bd-dep-b"), DepKind::Blocks).unwrap();
-        let key_b =
-            DepKey::new(bead_id("bd-dep-a"), bead_id("bd-dep-c"), DepKind::Related).unwrap();
+        let key_a = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id("bd-dep-a"),
+            bead_id("bd-dep-b"),
+            DepKind::Blocks,
+        )
+        .unwrap();
+        let key_b = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id("bd-dep-a"),
+            bead_id("bd-dep-c"),
+            DepKind::Related,
+        )
+        .unwrap();
 
         let mut state_a = CanonicalState::new();
         apply_dep_add_checked(&mut state_a, key_a.clone(), dot(3, 1), stamp_a.clone());
@@ -1879,13 +1923,30 @@ mod tests {
         let mut state = CanonicalState::new();
         state.insert(make_bead(&from, &stamp)).unwrap();
 
-        let key_blocks = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
-        let key_discovered =
-            DepKey::new(from.clone(), to.clone(), DepKind::DiscoveredFrom).unwrap();
-        let key_parent = ParentEdge::new(from.clone(), to.clone())
+        let key_blocks = DepKey::new_local(
+            &NamespaceId::core(),
+            from.clone(),
+            to.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap();
+        let key_discovered = DepKey::new_local(
+            &NamespaceId::core(),
+            from.clone(),
+            to.clone(),
+            DepKind::DiscoveredFrom,
+        )
+        .unwrap();
+        let key_parent = ParentEdge::new_local(&NamespaceId::core(), from.clone(), to.clone())
             .unwrap_or_else(|e| panic!("parent edge invalid: {}", e))
             .to_dep_key();
-        let key_related = DepKey::new(from.clone(), to.clone(), DepKind::Related).unwrap();
+        let key_related = DepKey::new_local(
+            &NamespaceId::core(),
+            from.clone(),
+            to.clone(),
+            DepKind::Related,
+        )
+        .unwrap();
 
         apply_dep_add_checked(&mut state, key_related, dot(1, 4), stamp.clone());
         apply_dep_add_checked(&mut state, key_parent, dot(1, 3), stamp.clone());
@@ -1912,13 +1973,15 @@ mod tests {
         let stamp = Stamp::new(WriteStamp::new(42, 7), actor_id("alice"));
         let replica_a = ReplicaId::from(Uuid::from_bytes([4u8; 16]));
         let replica_b = ReplicaId::from(Uuid::from_bytes([7u8; 16]));
-        let key_blocks = DepKey::new(
+        let key_blocks = DepKey::new_local(
+            &NamespaceId::core(),
             bead_id("bd-legacy-from"),
             bead_id("bd-legacy-to"),
             DepKind::Blocks,
         )
         .unwrap();
-        let key_related = DepKey::new(
+        let key_related = DepKey::new_local(
+            &NamespaceId::core(),
             bead_id("bd-legacy-from"),
             bead_id("bd-legacy-other"),
             DepKind::Related,
@@ -1960,10 +2023,15 @@ mod tests {
 
     #[test]
     fn legacy_deps_parse_then_serialize_is_deterministic() {
-        let key_parent = ParentEdge::new(bead_id("bd-legacy-a"), bead_id("bd-legacy-b"))
-            .unwrap_or_else(|e| panic!("parent edge invalid: {}", e))
-            .to_dep_key();
-        let key_blocks = DepKey::new(
+        let key_parent = ParentEdge::new_local(
+            &NamespaceId::core(),
+            bead_id("bd-legacy-a"),
+            bead_id("bd-legacy-b"),
+        )
+        .unwrap_or_else(|e| panic!("parent edge invalid: {}", e))
+        .to_dep_key();
+        let key_blocks = DepKey::new_local(
+            &NamespaceId::core(),
             bead_id("bd-legacy-a"),
             bead_id("bd-legacy-c"),
             DepKind::Blocks,
@@ -2034,11 +2102,23 @@ mod tests {
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         assert_eq!(wire.entries.len(), 1, "deleted edge should not be active");
 
-        let active_key = DepKey::new(bead_id("bd-a"), bead_id("bd-b"), DepKind::Blocks).unwrap();
+        let active_key = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id("bd-a"),
+            bead_id("bd-b"),
+            DepKind::Blocks,
+        )
+        .unwrap();
         assert_eq!(wire.entries[0].key, active_key);
         assert_eq!(wire.entries[0].dots.len(), 1);
 
-        let deleted_key = DepKey::new(bead_id("bd-c"), bead_id("bd-d"), DepKind::Related).unwrap();
+        let deleted_key = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id("bd-c"),
+            bead_id("bd-d"),
+            DepKind::Related,
+        )
+        .unwrap();
         let deleted_dot = legacy_dep_dot_for_key(&deleted_key);
         assert!(
             wire.cc.dominates(&deleted_dot),
@@ -2059,7 +2139,13 @@ mod tests {
             "LEGACY_DEPS_SHAPE(line=2): conflicting active/deleted records; using last record"
         );
 
-        let key = DepKey::new(bead_id("bd-a"), bead_id("bd-b"), DepKind::Blocks).unwrap();
+        let key = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id("bd-a"),
+            bead_id("bd-b"),
+            DepKind::Blocks,
+        )
+        .unwrap();
         let deleted_dot = legacy_dep_dot_for_key(&key);
         assert!(
             wire.cc.dominates(&deleted_dot),
@@ -2097,7 +2183,13 @@ mod tests {
         let mut deleted_state = CanonicalState::new();
         deleted_state.set_dep_store(deleted_store);
 
-        let key = DepKey::new(bead_id("bd-a"), bead_id("bd-b"), DepKind::Blocks).unwrap();
+        let key = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id("bd-a"),
+            bead_id("bd-b"),
+            DepKind::Blocks,
+        )
+        .unwrap();
         let merged = active_state.join(&deleted_state);
         assert!(
             !merged.dep_store().contains(&key),
@@ -2138,7 +2230,13 @@ mod tests {
         assert!(warnings.is_empty(), "unexpected warnings: {warnings:?}");
         let deps = state.dep_store();
         assert_eq!(deps.values().count(), 1);
-        let key = DepKey::new(bead_id("bd-a"), bead_id("bd-b"), DepKind::Blocks).unwrap();
+        let key = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id("bd-a"),
+            bead_id("bd-b"),
+            DepKind::Blocks,
+        )
+        .unwrap();
         assert!(deps.contains(&key));
     }
 
@@ -2196,7 +2294,13 @@ mod tests {
 
     #[test]
     fn legacy_dep_dot_for_key_matches_legacy_namespace_seed_order() {
-        let key = DepKey::new(bead_id("bd-a"), bead_id("bd-b"), DepKind::Blocks).unwrap();
+        let key = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id("bd-a"),
+            bead_id("bd-b"),
+            DepKind::Blocks,
+        )
+        .unwrap();
 
         let dot = legacy_dep_dot_for_key(&key);
 
@@ -2393,10 +2497,20 @@ mod tests {
     fn parse_deps_rejects_out_of_order() {
         let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
         let mut state = CanonicalState::new();
-        let key_a =
-            DepKey::new(bead_id("bd-a"), bead_id("bd-b"), DepKind::Blocks).expect("dep key a");
-        let key_b =
-            DepKey::new(bead_id("bd-a"), bead_id("bd-c"), DepKind::Blocks).expect("dep key b");
+        let key_a = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id("bd-a"),
+            bead_id("bd-b"),
+            DepKind::Blocks,
+        )
+        .expect("dep key a");
+        let key_b = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id("bd-a"),
+            bead_id("bd-c"),
+            DepKind::Blocks,
+        )
+        .expect("dep key b");
         apply_dep_add_checked(&mut state, key_a, dot(1, 1), stamp.clone());
         apply_dep_add_checked(&mut state, key_b, dot(2, 2), stamp.clone());
         let bytes = serialize_deps(&state).expect("serialize_deps");
@@ -2420,10 +2534,20 @@ mod tests {
     fn parse_deps_rejects_duplicate() {
         let stamp = Stamp::new(WriteStamp::new(1, 0), actor_id("alice"));
         let mut state = CanonicalState::new();
-        let key_a =
-            DepKey::new(bead_id("bd-a"), bead_id("bd-b"), DepKind::Blocks).expect("dep key a");
-        let key_b =
-            DepKey::new(bead_id("bd-a"), bead_id("bd-c"), DepKind::Blocks).expect("dep key b");
+        let key_a = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id("bd-a"),
+            bead_id("bd-b"),
+            DepKind::Blocks,
+        )
+        .expect("dep key a");
+        let key_b = DepKey::new_local(
+            &NamespaceId::core(),
+            bead_id("bd-a"),
+            bead_id("bd-c"),
+            DepKind::Blocks,
+        )
+        .expect("dep key b");
         apply_dep_add_checked(&mut state, key_a, dot(1, 1), stamp.clone());
         apply_dep_add_checked(&mut state, key_b, dot(2, 2), stamp.clone());
         let bytes = serialize_deps(&state).expect("serialize_deps");

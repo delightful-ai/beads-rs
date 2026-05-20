@@ -3544,7 +3544,8 @@ mod tests {
         let dep_replica = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
         txn.delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                key: DepKey::new(
+                key: DepKey::new_local(
+                    &NamespaceId::core(),
                     BeadId::parse("bd-test1").unwrap(),
                     BeadId::parse("bd-dep").unwrap(),
                     DepKind::Blocks,
@@ -3558,7 +3559,8 @@ mod tests {
             .unwrap();
         txn.delta
             .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-                key: DepKey::new(
+                key: DepKey::new_local(
+                    &NamespaceId::core(),
                     BeadId::parse("bd-test1").unwrap(),
                     BeadId::parse("bd-dep2").unwrap(),
                     DepKind::Related,
@@ -4145,7 +4147,8 @@ mod tests {
         txn_ref
             .delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                key: DepKey::new(
+                key: DepKey::new_local(
+                    &NamespaceId::core(),
                     BeadId::parse("bd-test1").unwrap(),
                     BeadId::parse("bd-dep").unwrap(),
                     DepKind::Blocks,
@@ -4160,7 +4163,8 @@ mod tests {
         txn_ref
             .delta
             .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-                key: DepKey::new(
+                key: DepKey::new_local(
+                    &NamespaceId::core(),
                     BeadId::parse("bd-test1").unwrap(),
                     BeadId::parse("bd-dep").unwrap(),
                     DepKind::Blocks,

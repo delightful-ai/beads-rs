@@ -1086,13 +1086,25 @@ mod tests {
         let mut state = CanonicalState::new();
         let from = BeadId::parse("bd-from").unwrap();
         let to = BeadId::parse("bd-to").unwrap();
-        let key = DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap();
+        let key = DepKey::new_local(
+            &NamespaceId::core(),
+            from.clone(),
+            to.clone(),
+            DepKind::Blocks,
+        )
+        .unwrap();
         let replica_id = ReplicaId::new(Uuid::from_bytes([9u8; 16]));
 
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::DepRemove(WireDepRemoveV1 {
-                key: DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap(),
+                key: DepKey::new_local(
+                    &NamespaceId::core(),
+                    from.clone(),
+                    to.clone(),
+                    DepKind::Blocks,
+                )
+                .unwrap(),
                 ctx: WireDvvV1 {
                     max: std::collections::BTreeMap::from([(replica_id, 10)]),
                     dots: Vec::new(),
@@ -1106,7 +1118,13 @@ mod tests {
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                key: DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap(),
+                key: DepKey::new_local(
+                    &NamespaceId::core(),
+                    from.clone(),
+                    to.clone(),
+                    DepKind::Blocks,
+                )
+                .unwrap(),
                 dot: WireDotV1 {
                     replica: replica_id,
                     counter: 5,
@@ -1120,7 +1138,7 @@ mod tests {
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                key: DepKey::new(from, to, DepKind::Blocks).unwrap(),
+                key: DepKey::new_local(&NamespaceId::core(), from, to, DepKind::Blocks).unwrap(),
                 dot: WireDotV1 {
                     replica: replica_id,
                     counter: 20,
@@ -1152,7 +1170,13 @@ mod tests {
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                key: DepKey::new(from.clone(), to.clone(), DepKind::Blocks).unwrap(),
+                key: DepKey::new_local(
+                    &NamespaceId::core(),
+                    from.clone(),
+                    to.clone(),
+                    DepKind::Blocks,
+                )
+                .unwrap(),
                 dot: WireDotV1 {
                     replica: ReplicaId::new(Uuid::from_bytes([1u8; 16])),
                     counter: 1,
@@ -1161,7 +1185,9 @@ mod tests {
             .unwrap();
 
         apply_event(&mut state, &event_with_delta(delta, 12)).unwrap();
-        assert!(state.dep_contains(&DepKey::new(from, to, DepKind::Blocks).unwrap()));
+        assert!(state.dep_contains(
+            &DepKey::new_local(&NamespaceId::core(), from, to, DepKind::Blocks).unwrap()
+        ));
     }
 
     #[test]
@@ -1184,7 +1210,8 @@ mod tests {
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                key: DepKey::new(a.clone(), b.clone(), DepKind::Blocks).unwrap(),
+                key: DepKey::new_local(&NamespaceId::core(), a.clone(), b.clone(), DepKind::Blocks)
+                    .unwrap(),
                 dot: WireDotV1 {
                     replica: ReplicaId::new(Uuid::from_bytes([3u8; 16])),
                     counter: 1,
@@ -1196,7 +1223,8 @@ mod tests {
         let mut delta = TxnDeltaV1::new();
         delta
             .insert(TxnOpV1::DepAdd(WireDepAddV1 {
-                key: DepKey::new(b.clone(), a.clone(), DepKind::Blocks).unwrap(),
+                key: DepKey::new_local(&NamespaceId::core(), b.clone(), a.clone(), DepKind::Blocks)
+                    .unwrap(),
                 dot: WireDotV1 {
                     replica: ReplicaId::new(Uuid::from_bytes([4u8; 16])),
                     counter: 1,

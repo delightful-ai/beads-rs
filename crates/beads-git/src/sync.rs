@@ -2616,7 +2616,7 @@ mod tests {
     use crate::WireError;
     use crate::core::{
         ActorId, Bead, BeadCore, BeadFields, BeadId, BeadType, Claim, DepKey, DepKind, Dot,
-        IssueStatus, Lww, Priority, ReplicaId, Stamp, StateJsonlSha256, Tombstone,
+        IssueStatus, Lww, NamespaceId, Priority, ReplicaId, Stamp, StateJsonlSha256, Tombstone,
     };
     use git2::Time;
     #[cfg(feature = "slow-tests")]
@@ -2916,7 +2916,8 @@ mod tests {
         before.insert(bead_b).unwrap();
 
         let mut after = before.clone();
-        let dep_key = DepKey::new(
+        let dep_key = DepKey::new_local(
+            &NamespaceId::core(),
             BeadId::parse("bd-aaa").unwrap(),
             BeadId::parse("bd-bbb").unwrap(),
             DepKind::Blocks,
@@ -3145,7 +3146,8 @@ mod tests {
         let loaded = read_state_at_oid_for_migration(&repo, oid).expect("migration load");
         assert_eq!(loaded.deps_format, wire::DepsFormat::LegacyEdges);
         assert!(loaded.warnings.is_empty());
-        let dep_key = DepKey::new(
+        let dep_key = DepKey::new_local(
+            &NamespaceId::core(),
             BeadId::parse("bd-a").unwrap(),
             BeadId::parse("bd-b").unwrap(),
             DepKind::Blocks,
