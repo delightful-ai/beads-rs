@@ -8,7 +8,8 @@ use super::{IpcError, Request, Response};
 
 /// Encode a response to bytes.
 pub fn encode_response(resp: &Response) -> Result<Vec<u8>, IpcError> {
-    let mut bytes = serde_json::to_vec(resp)?;
+    let mut bytes =
+        serde_json::to_vec(resp).map_err(|source| IpcError::PayloadEncode { source })?;
     bytes.push(b'\n');
     Ok(bytes)
 }
@@ -22,7 +23,8 @@ pub fn decode_request_with_limits(line: &str, limits: &Limits) -> Result<Request
             got_bytes,
         });
     }
-    let value: Value = serde_json::from_str(line)?;
+    let value: Value =
+        serde_json::from_str(line).map_err(|source| IpcError::PayloadDecode { source })?;
     serde_json::from_value(value).map_err(|err| IpcError::InvalidRequest {
         field: None,
         reason: err.to_string(),
@@ -37,7 +39,9 @@ pub fn decode_request(line: &str) -> Result<Request, IpcError> {
 /// Send a response over a stream.
 pub fn send_response(stream: &mut UnixStream, resp: &Response) -> Result<(), IpcError> {
     let bytes = encode_response(resp)?;
-    stream.write_all(&bytes)?;
+    stream
+        .write_all(&bytes)
+        .map_err(|source| IpcError::Transport { source })?;
     Ok(())
 }
 
@@ -45,7 +49,7 @@ pub fn send_response(stream: &mut UnixStream, resp: &Response) -> Result<(), Ipc
 pub fn read_requests(stream: UnixStream) -> impl Iterator<Item = Result<Request, IpcError>> {
     let reader = BufReader::new(stream);
     reader.lines().map(|line| {
-        let line = line?;
+        let line = line.map_err(|source| IpcError::Transport { source })?;
         decode_request_with_limits(&line, &Limits::default())
     })
 }

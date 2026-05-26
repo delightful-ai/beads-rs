@@ -238,7 +238,7 @@ fn write_stdout(text: &str) -> crate::Result<()> {
     if let Err(err) = writeln!(stdout, "{text}")
         && err.kind() != std::io::ErrorKind::BrokenPipe
     {
-        return Err(beads_surface::ipc::IpcError::from(err));
+        return Err(beads_surface::ipc::IpcError::Transport { source: err });
     }
     Ok(())
 }

@@ -26,11 +26,23 @@ pub(crate) fn default_lease_secs() -> u64 {
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum IpcError {
-    #[error("parse error: {0}")]
-    Parse(#[from] serde_json::Error),
+    #[error("failed to decode payload: {source}")]
+    PayloadDecode {
+        #[source]
+        source: serde_json::Error,
+    },
 
-    #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    #[error("failed to encode payload: {source}")]
+    PayloadEncode {
+        #[source]
+        source: serde_json::Error,
+    },
+
+    #[error("transport error: {source}")]
+    Transport {
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error(transparent)]
     InvalidId(#[from] InvalidId),
@@ -63,8 +75,10 @@ pub enum IpcError {
 impl IpcError {
     pub fn code(&self) -> ErrorCode {
         match self {
-            IpcError::Parse(_) => ProtocolErrorCode::MalformedPayload.into(),
-            IpcError::Io(_) => CliErrorCode::IoError.into(),
+            IpcError::PayloadDecode { .. } | IpcError::PayloadEncode { .. } => {
+                ProtocolErrorCode::MalformedPayload.into()
+            }
+            IpcError::Transport { .. } => CliErrorCode::IoError.into(),
             IpcError::InvalidId(_) => CliErrorCode::InvalidId.into(),
             IpcError::InvalidRequest { .. } => ProtocolErrorCode::InvalidRequest.into(),
             IpcError::Disconnected => CliErrorCode::Disconnected.into(),
@@ -77,11 +91,12 @@ impl IpcError {
     /// Whether retrying the IPC operation may succeed.
     pub fn transience(&self) -> Transience {
         match self {
-            IpcError::DaemonUnavailable(_) | IpcError::Io(_) | IpcError::Disconnected => {
-                Transience::Retryable
-            }
+            IpcError::DaemonUnavailable(_)
+            | IpcError::Transport { .. }
+            | IpcError::Disconnected => Transience::Retryable,
             IpcError::DaemonVersionMismatch { .. } => Transience::Retryable,
-            IpcError::Parse(_)
+            IpcError::PayloadDecode { .. }
+            | IpcError::PayloadEncode { .. }
             | IpcError::InvalidId(_)
             | IpcError::InvalidRequest { .. }
             | IpcError::FrameTooLarge { .. } => Transience::Permanent,
@@ -91,9 +106,10 @@ impl IpcError {
     /// What we know about side effects when this IPC error is returned.
     pub fn effect(&self) -> Effect {
         match self {
-            IpcError::Io(_) | IpcError::Disconnected => Effect::Unknown,
+            IpcError::Transport { .. } | IpcError::Disconnected => Effect::Unknown,
             IpcError::DaemonUnavailable(_)
-            | IpcError::Parse(_)
+            | IpcError::PayloadDecode { .. }
+            | IpcError::PayloadEncode { .. }
             | IpcError::InvalidId(_)
             | IpcError::InvalidRequest { .. } => Effect::None,
             IpcError::DaemonVersionMismatch { .. } => Effect::None,
@@ -107,16 +123,27 @@ impl IntoErrorPayload for IpcError {
         let message = self.to_string();
         let retryable = self.transience().is_retryable();
         match self {
-            IpcError::Parse(err) => ErrorPayload::new(
+            IpcError::PayloadDecode { source } => ErrorPayload::new(
                 ProtocolErrorCode::MalformedPayload.into(),
                 message,
                 retryable,
             )
             .with_details(error_details::MalformedPayloadDetails {
                 parser: error_details::ParserKind::Json,
-                reason: Some(err.to_string()),
+                reason: Some(source.to_string()),
             }),
-            IpcError::Io(_) => ErrorPayload::new(CliErrorCode::IoError.into(), message, retryable),
+            IpcError::PayloadEncode { source } => ErrorPayload::new(
+                ProtocolErrorCode::MalformedPayload.into(),
+                message,
+                retryable,
+            )
+            .with_details(error_details::MalformedPayloadDetails {
+                parser: error_details::ParserKind::Json,
+                reason: Some(source.to_string()),
+            }),
+            IpcError::Transport { .. } => {
+                ErrorPayload::new(CliErrorCode::IoError.into(), message, retryable)
+            }
             IpcError::InvalidId(err) => err.into_error_payload(),
             IpcError::InvalidRequest { field, reason } => {
                 ErrorPayload::new(ProtocolErrorCode::InvalidRequest.into(), message, retryable)

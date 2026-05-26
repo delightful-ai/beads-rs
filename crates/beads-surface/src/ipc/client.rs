@@ -74,9 +74,11 @@ pub fn ensure_socket_dir() -> Result<PathBuf, IpcError> {
         }
     }
 
-    Err(IpcError::Io(last_err.unwrap_or_else(|| {
-        std::io::Error::other("unable to create a writable socket directory")
-    })))
+    Err(IpcError::Transport {
+        source: last_err.unwrap_or_else(|| {
+            std::io::Error::other("unable to create a writable socket directory")
+        }),
+    })
 }
 
 fn ensure_socket_dir_path(dir: &Path) -> Result<(), std::io::Error> {
@@ -338,7 +340,7 @@ impl IpcConnection {
             let stream = if autostart {
                 connect_with_autostart(&socket, autostart_program, autostart_args)
             } else {
-                UnixStream::connect(&socket).map_err(IpcError::from)
+                UnixStream::connect(&socket).map_err(|source| IpcError::Transport { source })
             };
             let stream = match stream {
                 Ok(s) => s,
@@ -390,7 +392,9 @@ impl IpcConnection {
     }
 
     fn new(stream: UnixStream) -> Result<Self, IpcError> {
-        let reader_stream = stream.try_clone()?;
+        let reader_stream = stream
+            .try_clone()
+            .map_err(|source| IpcError::Transport { source })?;
         Ok(Self {
             writer: stream,
             reader: BufReader::new(reader_stream),
@@ -403,12 +407,17 @@ impl IpcConnection {
     }
 
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), IpcError> {
-        self.reader.get_ref().set_read_timeout(timeout)?;
+        self.reader
+            .get_ref()
+            .set_read_timeout(timeout)
+            .map_err(|source| IpcError::Transport { source })?;
         Ok(())
     }
 
     pub fn set_write_timeout(&self, timeout: Option<Duration>) -> Result<(), IpcError> {
-        self.writer.set_write_timeout(timeout)?;
+        self.writer
+            .set_write_timeout(timeout)
+            .map_err(|source| IpcError::Transport { source })?;
         Ok(())
     }
 }
@@ -527,7 +536,8 @@ fn connect_with_autostart_command_with_timeout(
                     socket.display()
                 ))
             })?;
-            ensure_autostart_socket_parent(socket, dir)?;
+            ensure_autostart_socket_parent(socket, dir)
+                .map_err(|source| IpcError::Transport { source })?;
             let lock_path = dir.join("daemon.lock");
             maybe_remove_stale_lock(&lock_path, stale_lock_age);
 
@@ -605,12 +615,12 @@ fn connect_with_autostart_command_with_timeout(
                         if we_spawned {
                             let _ = fs::remove_file(&lock_path);
                         }
-                        return Err(IpcError::Io(e));
+                        return Err(IpcError::Transport { source: e });
                     }
                 }
             }
         }
-        Err(e) => Err(IpcError::Io(e)),
+        Err(e) => Err(IpcError::Transport { source: e }),
     }
 }
 
@@ -683,22 +693,27 @@ fn connect_with_direct_autostart_for_test(
 }
 
 fn write_req_line(stream: &mut UnixStream, req: &Request) -> Result<(), IpcError> {
-    let mut json = serde_json::to_string(req)?;
+    let mut json =
+        serde_json::to_string(req).map_err(|source| IpcError::PayloadEncode { source })?;
     json.push('\n');
-    stream.write_all(json.as_bytes())?;
+    stream
+        .write_all(json.as_bytes())
+        .map_err(|source| IpcError::Transport { source })?;
     Ok(())
 }
 
 fn read_resp_line(reader: &mut BufReader<UnixStream>) -> Result<Response, IpcError> {
     let mut line = String::new();
-    let bytes_read = reader.read_line(&mut line)?;
+    let bytes_read = reader
+        .read_line(&mut line)
+        .map_err(|source| IpcError::Transport { source })?;
     // EOF means daemon closed connection (likely just shut down)
     if bytes_read == 0 || line.trim().is_empty() {
         return Err(IpcError::DaemonUnavailable(
             "daemon not running (stale socket)".into(),
         ));
     }
-    Ok(serde_json::from_str(&line)?)
+    Ok(serde_json::from_str(&line).map_err(|source| IpcError::PayloadDecode { source })?)
 }
 
 /// Read response line, converting parse errors to version mismatch.
@@ -710,7 +725,9 @@ fn read_resp_line_version_check(
     expected_version: Option<&str>,
 ) -> Result<Response, IpcError> {
     let mut line = String::new();
-    let bytes_read = reader.read_line(&mut line)?;
+    let bytes_read = reader
+        .read_line(&mut line)
+        .map_err(|source| IpcError::Transport { source })?;
     if bytes_read == 0 || line.trim().is_empty() {
         return Err(IpcError::DaemonUnavailable(
             "daemon not running (stale socket)".into(),
@@ -786,7 +803,9 @@ fn send_request_over_stream(
     expected_version: Option<&str>,
 ) -> Result<Response, IpcError> {
     let mut writer = stream;
-    let reader_stream = writer.try_clone()?;
+    let reader_stream = writer
+        .try_clone()
+        .map_err(|source| IpcError::Transport { source })?;
     let mut reader = BufReader::new(reader_stream);
 
     // Verify daemon version/protocol once per connection.
@@ -900,21 +919,31 @@ pub struct SubscriptionStream {
 impl SubscriptionStream {
     pub fn read_response(&mut self) -> Result<Option<Response>, IpcError> {
         let mut line = String::new();
-        let bytes_read = self.reader.read_line(&mut line)?;
+        let bytes_read = self
+            .reader
+            .read_line(&mut line)
+            .map_err(|source| IpcError::Transport { source })?;
         if bytes_read == 0 || line.trim().is_empty() {
             return Ok(None);
         }
-        let response = serde_json::from_str(&line)?;
+        let response =
+            serde_json::from_str(&line).map_err(|source| IpcError::PayloadDecode { source })?;
         Ok(Some(response))
     }
 
     pub fn set_read_timeout(&self, timeout: Option<Duration>) -> Result<(), IpcError> {
-        self.reader.get_ref().set_read_timeout(timeout)?;
+        self.reader
+            .get_ref()
+            .set_read_timeout(timeout)
+            .map_err(|source| IpcError::Transport { source })?;
         Ok(())
     }
 
     pub fn set_nonblocking(&self, nonblocking: bool) -> Result<(), IpcError> {
-        self.reader.get_ref().set_nonblocking(nonblocking)?;
+        self.reader
+            .get_ref()
+            .set_nonblocking(nonblocking)
+            .map_err(|source| IpcError::Transport { source })?;
         Ok(())
     }
 }
@@ -956,7 +985,9 @@ fn subscribe_stream_at_with_options(
         };
 
         let mut writer = stream;
-        let reader_stream = writer.try_clone()?;
+        let reader_stream = writer
+            .try_clone()
+            .map_err(|source| IpcError::Transport { source })?;
         let mut reader = BufReader::new(reader_stream);
 
         if let Err(err) = verify_daemon_version(socket, &mut writer, &mut reader, expected_version)
@@ -977,8 +1008,9 @@ fn subscribe_stream_at_with_options(
                     std::thread::sleep(backoff);
                     continue;
                 }
-                IpcError::Parse(_)
-                | IpcError::Io(_)
+                IpcError::PayloadDecode { source: _ }
+                | IpcError::PayloadEncode { source: _ }
+                | IpcError::Transport { .. }
                 | IpcError::InvalidId(_)
                 | IpcError::InvalidRequest { .. }
                 | IpcError::Disconnected
@@ -1023,7 +1055,9 @@ fn subscribe_stream_no_autostart_at_with_expected_version(
     let stream = UnixStream::connect(socket)
         .map_err(|e| IpcError::DaemonUnavailable(format!("daemon not running: {}", e)))?;
     let mut writer = stream;
-    let reader_stream = writer.try_clone()?;
+    let reader_stream = writer
+        .try_clone()
+        .map_err(|source| IpcError::Transport { source })?;
     let mut reader = BufReader::new(reader_stream);
     verify_daemon_version(socket, &mut writer, &mut reader, expected_version)?;
     write_req_line(&mut writer, req)?;

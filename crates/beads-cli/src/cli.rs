@@ -457,7 +457,7 @@ where
     if let Err(err) = commands::prime::write_context_if(&mut stdout, host.in_beads_repo(), &args)
         && err.kind() != std::io::ErrorKind::BrokenPipe
     {
-        return Err(IpcError::from(err).into());
+        return Err(IpcError::Transport { source: err }.into());
     }
 
     Ok(())

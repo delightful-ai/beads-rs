@@ -465,7 +465,8 @@ struct CreatedSummary {
 fn parse_markdown_file(path: &std::path::Path) -> CommandResult<Vec<MarkdownIssue>> {
     validate_markdown_path(path)?;
 
-    let file = std::fs::File::open(path).map_err(beads_surface::IpcError::from)?;
+    let file = std::fs::File::open(path)
+        .map_err(|source| beads_surface::IpcError::Transport { source })?;
     let reader = std::io::BufReader::new(file);
 
     let mut issues: Vec<MarkdownIssue> = Vec::new();
@@ -474,7 +475,7 @@ fn parse_markdown_file(path: &std::path::Path) -> CommandResult<Vec<MarkdownIssu
     let mut section_buf: Vec<String> = Vec::new();
 
     for line in reader.lines() {
-        let line = line.map_err(beads_surface::IpcError::from)?;
+        let line = line.map_err(|source| beads_surface::IpcError::Transport { source })?;
         let trimmed = line.trim_end();
 
         if let Some(rest) = trimmed.strip_prefix("### ") {
@@ -610,7 +611,8 @@ fn validate_markdown_path(path: &std::path::Path) -> CommandResult<()> {
         .into());
     }
 
-    let meta = std::fs::metadata(&clean).map_err(beads_surface::IpcError::from)?;
+    let meta = std::fs::metadata(&clean)
+        .map_err(|source| beads_surface::IpcError::Transport { source })?;
     if meta.is_dir() {
         return Err(validation_error("file", "path is a directory, not a file").into());
     }
