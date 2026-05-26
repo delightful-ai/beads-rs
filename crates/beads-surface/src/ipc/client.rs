@@ -713,7 +713,7 @@ fn read_resp_line(reader: &mut BufReader<UnixStream>) -> Result<Response, IpcErr
             "daemon not running (stale socket)".into(),
         ));
     }
-    Ok(serde_json::from_str(&line).map_err(|source| IpcError::PayloadDecode { source })?)
+    serde_json::from_str(&line).map_err(|source| IpcError::PayloadDecode { source })
 }
 
 /// Read response line, converting parse errors to version mismatch.
