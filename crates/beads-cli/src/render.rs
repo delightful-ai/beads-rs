@@ -148,7 +148,7 @@ pub fn print_line(line: &str) -> crate::Result<()> {
     if let Err(err) = writeln!(stdout, "{line}")
         && err.kind() != std::io::ErrorKind::BrokenPipe
     {
-        return Err(beads_surface::ipc::IpcError::from(err));
+        return Err(beads_surface::ipc::IpcError::Transport { source: err });
     }
     Ok(())
 }
@@ -156,11 +156,12 @@ pub fn print_line(line: &str) -> crate::Result<()> {
 pub fn print_json<T: Serialize>(value: &T) -> crate::Result<()> {
     use std::io::Write;
     let mut stdout = std::io::stdout().lock();
-    serde_json::to_writer_pretty(&mut stdout, value).map_err(beads_surface::ipc::IpcError::from)?;
+    serde_json::to_writer_pretty(&mut stdout, value)
+        .map_err(|source| beads_surface::ipc::IpcError::PayloadEncode { source })?;
     if let Err(err) = writeln!(stdout)
         && err.kind() != std::io::ErrorKind::BrokenPipe
     {
-        return Err(beads_surface::ipc::IpcError::from(err));
+        return Err(beads_surface::ipc::IpcError::Transport { source: err });
     }
     Ok(())
 }

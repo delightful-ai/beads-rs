@@ -265,7 +265,7 @@ fn collect_origin_seqs(
                 seqs.push(seq);
             }
             Ok(None) => continue,
-            Err(StreamClientError::Ipc(IpcError::Io(err)))
+            Err(StreamClientError::Ipc(IpcError::Transport { source: err }))
                 if matches!(err.kind(), ErrorKind::TimedOut | ErrorKind::WouldBlock) =>
             {
                 continue;

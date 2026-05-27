@@ -123,7 +123,7 @@ impl From<SetupError> for Error {
             SetupError::Validation { field, reason } => {
                 Error::Op(OpError::ValidationFailed { field, reason })
             }
-            SetupError::Io(err) => Error::Ipc(IpcError::from(err)),
+            SetupError::Io(err) => Error::Ipc(IpcError::Transport { source: err }),
         }
     }
 }
@@ -131,8 +131,8 @@ impl From<SetupError> for Error {
 impl From<GoImportError> for Error {
     fn from(err: GoImportError) -> Self {
         match err {
-            GoImportError::Io(err) => Error::Ipc(IpcError::from(err)),
-            GoImportError::Parse(err) => Error::Ipc(IpcError::from(err)),
+            GoImportError::Io(err) => Error::Ipc(IpcError::Transport { source: err }),
+            GoImportError::Parse(err) => Error::Ipc(IpcError::PayloadDecode { source: err }),
             GoImportError::Core(err) => Error::Core(err),
             GoImportError::Validation { field, reason } => Error::Op(OpError::ValidationFailed {
                 field: field.into(),

@@ -71,7 +71,7 @@ pub fn handle_comment_add(ctx: &CliRuntimeCtx, args: CommentAddArgs) -> CommandR
         let mut s = String::new();
         std::io::stdin()
             .read_to_string(&mut s)
-            .map_err(beads_surface::ipc::IpcError::from)?;
+            .map_err(|source| beads_surface::ipc::IpcError::Transport { source })?;
         s.trim().to_string()
     };
 

@@ -45,24 +45,24 @@ pub fn run_daemon(
     let socket = layout.socket_path.clone();
     let meta_path = socket.with_file_name("daemon.meta.json");
 
-    let socket_dir = socket.parent().ok_or_else(|| {
-        IpcError::Io(std::io::Error::new(
+    let socket_dir = socket.parent().ok_or_else(|| IpcError::Transport {
+        source: std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "daemon socket path must have a parent directory",
-        ))
+        ),
     })?;
-    std::fs::create_dir_all(socket_dir).map_err(IpcError::from)?;
+    std::fs::create_dir_all(socket_dir).map_err(|source| IpcError::Transport { source })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(socket_dir)
-            .map_err(IpcError::from)?
+            .map_err(|source| IpcError::Transport { source })?
             .permissions()
             .mode()
             & 0o777;
         if mode != 0o700 {
             std::fs::set_permissions(socket_dir, std::fs::Permissions::from_mode(0o700))
-                .map_err(IpcError::from)?;
+                .map_err(|source| IpcError::Transport { source })?;
         }
     }
 
@@ -76,7 +76,7 @@ pub fn run_daemon(
     let _ = std::fs::remove_file(&socket);
 
     // Bind socket.
-    let listener = UnixListener::bind(&socket).map_err(IpcError::from)?;
+    let listener = UnixListener::bind(&socket).map_err(|source| IpcError::Transport { source })?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -105,9 +105,9 @@ pub fn run_daemon(
     // Set up signal handling for graceful shutdown.
     let shutdown = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(signal_hook::consts::SIGTERM, Arc::clone(&shutdown))
-        .map_err(IpcError::from)?;
+        .map_err(|source| IpcError::Transport { source })?;
     signal_hook::flag::register(signal_hook::consts::SIGINT, Arc::clone(&shutdown))
-        .map_err(IpcError::from)?;
+        .map_err(|source| IpcError::Transport { source })?;
 
     // Create channels.
     let (req_tx, req_rx) = crossbeam::channel::unbounded::<RequestMessage>();
@@ -140,7 +140,9 @@ pub fn run_daemon(
     });
 
     // Ensure listener is blocking; wake with a self-connect on shutdown.
-    listener.set_nonblocking(false).map_err(IpcError::from)?;
+    listener
+        .set_nonblocking(false)
+        .map_err(|source| IpcError::Transport { source })?;
 
     let accept_shutdown = Arc::clone(&shutdown);
     let accept_limits = Arc::clone(&limits);
