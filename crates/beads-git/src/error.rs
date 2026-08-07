@@ -72,7 +72,7 @@ pub enum SyncError {
     InitFailed(#[source] git2::Error),
 
     #[error("git operation failed: {0}")]
-    Git(#[from] git2::Error),
+    Repository(#[from] git2::Error),
 }
 
 impl SyncError {
@@ -83,7 +83,7 @@ impl SyncError {
             {
                 Some("Run `bd migrate to 2`")
             }
-            SyncError::Wire(WireError::Json(err))
+            SyncError::Wire(WireError::Format(err))
                 if is_legacy_deps_missing_cc_message(&err.to_string()) =>
             {
                 Some("Run `bd migrate to 2`")
@@ -127,7 +127,7 @@ impl SyncError {
             | SyncError::NoCommonAncestor
             | SyncError::MigrationWarnings(_)
             | SyncError::Wire(_)
-            | SyncError::Git(_) => Transience::Permanent,
+            | SyncError::Repository(_) => Transience::Permanent,
         }
     }
 
@@ -142,7 +142,7 @@ impl SyncError {
             | SyncError::InitFailed(_) => Effect::Some,
 
             // Low-level/git-adjacent failures can happen before or after a local commit exists.
-            SyncError::Git(_) | SyncError::Io(_) => Effect::Unknown,
+            SyncError::Repository(_) | SyncError::Io(_) => Effect::Unknown,
 
             // Everything else fails before committing.
             _ => Effect::None,
@@ -192,10 +192,10 @@ fn is_legacy_deps_missing_cc_message(message: &str) -> bool {
 #[derive(Error, Debug)]
 pub enum WireError {
     #[error("JSON error: {0}")]
-    Json(#[from] serde_json::Error),
+    Format(#[from] serde_json::Error),
 
     #[error("UTF-8 error: {0}")]
-    Utf8(#[from] std::string::FromUtf8Error),
+    DecodeUtf8(#[from] std::string::FromUtf8Error),
 
     #[error("missing required field: {0}")]
     MissingField(&'static str),

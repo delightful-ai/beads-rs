@@ -140,7 +140,7 @@ impl ReadCheckpointRef for DefaultGitBackend {
         match repo.refname_to_id(git_ref) {
             Ok(oid) => Ok(Some(oid)),
             Err(err) if err.code() == ErrorCode::NotFound => Ok(None),
-            Err(err) => Err(SyncError::Git(err)),
+            Err(err) => Err(SyncError::Repository(err)),
         }
     }
 }
