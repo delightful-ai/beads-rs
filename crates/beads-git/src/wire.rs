@@ -1359,7 +1359,7 @@ mod tests {
             .expect_err("strict state parser should reject legacy status rows");
         assert!(matches!(
             err,
-            WireError::Json(_) | WireError::InvalidValue(_)
+            WireError::Format(_) | WireError::InvalidValue(_)
         ));
     }
 
@@ -2213,7 +2213,7 @@ mod tests {
         let strict_err = parse_legacy_state(state_bytes, tomb_bytes, deps_bytes, notes_bytes)
             .expect_err("strict parse must reject legacy");
         match strict_err {
-            WireError::Json(_) => {}
+            WireError::Format(_) => {}
             WireError::InvalidValue(msg) => {
                 assert!(
                     msg.contains("deps.jsonl"),
