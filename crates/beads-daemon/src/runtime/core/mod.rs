@@ -80,7 +80,7 @@ use crate::core::error::details as error_details;
 #[derive(Debug, Error)]
 enum CheckpointTreeError {
     #[error("checkpoint tree git error: {0}")]
-    Git(#[from] git2::Error),
+    Repository(#[from] git2::Error),
     #[error("checkpoint tree io error at {path:?}: {source}")]
     Io {
         path: PathBuf,

@@ -20,7 +20,7 @@ pub enum SetupError {
     #[error("{field}: {reason}")]
     Validation { field: String, reason: String },
     #[error(transparent)]
-    Io(#[from] std::io::Error),
+    FileSystem(#[from] std::io::Error),
 }
 
 #[derive(Subcommand, Debug)]
@@ -766,7 +766,7 @@ fn print_line(line: &str) -> Result<()> {
     if let Err(e) = writeln!(stdout, "{line}")
         && e.kind() != std::io::ErrorKind::BrokenPipe
     {
-        return Err(SetupError::Io(e));
+        return Err(SetupError::FileSystem(e));
     }
     Ok(())
 }

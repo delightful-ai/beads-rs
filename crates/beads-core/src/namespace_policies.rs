@@ -39,7 +39,7 @@ impl NamespacePolicies {
 #[derive(Debug, Error)]
 pub enum NamespacePoliciesError {
     #[error(transparent)]
-    Toml(#[from] toml::de::Error),
+    Format(#[from] toml::de::Error),
     #[error("no namespaces configured")]
     Empty,
     #[error("missing namespace policy for {namespace}")]
@@ -141,7 +141,7 @@ mod tests {
         let toml_input = "";
         let res = NamespacePolicies::from_toml_str(toml_input);
         match res {
-            Err(NamespacePoliciesError::Toml(_)) => {} // OK
+            Err(NamespacePoliciesError::Format(_)) => {} // OK
             _ => panic!("expected Toml error, got {:?}", res),
         }
     }
@@ -151,7 +151,7 @@ mod tests {
         let toml_input = "invalid syntax =";
         let res = NamespacePolicies::from_toml_str(toml_input);
         match res {
-            Err(NamespacePoliciesError::Toml(_)) => {} // OK
+            Err(NamespacePoliciesError::Format(_)) => {} // OK
             _ => panic!("expected Toml error, got {:?}", res),
         }
     }

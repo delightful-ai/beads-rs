@@ -71,7 +71,7 @@ pub enum CheckpointPublishError {
     #[error(transparent)]
     Import(#[from] CheckpointImportError),
     #[error("checkpoint json parse error at {path}: {source}")]
-    Json {
+    Format {
         path: String,
         #[source]
         source: serde_json::Error,
@@ -87,7 +87,7 @@ pub enum CheckpointPublishError {
     #[error("checkpoint push rejected: {message}")]
     PushRejected { message: String },
     #[error("checkpoint git error: {0}")]
-    Git(#[from] git2::Error),
+    Repository(#[from] git2::Error),
 }
 
 pub fn publish_checkpoint(
@@ -441,7 +441,7 @@ fn push_refs(repo: &Repository, refspecs: &[String]) -> Result<(), CheckpointPub
             if is_non_fast_forward(&msg) {
                 return Err(CheckpointPublishError::NonFastForward);
             }
-            return Err(CheckpointPublishError::Git(e));
+            return Err(CheckpointPublishError::Repository(e));
         }
     }
 
@@ -727,14 +727,14 @@ fn fetch_remote_ref(
                 let _ = repo.find_reference(&tracking_ref).map(|mut r| r.delete());
                 return Ok(None);
             }
-            return Err(CheckpointPublishError::Git(e));
+            return Err(CheckpointPublishError::Repository(e));
         }
     }
 
     match repo.refname_to_id(&tracking_ref) {
         Ok(oid) => Ok(Some(oid)),
         Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
-        Err(e) => Err(CheckpointPublishError::Git(e)),
+        Err(e) => Err(CheckpointPublishError::Repository(e)),
     }
 }
 
@@ -747,14 +747,14 @@ fn read_checkpoint_export_at_oid(
 
     let meta_bytes = read_blob_bytes(repo, &tree, META_FILE)?;
     let meta: super::meta::CheckpointMeta =
-        serde_json::from_slice(&meta_bytes).map_err(|source| CheckpointPublishError::Json {
+        serde_json::from_slice(&meta_bytes).map_err(|source| CheckpointPublishError::Format {
             path: META_FILE.to_string(),
             source,
         })?;
 
     let manifest_bytes = read_blob_bytes(repo, &tree, MANIFEST_FILE)?;
     let manifest: super::manifest::CheckpointManifest = serde_json::from_slice(&manifest_bytes)
-        .map_err(|source| CheckpointPublishError::Json {
+        .map_err(|source| CheckpointPublishError::Format {
             path: MANIFEST_FILE.to_string(),
             source,
         })?;
@@ -786,7 +786,7 @@ fn read_store_meta_at_oid(
     let commit = repo.find_commit(oid)?;
     let tree = commit.tree()?;
     let bytes = read_blob_bytes(repo, &tree, STORE_META_FILE)?;
-    serde_json::from_slice(&bytes).map_err(|source| CheckpointPublishError::Json {
+    serde_json::from_slice(&bytes).map_err(|source| CheckpointPublishError::Format {
         path: STORE_META_FILE.to_string(),
         source,
     })

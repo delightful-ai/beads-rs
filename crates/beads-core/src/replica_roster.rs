@@ -230,7 +230,7 @@ impl TryFrom<(ReplicaRole, bool)> for ReplicaDurabilityRole {
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ReplicaRosterError {
     #[error("replica roster parse failed: {0}")]
-    Parse(#[from] toml::de::Error),
+    Format(#[from] toml::de::Error),
     #[error("duplicate replica_id {replica_id}")]
     DuplicateReplicaId { replica_id: ReplicaId },
     #[error("duplicate replica name {name}")]

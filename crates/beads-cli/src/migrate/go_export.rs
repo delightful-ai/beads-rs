@@ -22,10 +22,10 @@ use uuid::Uuid;
 #[derive(Debug, Error)]
 pub enum GoImportError {
     #[error(transparent)]
-    Io(#[from] std::io::Error),
+    FileSystem(#[from] std::io::Error),
 
     #[error(transparent)]
-    Parse(#[from] serde_json::Error),
+    Format(#[from] serde_json::Error),
 
     #[error(transparent)]
     Core(#[from] CoreError),
