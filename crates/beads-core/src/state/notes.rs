@@ -98,6 +98,22 @@ impl NoteStore {
         out
     }
 
+    /// Get the maximum stamp for all notes in a lineage.
+    ///
+    /// This avoids allocating and sorting a full list of notes when only
+    /// the aggregate updated stamp is needed.
+    pub fn max_stamp_for(&self, id: &BeadId, lineage: &Stamp) -> Option<Stamp> {
+        self.by_bead
+            .get(id)
+            .and_then(|notes| notes.get(lineage))
+            .and_then(|notes| {
+                notes
+                    .values()
+                    .map(|note| Stamp::new(note.at.clone(), note.author.clone()))
+                    .max()
+            })
+    }
+
     pub fn iter_lineages(
         &self,
     ) -> impl Iterator<Item = (&BeadId, &Stamp, &BTreeMap<NoteId, Note>)> {
