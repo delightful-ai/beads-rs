@@ -86,8 +86,8 @@ pub enum CheckpointPublishError {
     NonFastForward,
     #[error("checkpoint push rejected: {message}")]
     PushRejected { message: String },
-    #[error("checkpoint git error: {0}")]
-    Git(#[from] git2::Error),
+    #[error("checkpoint repository error: {0}")]
+    Repository(#[from] git2::Error),
 }
 
 pub fn publish_checkpoint(
@@ -441,7 +441,7 @@ fn push_refs(repo: &Repository, refspecs: &[String]) -> Result<(), CheckpointPub
             if is_non_fast_forward(&msg) {
                 return Err(CheckpointPublishError::NonFastForward);
             }
-            return Err(CheckpointPublishError::Git(e));
+            return Err(CheckpointPublishError::Repository(e));
         }
     }
 
@@ -727,14 +727,14 @@ fn fetch_remote_ref(
                 let _ = repo.find_reference(&tracking_ref).map(|mut r| r.delete());
                 return Ok(None);
             }
-            return Err(CheckpointPublishError::Git(e));
+            return Err(CheckpointPublishError::Repository(e));
         }
     }
 
     match repo.refname_to_id(&tracking_ref) {
         Ok(oid) => Ok(Some(oid)),
         Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
-        Err(e) => Err(CheckpointPublishError::Git(e)),
+        Err(e) => Err(CheckpointPublishError::Repository(e)),
     }
 }
 

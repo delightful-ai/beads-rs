@@ -238,7 +238,7 @@ pub(super) fn write_checkpoint_tree(
         if let Some(parent) = full_path.parent()
             && let Err(err) = fs::create_dir_all(parent)
         {
-            outcome = Err(CheckpointTreeError::Io {
+            outcome = Err(CheckpointTreeError::FileSystem {
                 path: parent.to_path_buf(),
                 source: err,
             });
@@ -247,12 +247,12 @@ pub(super) fn write_checkpoint_tree(
         let blob = match repo.find_blob(entry.id()) {
             Ok(blob) => blob,
             Err(err) => {
-                outcome = Err(CheckpointTreeError::Git(err));
+                outcome = Err(CheckpointTreeError::Repository(err));
                 return TreeWalkResult::Abort;
             }
         };
         if let Err(err) = fs::write(&full_path, blob.content()) {
-            outcome = Err(CheckpointTreeError::Io {
+            outcome = Err(CheckpointTreeError::FileSystem {
                 path: full_path,
                 source: err,
             });
