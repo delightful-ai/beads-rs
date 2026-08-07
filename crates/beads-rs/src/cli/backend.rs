@@ -395,7 +395,7 @@ fn resolve_ref_oid(repo: &Repository, refname: &str) -> Result<Option<Oid>> {
     match repo.refname_to_id(refname) {
         Ok(oid) => Ok(Some(oid)),
         Err(err) if err.code() == ErrorCode::NotFound => Ok(None),
-        Err(err) => Err(beads_git::SyncError::Git(err).into()),
+        Err(err) => Err(beads_git::SyncError::Git { source: err }.into()),
     }
 }
 

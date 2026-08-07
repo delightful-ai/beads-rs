@@ -1375,7 +1375,7 @@ fn apply_test_migrate_before_push_hook(repo: &Repository, retries: usize) -> Res
             format!("{ENV_TEST_MIGRATE_BEFORE_PUSH_WINNER} winner oid is invalid: {err}"),
         ))
     })?;
-    let remote = repo.find_remote("origin").map_err(SyncError::Git)?;
+    let remote = repo.find_remote("origin").map_err(|e| SyncError::Git { source: e })?;
     let remote_url = remote.url().ok_or_else(|| {
         SyncError::Io(std::io::Error::new(
             ErrorKind::InvalidInput,
@@ -2054,7 +2054,7 @@ fn refname_to_id_optional(repo: &Repository, name: &str) -> Result<Option<Oid>, 
     match repo.refname_to_id(name) {
         Ok(oid) => Ok(Some(oid)),
         Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
-        Err(e) => Err(SyncError::Git(e)),
+        Err(e) => Err(SyncError::Git { source: e }),
     }
 }
 
@@ -2068,7 +2068,7 @@ fn update_ref(repo: &Repository, name: &str, oid: Oid, message: &str) -> Result<
             repo.reference(name, oid, true, message)?;
             Ok(())
         }
-        Err(e) => Err(SyncError::Git(e)),
+        Err(e) => Err(SyncError::Git { source: e }),
     }
 }
 
@@ -2079,7 +2079,7 @@ fn delete_ref(repo: &Repository, name: &str) -> Result<(), SyncError> {
             Ok(())
         }
         Err(e) if e.code() == ErrorCode::NotFound => Ok(()),
-        Err(e) => Err(SyncError::Git(e)),
+        Err(e) => Err(SyncError::Git { source: e }),
     }
 }
 
@@ -2094,7 +2094,7 @@ fn ensure_backup_ref_with_observer(
         Err(err) if err.code() == ErrorCode::NotFound => {
             create_backup_reference_with_observer(repo, &name, oid, observer)?
         }
-        Err(err) => return Err(SyncError::Git(err)),
+        Err(err) => return Err(SyncError::Git { source: err }),
     };
     prune_backup_refs_with_observer(repo, MAX_BACKUP_REFS, oid, observer)?;
     Ok(())
@@ -2117,7 +2117,7 @@ fn prune_backup_refs_with_observer(
             observer.on_backup_ref_scan(0);
             return Ok(());
         }
-        Err(err) => return Err(SyncError::Git(err)),
+        Err(err) => return Err(SyncError::Git { source: err }),
     };
 
     let mut protected = false;
@@ -2134,7 +2134,7 @@ fn prune_backup_refs_with_observer(
                 );
                 continue;
             }
-            Err(err) => return Err(SyncError::Git(err)),
+            Err(err) => return Err(SyncError::Git { source: err }),
         };
         let Some(name) = reference.name().map(str::to_owned) else {
             continue;
@@ -2199,7 +2199,7 @@ fn create_backup_reference_with_observer(
                         );
                         Ok(false)
                     }
-                    Err(retry_err) => Err(SyncError::Git(retry_err)),
+                    Err(retry_err) => Err(SyncError::Git { source: retry_err }),
                 }
             } else {
                 tracing::warn!(
@@ -2210,7 +2210,7 @@ fn create_backup_reference_with_observer(
                 Ok(false)
             }
         }
-        Err(err) => Err(SyncError::Git(err)),
+        Err(err) => Err(SyncError::Git { source: err }),
     }
 }
 
@@ -2237,10 +2237,10 @@ fn delete_backup_reference_with_observer(
                                 );
                                 Ok(false)
                             }
-                            Err(retry_err) => Err(SyncError::Git(retry_err)),
+                            Err(retry_err) => Err(SyncError::Git { source: retry_err }),
                         },
                         Err(retry_err) if retry_err.code() == ErrorCode::NotFound => Ok(false),
-                        Err(retry_err) => Err(SyncError::Git(retry_err)),
+                        Err(retry_err) => Err(SyncError::Git { source: retry_err }),
                     }
                 } else {
                     tracing::warn!(
@@ -2251,10 +2251,10 @@ fn delete_backup_reference_with_observer(
                     Ok(false)
                 }
             }
-            Err(err) => Err(SyncError::Git(err)),
+            Err(err) => Err(SyncError::Git { source: err }),
         },
         Err(err) if err.code() == ErrorCode::NotFound => Ok(false),
-        Err(err) => Err(SyncError::Git(err)),
+        Err(err) => Err(SyncError::Git { source: err }),
     }
 }
 

@@ -10,8 +10,12 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum CanonJsonError {
-    #[error("json encode failed: {0}")]
-    Json(#[from] serde_json::Error),
+    #[error("failed to encode canonical JSON: {source}")]
+    Encode {
+        #[from]
+        #[source]
+        source: serde_json::Error,
+    },
     #[error("non-finite float values are not allowed")]
     NonFiniteFloat,
 }

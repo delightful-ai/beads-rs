@@ -132,7 +132,7 @@ impl From<GoImportError> for Error {
     fn from(err: GoImportError) -> Self {
         match err {
             GoImportError::Io(err) => Error::Ipc(IpcError::Transport { source: err }),
-            GoImportError::Parse(err) => Error::Ipc(IpcError::PayloadDecode { source: err }),
+            GoImportError::Parse { source: err } => Error::Ipc(IpcError::PayloadDecode { source: err }),
             GoImportError::Core(err) => Error::Core(err),
             GoImportError::Validation { field, reason } => Error::Op(OpError::ValidationFailed {
                 field: field.into(),

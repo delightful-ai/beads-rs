@@ -584,7 +584,7 @@ fn refname_to_id_optional(repo: &Repository, name: &str) -> Result<Option<Oid>, 
     match repo.refname_to_id(name) {
         Ok(oid) => Ok(Some(oid)),
         Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
-        Err(e) => Err(SyncError::Git(e)),
+        Err(e) => Err(SyncError::Git { source: e }),
     }
 }
 

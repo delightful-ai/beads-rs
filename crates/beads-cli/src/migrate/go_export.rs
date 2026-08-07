@@ -24,8 +24,12 @@ pub enum GoImportError {
     #[error(transparent)]
     Io(#[from] std::io::Error),
 
-    #[error(transparent)]
-    Parse(#[from] serde_json::Error),
+    #[error("failed to parse import data: {source}")]
+    Parse {
+        #[from]
+        #[source]
+        source: serde_json::Error,
+    },
 
     #[error(transparent)]
     Core(#[from] CoreError),
