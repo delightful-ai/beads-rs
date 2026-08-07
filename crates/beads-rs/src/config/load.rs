@@ -22,11 +22,11 @@ pub fn discover_repo_root() -> Option<PathBuf> {
 }
 
 pub fn load_user_config() -> Result<Option<ConfigLayer>> {
-    moved::load_user_config().map_err(config_error)
+    moved::load_user_config().map_err(|e| config_error(e.to_string()))
 }
 
 pub fn load_repo_config(repo_root: &Path) -> Result<Option<ConfigLayer>> {
-    moved::load_repo_config(repo_root).map_err(config_error)
+    moved::load_repo_config(repo_root).map_err(|e| config_error(e.to_string()))
 }
 
 pub fn load() -> Result<Config> {
@@ -34,7 +34,7 @@ pub fn load() -> Result<Config> {
 }
 
 pub fn load_for_repo(repo_root: Option<&Path>) -> Result<Config> {
-    moved::load_for_repo(repo_root).map_err(config_error)
+    moved::load_for_repo(repo_root).map_err(|e| config_error(e.to_string()))
 }
 
 pub fn load_or_init() -> Config {
@@ -63,7 +63,7 @@ pub fn load_or_init() -> Config {
 }
 
 pub fn write_config(path: &Path, cfg: &Config) -> Result<()> {
-    moved::write_config(path, cfg).map_err(config_error)
+    moved::write_config(path, cfg).map_err(|e| config_error(e.to_string()))
 }
 
 fn config_error(reason: String) -> Error {

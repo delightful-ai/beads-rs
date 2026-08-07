@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Pure bootstrap helpers for beads path and config discovery"
 
 [dependencies]
+thiserror = { workspace = true }
 beads-core = { path = "../beads-core" }
 dirs = "6.0.0"
 git2 = { version = "0.20", features = ["vendored-libgit2", "vendored-openssl"] }

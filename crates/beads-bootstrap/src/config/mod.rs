@@ -1,11 +1,13 @@
 //! Canonical app config schema, merge logic, and file IO.
 
 mod env;
+mod error;
 mod load;
 mod merge;
 mod schema;
 
 pub use env::{CONFIG_DIR_VAR, CONFIG_ENV_KEYS, ENV_OVERRIDE_KEYS};
+pub use error::ConfigError;
 pub use load::{
     config_path, load_for_repo, load_repo_config, load_repo_config_full, load_user_config,
     load_user_config_full, repo_config_path, write_config,

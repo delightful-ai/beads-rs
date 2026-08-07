@@ -219,6 +219,7 @@ dependencies = [
  "git2",
  "serde",
  "tempfile",
+ "thiserror 1.0.69",
  "toml",
  "tracing",
  "uuid",
