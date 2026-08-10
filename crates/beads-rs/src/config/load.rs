@@ -66,7 +66,8 @@ pub fn write_config(path: &Path, cfg: &Config) -> Result<()> {
     moved::write_config(path, cfg).map_err(config_error)
 }
 
-fn config_error(reason: String) -> Error {
+fn config_error(reason: beads_bootstrap::config::ConfigError) -> Error {
+    let reason = reason.to_string();
     Error::Op(OpError::ValidationFailed {
         field: "config".into(),
         reason,

@@ -7,7 +7,9 @@ use super::env as config_env;
 use super::merge::{apply_env_overrides, merge_layers};
 use super::{Config, ConfigLayer};
 
-type Result<T> = std::result::Result<T, String>;
+use super::ConfigError;
+
+type Result<T> = std::result::Result<T, ConfigError>;
 
 pub fn config_path() -> PathBuf {
     crate::paths::resolve_config_dir(std::env::var(config_env::CONFIG_DIR_VAR).ok().as_deref())
@@ -97,47 +99,44 @@ pub fn load_for_repo(repo_root: Option<&Path>) -> Result<Config> {
 
 pub fn write_config(path: &Path, cfg: &Config) -> Result<()> {
     if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)
-            .map_err(|e| config_error(format!("failed to create {}: {e}", dir.display())))?;
+        fs::create_dir_all(dir).map_err(|e| ConfigError::CreateDir {
+            dir: dir.to_path_buf(),
+            source: e,
+        })?;
     }
-    let contents = toml::to_string_pretty(cfg)
-        .map_err(|e| config_error(format!("failed to render config: {e}")))?;
+    let contents = toml::to_string_pretty(cfg).map_err(|e| ConfigError::Render { source: e })?;
     atomic_write(path, contents.as_bytes())
 }
 
 fn atomic_write(path: &Path, data: &[u8]) -> Result<()> {
-    let dir = path
-        .parent()
-        .ok_or_else(|| config_error("config path missing parent directory".to_string()))?;
-    let temp = tempfile::NamedTempFile::new_in(dir).map_err(|e| {
-        config_error(format!(
-            "failed to create temp file in {}: {e}",
-            dir.display()
-        ))
+    let dir = path.parent().ok_or_else(|| ConfigError::MissingParentDir {
+        path: path.to_path_buf(),
     })?;
-    fs::write(temp.path(), data)
-        .map_err(|e| config_error(format!("failed to write config temp file: {e}")))?;
-    temp.persist(path).map_err(|e| {
-        config_error(format!(
-            "failed to persist config to {}: {e}",
-            path.display()
-        ))
+    let temp = tempfile::NamedTempFile::new_in(dir).map_err(|e| ConfigError::CreateTempFile {
+        dir: dir.to_path_buf(),
+        source: e,
     })?;
+    fs::write(temp.path(), data).map_err(|e| ConfigError::WriteTempFile { source: e })?;
+    temp.persist(path)
+        .map_err(|e| ConfigError::PersistTempFile {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
     Ok(())
-}
-
-fn config_error(reason: String) -> String {
-    reason
 }
 
 fn read_toml<T>(path: &Path) -> Result<T>
 where
     T: DeserializeOwned,
 {
-    let contents = fs::read_to_string(path)
-        .map_err(|e| config_error(format!("failed to read {}: {e}", path.display())))?;
-    toml::from_str(&contents)
-        .map_err(|e| config_error(format!("failed to parse {}: {e}", path.display())))
+    let contents = fs::read_to_string(path).map_err(|e| ConfigError::ReadFile {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    toml::from_str(&contents).map_err(|e| ConfigError::Parse {
+        path: path.to_path_buf(),
+        source: e,
+    })
 }
 
 #[cfg(test)]

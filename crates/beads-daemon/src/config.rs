@@ -104,7 +104,9 @@ pub fn discover_repo_root() -> Option<PathBuf> {
     beads_bootstrap::repo::discover_root_optional(cwd)
 }
 
-pub fn load_for_repo(repo_root: Option<&Path>) -> Result<Config, String> {
+pub fn load_for_repo(
+    repo_root: Option<&Path>,
+) -> Result<Config, beads_bootstrap::config::ConfigError> {
     // Keep daemon runtime reload semantics stable: repo config takes precedence,
     // user config is used only when repo config is absent.
     if let Some(root) = repo_root
@@ -120,7 +122,7 @@ pub fn load_for_repo(repo_root: Option<&Path>) -> Result<Config, String> {
     Ok(finalize_loaded_config(Config::default()))
 }
 
-pub fn load() -> Result<Config, String> {
+pub fn load() -> Result<Config, beads_bootstrap::config::ConfigError> {
     load_for_repo(discover_repo_root().as_deref())
 }
 
