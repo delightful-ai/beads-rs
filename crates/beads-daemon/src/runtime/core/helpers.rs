@@ -247,7 +247,7 @@ pub(super) fn write_checkpoint_tree(
         let blob = match repo.find_blob(entry.id()) {
             Ok(blob) => blob,
             Err(err) => {
-                outcome = Err(CheckpointTreeError::Git(err));
+                outcome = Err(CheckpointTreeError::Repository(err));
                 return TreeWalkResult::Abort;
             }
         };

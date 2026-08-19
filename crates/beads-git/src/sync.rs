@@ -1370,14 +1370,14 @@ fn apply_test_migrate_before_push_hook(repo: &Repository, retries: usize) -> Res
     }
 
     let winner_oid = Oid::from_str(&oid_text).map_err(|err| {
-        SyncError::Io(std::io::Error::new(
+        SyncError::FileSystem(std::io::Error::new(
             ErrorKind::InvalidInput,
             format!("{ENV_TEST_MIGRATE_BEFORE_PUSH_WINNER} winner oid is invalid: {err}"),
         ))
     })?;
-    let remote = repo.find_remote("origin").map_err(SyncError::Git)?;
+    let remote = repo.find_remote("origin").map_err(SyncError::Repository)?;
     let remote_url = remote.url().ok_or_else(|| {
-        SyncError::Io(std::io::Error::new(
+        SyncError::FileSystem(std::io::Error::new(
             ErrorKind::InvalidInput,
             "origin remote has no configured URL for migration test hook",
         ))
@@ -1397,7 +1397,7 @@ fn apply_test_migrate_before_push_hook(repo: &Repository, retries: usize) -> Res
 
 fn parse_test_before_push_winner_spec(spec: OsString) -> Result<(bool, String), SyncError> {
     let spec = spec.into_string().map_err(|_| {
-        SyncError::Io(std::io::Error::new(
+        SyncError::FileSystem(std::io::Error::new(
             ErrorKind::InvalidInput,
             format!("{ENV_TEST_MIGRATE_BEFORE_PUSH_WINNER} must be valid UTF-8"),
         ))
@@ -1407,7 +1407,7 @@ fn parse_test_before_push_winner_spec(spec: OsString) -> Result<(bool, String), 
             "once" => return Ok((true, oid.to_string())),
             "always" => return Ok((false, oid.to_string())),
             _ => {
-                return Err(SyncError::Io(std::io::Error::new(
+                return Err(SyncError::FileSystem(std::io::Error::new(
                     ErrorKind::InvalidInput,
                     format!(
                         "{ENV_TEST_MIGRATE_BEFORE_PUSH_WINNER} mode must be `once` or `always`"
@@ -1844,7 +1844,7 @@ pub fn open_remote_store_preview(
         return Ok(None);
     };
 
-    let tempdir = TempDir::new().map_err(SyncError::Io)?;
+    let tempdir = TempDir::new().map_err(SyncError::FileSystem)?;
     let preview_repo = Repository::init_bare(tempdir.path())?;
     let mut remote = preview_repo.remote_anonymous(&url)?;
     fetch_store_ref_with_refspec(
@@ -2054,7 +2054,7 @@ fn refname_to_id_optional(repo: &Repository, name: &str) -> Result<Option<Oid>, 
     match repo.refname_to_id(name) {
         Ok(oid) => Ok(Some(oid)),
         Err(e) if e.code() == ErrorCode::NotFound => Ok(None),
-        Err(e) => Err(SyncError::Git(e)),
+        Err(e) => Err(SyncError::Repository(e)),
     }
 }
 
@@ -2068,7 +2068,7 @@ fn update_ref(repo: &Repository, name: &str, oid: Oid, message: &str) -> Result<
             repo.reference(name, oid, true, message)?;
             Ok(())
         }
-        Err(e) => Err(SyncError::Git(e)),
+        Err(e) => Err(SyncError::Repository(e)),
     }
 }
 
@@ -2079,7 +2079,7 @@ fn delete_ref(repo: &Repository, name: &str) -> Result<(), SyncError> {
             Ok(())
         }
         Err(e) if e.code() == ErrorCode::NotFound => Ok(()),
-        Err(e) => Err(SyncError::Git(e)),
+        Err(e) => Err(SyncError::Repository(e)),
     }
 }
 
@@ -2094,7 +2094,7 @@ fn ensure_backup_ref_with_observer(
         Err(err) if err.code() == ErrorCode::NotFound => {
             create_backup_reference_with_observer(repo, &name, oid, observer)?
         }
-        Err(err) => return Err(SyncError::Git(err)),
+        Err(err) => return Err(SyncError::Repository(err)),
     };
     prune_backup_refs_with_observer(repo, MAX_BACKUP_REFS, oid, observer)?;
     Ok(())
@@ -2117,7 +2117,7 @@ fn prune_backup_refs_with_observer(
             observer.on_backup_ref_scan(0);
             return Ok(());
         }
-        Err(err) => return Err(SyncError::Git(err)),
+        Err(err) => return Err(SyncError::Repository(err)),
     };
 
     let mut protected = false;
@@ -2134,7 +2134,7 @@ fn prune_backup_refs_with_observer(
                 );
                 continue;
             }
-            Err(err) => return Err(SyncError::Git(err)),
+            Err(err) => return Err(SyncError::Repository(err)),
         };
         let Some(name) = reference.name().map(str::to_owned) else {
             continue;
@@ -2199,7 +2199,7 @@ fn create_backup_reference_with_observer(
                         );
                         Ok(false)
                     }
-                    Err(retry_err) => Err(SyncError::Git(retry_err)),
+                    Err(retry_err) => Err(SyncError::Repository(retry_err)),
                 }
             } else {
                 tracing::warn!(
@@ -2210,7 +2210,7 @@ fn create_backup_reference_with_observer(
                 Ok(false)
             }
         }
-        Err(err) => Err(SyncError::Git(err)),
+        Err(err) => Err(SyncError::Repository(err)),
     }
 }
 
@@ -2237,10 +2237,10 @@ fn delete_backup_reference_with_observer(
                                 );
                                 Ok(false)
                             }
-                            Err(retry_err) => Err(SyncError::Git(retry_err)),
+                            Err(retry_err) => Err(SyncError::Repository(retry_err)),
                         },
                         Err(retry_err) if retry_err.code() == ErrorCode::NotFound => Ok(false),
-                        Err(retry_err) => Err(SyncError::Git(retry_err)),
+                        Err(retry_err) => Err(SyncError::Repository(retry_err)),
                     }
                 } else {
                     tracing::warn!(
@@ -2251,10 +2251,10 @@ fn delete_backup_reference_with_observer(
                     Ok(false)
                 }
             }
-            Err(err) => Err(SyncError::Git(err)),
+            Err(err) => Err(SyncError::Repository(err)),
         },
         Err(err) if err.code() == ErrorCode::NotFound => Ok(false),
-        Err(err) => Err(SyncError::Git(err)),
+        Err(err) => Err(SyncError::Repository(err)),
     }
 }
 

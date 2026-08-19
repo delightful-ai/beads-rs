@@ -609,7 +609,7 @@ impl From<SyncError> for OpError {
 
 fn legacy_deps_migration_hint(err: &SyncError) -> Option<OpError> {
     let message = match err {
-        SyncError::Wire(WireError::Json(source)) => source.to_string(),
+        SyncError::Wire(WireError::Format(source)) => source.to_string(),
         SyncError::Wire(WireError::InvalidValue(message)) => message.clone(),
         _ => return None,
     };
@@ -739,7 +739,7 @@ mod tests {
             cc: serde_json::Value,
         }
 
-        let err = SyncError::Wire(WireError::Json(
+        let err = SyncError::Wire(WireError::Format(
             serde_json::from_str::<NeedsCc>("{}").expect_err("expected missing field json error"),
         ));
         let mapped = OpError::from(err);
