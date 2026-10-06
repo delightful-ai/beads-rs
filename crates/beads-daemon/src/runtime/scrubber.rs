@@ -70,6 +70,7 @@ pub fn scrub_store(
     let checked_at_ms = crate::WallClock::now().0;
     let store_id = store.meta.store_id();
     let layout = crate::daemon_layout_from_paths();
+    let store_dir = layout.store_dir(&store_id);
     let wal_dir = layout.wal_dir(&store_id);
     let mut io_budget = TokenBucket::new(limits.max_background_io_bytes_per_sec as u64);
 
@@ -88,6 +89,7 @@ pub fn scrub_store(
         );
         scrub_index_offsets(
             store,
+            &store_dir,
             namespace,
             limits,
             options.max_records_per_namespace,
@@ -693,6 +695,7 @@ fn scan_segment_records(
 
 fn scrub_index_offsets(
     store: &StoreRuntime,
+    store_dir: &Path,
     namespace: &NamespaceId,
     limits: &Limits,
     max_records: usize,
@@ -724,7 +727,9 @@ fn scrub_index_offsets(
 
     let mut segment_paths = BTreeMap::new();
     for segment in segments {
-        segment_paths.insert(segment.segment_id(), segment.segment_path().to_path_buf());
+        // wal.sqlite stores segment paths relative to the store dir; resolve them
+        // here, never against the daemon's working directory.
+        segment_paths.insert(segment.segment_id(), store_dir.join(segment.segment_path()));
     }
 
     if segment_paths.is_empty() {

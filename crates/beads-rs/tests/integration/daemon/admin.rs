@@ -280,6 +280,28 @@ fn admin_doctor_includes_checks() {
 }
 
 #[test]
+fn admin_doctor_index_offsets_pass_on_healthy_store() {
+    // wal.sqlite stores segment paths relative to the store dir, and the daemon's
+    // working directory is elsewhere: the check must resolve them against the store.
+    let fixture = AdminFixture::new();
+    fixture.start_daemon();
+    fixture.create_issue("index offsets healthy");
+
+    let report = fixture.admin_doctor().report;
+    let index_offsets = report
+        .checks
+        .iter()
+        .find(|check| check.id == beads_api::AdminHealthCheckId::IndexOffsets)
+        .expect("index offsets check");
+    assert_eq!(
+        index_offsets.status,
+        beads_api::AdminHealthStatus::Pass,
+        "{index_offsets:?}"
+    );
+    assert!(report.stats.index_offsets_checked > 0);
+}
+
+#[test]
 fn admin_scrub_reports_segment_header_failure() {
     let fixture = AdminFixture::new();
     fixture.start_daemon();
